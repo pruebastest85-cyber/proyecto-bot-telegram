@@ -1,13 +1,15 @@
 """
 Bot de Telegram — Panel de control del pipeline de billeteras.
-v2: ciclo automático cada AUTO_CYCLE_HOURS horas con aviso al admin.
+v3: /top con botones inline para descartar billeteras y tamaño 10/20/30.
 
 Comandos:
   /start       → ayuda
   /ciclo       → corre descubrimiento + análisis completo ahora
   /descubrir   → solo busca tokens ganadores nuevos
   /analizar    → solo analiza tokens pendientes
-  /top         → mejores 10 billeteras por score
+  /top [n]     → mejores billeteras (10 por defecto; botones para 10/20/30)
+  /descartar <address> → marcar como bot y dejar de rastrear
+  /rastrear <address>  → revertir un descarte
   /evidencia <address> → el "porqué" de una billetera
   /status      → resumen de la base de datos
 
@@ -20,8 +22,9 @@ import asyncio
 import os
 import threading
 
-from telegram import Update
-from telegram.ext import (Application, CommandHandler, ContextTypes)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes)
 
 import config
 from db import get_conn, top_wallets, wallet_evidence
@@ -33,6 +36,8 @@ from realtime import start_webhook_server, sync_helius_webhook, tracked_addresse
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 AUTO_CYCLE_HOURS = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
+
+TOP_SIZES = (10, 20, 30)
 
 # Evita que el ciclo automático y un comando manual corran a la vez
 cycle_lock = threading.Lock()
@@ -83,6 +88,119 @@ def solo_admin(func):
     return wrapper
 
 
+# ══════════════ descartar / restaurar billeteras ══════════════
+
+def discard_wallet(address: str) -> str:
+    """Marca la billetera como bot, le quita la ⭐ y resincroniza el webhook."""
+    conn = get_conn()
+    row = conn.execute("SELECT address FROM wallets WHERE address=?",
+                       (address,)).fetchone()
+    if not row:
+        conn.close()
+        return "No existe esa dirección en la base."
+    conn.execute(
+        """UPDATE wallets SET is_bot=1, is_tracked=0,
+           ai_class='descartada', ai_follow=0,
+           ai_reason='Descartada manualmente por el admin'
+           WHERE address=?""", (address,))
+    conn.commit()
+    conn.close()
+    hook = sync_helius_webhook()
+    return f"❌ {address[:8]}… descartada. {hook}"
+
+
+def restore_wallet(address: str) -> str:
+    """Revierte un descarte: vuelve a rastrear y la IA la reevaluará."""
+    conn = get_conn()
+    row = conn.execute("SELECT address FROM wallets WHERE address=?",
+                       (address,)).fetchone()
+    if not row:
+        conn.close()
+        return "No existe esa dirección en la base."
+    conn.execute(
+        """UPDATE wallets SET is_bot=0, is_tracked=1,
+           ai_class=NULL, ai_follow=NULL, ai_reason=NULL
+           WHERE address=?""", (address,))
+    conn.commit()
+    conn.close()
+    hook = sync_helius_webhook()
+    return f"⭐ {address[:8]}… vuelve a rastrearse. {hook}"
+
+
+def build_top_message(limit: int = 10):
+    """Arma el texto y el teclado inline del /top."""
+    conn = get_conn()
+    rows = top_wallets(conn, limit)
+    conn.close()
+    if not rows:
+        return ("Aún no hay billeteras. Espera el próximo ciclo o corre /ciclo.",
+                None)
+    lines = [f"🏆 *Top {len(rows)} billeteras candidatas:*\n"]
+    buttons, row_btns = [], []
+    for i, w in enumerate(rows, 1):
+        flag = " ⭐" if w["is_tracked"] else ""
+        try:
+            ai = f" · 🧠 {w['ai_class']}" if w["ai_class"] else ""
+        except (KeyError, IndexError):
+            ai = ""
+        lines.append(
+            f"{i}. `{w['address']}`\n"
+            f"   ganadores: {w['winning_tokens_count']} · "
+            f"score: {w['score']:.1f}{flag}{ai}\n")
+        row_btns.append(InlineKeyboardButton(
+            f"❌ {i}", callback_data=f"d:{limit}:{w['address']}"))
+        if len(row_btns) == 5:
+            buttons.append(row_btns)
+            row_btns = []
+    if row_btns:
+        buttons.append(row_btns)
+    buttons.append([
+        InlineKeyboardButton(("· " if n == limit else "") + f"Top {n}",
+                             callback_data=f"t:{n}")
+        for n in TOP_SIZES
+    ])
+    lines.append("\n❌ n = descartar la billetera nº n (deja de rastrearse "
+                 "y no vuelve al top).\nUsa /evidencia <address> para ver el porqué.")
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Maneja los botones inline del /top."""
+    q = update.callback_query
+    if ADMIN_ID and q.from_user.id != ADMIN_ID:
+        await q.answer("⛔ No autorizado", show_alert=True)
+        return
+    data = q.data or ""
+    if data.startswith("d:"):
+        try:
+            _, limit, address = data.split(":", 2)
+            limit = int(limit)
+        except ValueError:
+            await q.answer("Dato inválido")
+            return
+        msg = await asyncio.to_thread(discard_wallet, address)
+        await q.answer(msg[:190])
+        text, kb = await asyncio.to_thread(build_top_message, limit)
+        try:
+            await q.edit_message_text(text, parse_mode="Markdown",
+                                      reply_markup=kb)
+        except Exception:
+            pass  # el mensaje no cambió o expiró
+    elif data.startswith("t:"):
+        try:
+            limit = int(data[2:])
+        except ValueError:
+            await q.answer()
+            return
+        await q.answer()
+        text, kb = await asyncio.to_thread(build_top_message, limit)
+        try:
+            await q.edit_message_text(text, parse_mode="Markdown",
+                                      reply_markup=kb)
+        except Exception:
+            pass
+
+
 @solo_admin
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -91,7 +209,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/ciclo — descubrimiento + análisis ahora\n"
         "/descubrir — buscar tokens ganadores\n"
         "/analizar — analizar compradores tempranos\n"
-        "/top — mejores billeteras\n"
+        "/top [n] — mejores billeteras (10/20/30) con botón ❌ para descartar\n"
+        "/descartar <address> — dejar de rastrear una billetera\n"
+        "/rastrear <address> — revertir un descarte\n"
         "/evidencia <address> — el porqué de una billetera\n"
         "/perfil <address> — investigar una billetera a fondo\n"
         "/ia <address> — veredicto de la IA sobre una billetera\n"
@@ -124,26 +244,33 @@ async def cmd_ciclo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @solo_admin
 async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    conn = get_conn()
-    rows = top_wallets(conn, 10)
-    conn.close()
-    if not rows:
-        await update.message.reply_text(
-            "Aún no hay billeteras. Espera el próximo ciclo o corre /ciclo.")
-        return
-    lines = ["🏆 *Top billeteras candidatas:*\n"]
-    for i, w in enumerate(rows, 1):
-        flag = " ⭐" if w["is_tracked"] else ""
+    limit = 10
+    if ctx.args:
         try:
-            ai = f" · 🧠 {w['ai_class']}" if w["ai_class"] else ""
-        except (KeyError, IndexError):
-            ai = ""
-        lines.append(
-            f"{i}. `{w['address']}`\n"
-            f"   ganadores: {w['winning_tokens_count']} · "
-            f"score: {w['score']:.1f}{flag}{ai}\n")
-    lines.append("\nUsa /evidencia <address> para ver el porqué.")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            limit = max(5, min(30, int(ctx.args[0])))
+        except ValueError:
+            pass
+    text, kb = await asyncio.to_thread(build_top_message, limit)
+    await update.message.reply_text(text, parse_mode="Markdown",
+                                    reply_markup=kb)
+
+
+@solo_admin
+async def cmd_descartar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Uso: /descartar <address>")
+        return
+    msg = await asyncio.to_thread(discard_wallet, ctx.args[0].strip())
+    await update.message.reply_text(msg)
+
+
+@solo_admin
+async def cmd_rastrear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Uso: /rastrear <address>")
+        return
+    msg = await asyncio.to_thread(restore_wallet, ctx.args[0].strip())
+    await update.message.reply_text(msg)
 
 
 @solo_admin
@@ -230,8 +357,13 @@ async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = ["📡 *Últimas señales:*\n"]
     for s in rows:
         hace = (_t.time() - s["ts"]) / 3600
+        try:
+            side = s["side"] or "compra"
+        except (KeyError, IndexError):
+            side = "compra"
+        emoji = "🟢" if side == "compra" else "🔴"
         lines.append(
-            f"• `{s['mint'][:12]}…` — {s['sol']:.2f} SOL por "
+            f"• {emoji} {side} `{s['mint'][:12]}…` — {s['sol']:.2f} SOL por "
             f"`{s['wallet'][:8]}…` hace {hace:.1f}h")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -245,13 +377,16 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     wallets = conn.execute("SELECT COUNT(*) c FROM wallets").fetchone()["c"]
     tracked = conn.execute(
         "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
+    descartadas = conn.execute(
+        "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
     conn.close()
     await update.message.reply_text(
         f"📊 *Estado del sistema*\n\n"
         f"⚙️ Ciclo automático: cada {AUTO_CYCLE_HOURS:g} h\n"
         f"Tokens ganadores: {tokens} ({pend} pendientes)\n"
         f"Billeteras registradas: {wallets}\n"
-        f"Billeteras rastreadas ⭐: {tracked}",
+        f"Billeteras rastreadas ⭐: {tracked}\n"
+        f"Descartadas/bots ❌: {descartadas}",
         parse_mode="Markdown",
     )
 
@@ -268,11 +403,14 @@ def main():
     app.add_handler(CommandHandler("descubrir", cmd_descubrir))
     app.add_handler(CommandHandler("analizar", cmd_analizar))
     app.add_handler(CommandHandler("top", cmd_top))
+    app.add_handler(CommandHandler("descartar", cmd_descartar))
+    app.add_handler(CommandHandler("rastrear", cmd_rastrear))
     app.add_handler(CommandHandler("evidencia", cmd_evidencia))
     app.add_handler(CommandHandler("perfil", cmd_perfil))
     app.add_handler(CommandHandler("ia", cmd_ia))
     app.add_handler(CommandHandler("senales", cmd_senales))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CallbackQueryHandler(on_callback))
 
     # Servidor de webhooks para señales en tiempo real (Fase 2)
     start_webhook_server()

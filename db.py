@@ -7,6 +7,7 @@ Esquema:
   winning_tokens   → tokens que detectamos como ganadores y por qué
   wallets          → billeteras candidatas con sus métricas acumuladas
   appearances      → relación billetera↔token: la EVIDENCIA del porqué
+  signals          → operaciones en tiempo real de billeteras ⭐
 """
 
 import sqlite3
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS signals (
     wallet          TEXT NOT NULL,
     mint            TEXT NOT NULL,
     sol             REAL,
-    ts              INTEGER
+    ts              INTEGER,
+    side            TEXT DEFAULT 'compra'  -- 'compra' o 'venta'
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
@@ -84,6 +86,12 @@ def get_conn() -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
+    # Migración: columna side en signals (bases creadas antes de la v3)
+    try:
+        conn.execute(
+            "ALTER TABLE signals ADD COLUMN side TEXT DEFAULT 'compra'")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -148,6 +156,7 @@ def recompute_scores(conn, min_winning_tokens: int):
       apariciones en tokens ganadores (peso fuerte)
       + qué tan temprano compra en promedio (peso medio)
     Las billeteras que superan el umbral pasan a is_tracked = 1.
+    Las marcadas como bot (incluye descartes manuales) quedan fuera.
     """
     conn.execute(
         """UPDATE wallets SET score =
