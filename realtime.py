@@ -28,6 +28,7 @@ from flask import Flask, request, jsonify
 
 import config
 from db import get_conn
+from token_check import analyze_token, format_token_block, ai_payload
 
 LAMPORTS = 1_000_000_000
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
@@ -37,7 +38,6 @@ ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 HELIUS_WEBHOOKS = "https://api.helius.xyz/v0/webhooks"
-RUGCHECK_SUMMARY = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 
 IGNORED_MINTS = {
     "So11111111111111111111111111111111111111112",
@@ -104,51 +104,6 @@ def sync_helius_webhook() -> str:
         return f"Webhook creado: {len(addrs)} billeteras vigiladas"
     except requests.RequestException as e:
         return f"Error sincronizando webhook: {e}"
-
-
-def _rugcheck(mint: str) -> dict:
-    try:
-        r = requests.get(RUGCHECK_SUMMARY.format(mint=mint), timeout=15)
-        if r.status_code == 200:
-            d = r.json()
-            risks = [x.get("name", "") for x in (d.get("risks") or [])
-                     if x.get("level") in ("danger", "warn")]
-            return {"score": d.get("score"), "risks": risks[:5]}
-    except requests.RequestException:
-        pass
-    return {"score": None, "risks": []}
-
-
-def _token_info(mint: str) -> dict:
-    """Datos del token en DexScreener, incluyendo web y redes sociales."""
-    out = {"symbol": "?", "liq": None, "mc": None, "price_change_h1": None,
-           "price": None, "websites": [], "socials": []}
-    try:
-        r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
-                         timeout=15)
-        pairs = (r.json() or {}).get("pairs") or []
-        if pairs:
-            p = pairs[0]
-            try:
-                precio = float(p.get("priceUsd") or 0) or None
-            except (TypeError, ValueError):
-                precio = None
-            out.update({
-                "symbol": (p.get("baseToken") or {}).get("symbol", "?"),
-                "liq": (p.get("liquidity") or {}).get("usd"),
-                "mc": p.get("fdv"),
-                "price_change_h1": (p.get("priceChange") or {}).get("h1"),
-                "price": precio,
-            })
-            info = p.get("info") or {}
-            out["websites"] = [w.get("url") for w in (info.get("websites") or [])
-                               if w.get("url")][:2]
-            out["socials"] = [
-                f"{(s.get('type') or 'link').capitalize()}: {s.get('url')}"
-                for s in (info.get("socials") or []) if s.get("url")][:4]
-    except requests.RequestException:
-        pass
-    return out
 
 
 MODEL_FAST = "claude-haiku-4-5-20251001"
@@ -260,38 +215,43 @@ def process_transactions(txs: list[dict]):
             "WHERE mint=? AND ts>=? AND side=?",
             (trade["mint"], since, trade["side"])).fetchone()["c"]
 
-        info = _token_info(trade["mint"])
-        rug = _rugcheck(trade["mint"])
+        t = analyze_token(trade["mint"])
         w = conn.execute(
             "SELECT ai_class, score, alias, pnl_30d, pnl_total "
             "FROM wallets WHERE address=?",
             (trade["wallet"],)).fetchone()
 
-        # Guardar precio y símbolo del momento para medir el resultado después
-        if info.get("price"):
-            conn.execute(
-                "UPDATE signals SET price_usd=?, symbol=? WHERE signature=?",
-                (info["price"], info.get("symbol"), trade["signature"]))
-            conn.commit()
+        # Guardar precio, símbolo, MC y liquidez del momento
+        conn.execute(
+            "UPDATE signals SET price_usd=?, symbol=?, mc=?, liq=? "
+            "WHERE signature=?",
+            (t.get("price"), t.get("symbol"), t.get("mc"), t.get("liq"),
+             trade["signature"]))
+        conn.commit()
 
-        # Track record real de esta billetera (señales pasadas medidas)
+        # Track record real y patrón de MC de esta billetera
         try:
             from signal_tracker import wallet_track_record, format_track_record
             track = wallet_track_record(conn, trade["wallet"])
             track_line = format_track_record(track)
         except Exception:
             track, track_line = None, ""
+        try:
+            from wallet_score import wallet_pattern, format_pattern
+            patron = wallet_pattern(conn, trade["wallet"])
+            patron_line = format_pattern(patron, t.get("mc"))
+        except Exception:
+            patron, patron_line = None, ""
 
         # Señal importante → modelo potente
         importante = consensus >= 2 or trade["sol"] >= 5
         verdict = _ai_signal_verdict({
             "accion": trade["side"],
-            "token": {k: info[k] for k in
-                      ("symbol", "liq", "mc", "price_change_h1")},
-            "rugcheck": rug,
+            "token": ai_payload(t),
             "monto_sol": round(trade["sol"], 2),
             "billetera_clase": _wget(w, "ai_class"),
             "track_record_billetera": track,
+            "patron_mc_billetera": patron,
             "consenso_billeteras": consensus,
         }, smart=importante) or {}
 
@@ -304,15 +264,12 @@ def process_transactions(txs: list[dict]):
                     f"{'compraron' if es_compra else 'vendieron'} este token "
                     f"en {CONSENSUS_WINDOW_MIN} min*"
                     if consensus >= 2 else "")
-        liq = f"${info['liq']:,.0f}" if info.get("liq") else "?"
-        mc = f"${info['mc']:,.0f}" if info.get("mc") else "?"
-        risks = ("\n⚠️ Riesgos: " + ", ".join(rug["risks"])) if rug["risks"] else ""
-
+        token_block = format_token_block(t)
         links = []
-        if info["websites"]:
-            links.append("🌐 " + " · ".join(info["websites"]))
-        if info["socials"]:
-            links.append("📱 " + "\n📱 ".join(info["socials"]))
+        if t["websites"]:
+            links.append("🌐 " + " · ".join(t["websites"]))
+        if t["socials"]:
+            links.append("📱 " + "\n📱 ".join(t["socials"]))
         redes = ("\n" + "\n".join(links) + "\n") if links else ""
 
         alias = _wget(w, "alias") or f"{trade['wallet'][:8]}…"
@@ -325,21 +282,22 @@ def process_transactions(txs: list[dict]):
             partes.append(f"histórico: {pnltot:+.1f} SOL")
         pnl_txt = ("\n💰 PnL billetera → " + " · ".join(partes)) if partes else ""
         track_txt = f"\n{track_line}" if track_line else ""
+        pat_txt = f"\n{patron_line}" if patron_line else ""
 
         tg_send(
             f"{side_icon} *SEÑAL: {side_txt} de billetera ⭐*{cons_txt}\n\n"
-            f"Token: *{info['symbol']}*\n`{trade['mint']}`\n"
-            f"Liquidez: {liq} · MC: {mc}\n"
+            f"Token: *{t['symbol']}*\n`{trade['mint']}`\n"
+            f"{token_block}\n"
             f"{verbo}: {trade['sol']:.2f} SOL\n"
             f"👤 Billetera: *{alias}* ({clase})\n"
             f"`{trade['wallet']}`"
-            f"{pnl_txt}{track_txt}"
-            f"{risks}\n{redes}\n"
+            f"{pnl_txt}{track_txt}{pat_txt}"
+            f"\n{redes}\n"
             f"{v_icon} 🧠 *{verdict.get('veredicto', 'sin veredicto').upper()}*: "
             f"_{verdict.get('razon', '')}_\n\n"
             f"📊 dexscreener.com/solana/{trade['mint']}\n"
             f"📈 gmgn.ai/sol/token/{trade['mint']}")
-        print(f"📡 Señal {trade['side']}: {info['symbol']} "
+        print(f"📡 Señal {trade['side']}: {t['symbol']} "
               f"por {trade['wallet'][:8]}")
     conn.close()
 

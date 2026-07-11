@@ -75,7 +75,9 @@ def build_top_message(limit: int = 10):
         ai_class = _campo(w, "ai_class")
         ai = f" · 🧠 {ai_class}" if ai_class else ""
         alias = _campo(w, "alias")
-        nombre = f"👤 *{alias}*\n   " if alias else ""
+        ws = _campo(w, "wallet_score")
+        etiqueta_ws = f" · 🧮 {ws:.0f}/100" if ws is not None else ""
+        nombre = f"👤 *{alias}*{etiqueta_ws}\n   " if alias else ""
         partes = []
         p30, ptot = _campo(w, "pnl_30d"), _campo(w, "pnl_total")
         if p30 is not None:

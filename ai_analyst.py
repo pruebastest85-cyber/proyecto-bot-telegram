@@ -226,11 +226,17 @@ def evaluate_tracked(conn) -> int:
         if not verdict:
             continue
 
+        try:
+            from wallet_score import compute_score
+            wscore = compute_score(profile, track)["score"]
+        except Exception:
+            wscore = None
+
         seguir = 1 if verdict["seguir"] else 0
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
                alias=COALESCE(?, alias),
-               pnl_30d=?, pnl_total=?, pnl_updated=?,
+               pnl_30d=?, pnl_total=?, pnl_updated=?, wallet_score=?,
                is_tracked=?, is_bot=CASE WHEN ?='bot' THEN 1 ELSE is_bot END
                WHERE address=?""",
             (verdict["clasificacion"], seguir,
@@ -238,7 +244,7 @@ def evaluate_tracked(conn) -> int:
              verdict.get("alias"),
              round(profile.get("pnl_30d_sol", 0.0), 2),
              round(profile.get("pnl_total_sol", 0.0), 2),
-             now_iso(),
+             now_iso(), wscore,
              seguir, verdict["clasificacion"], addr),
         )
         conn.commit()

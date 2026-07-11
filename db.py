@@ -83,7 +83,7 @@ def get_conn() -> sqlite3.Connection:
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
                      ("ai_reason", "TEXT"), ("alias", "TEXT"),
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
-                     ("pnl_updated", "TEXT")]:
+                     ("pnl_updated", "TEXT"), ("wallet_score", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -92,7 +92,7 @@ def get_conn() -> sqlite3.Connection:
                      ("price_usd", "REAL"), ("price_1h", "REAL"),
                      ("price_24h", "REAL"), ("chg_1h", "REAL"),
                      ("chg_24h", "REAL"), ("alerted_pct", "REAL DEFAULT 0"),
-                     ("symbol", "TEXT")]:
+                     ("symbol", "TEXT"), ("mc", "REAL"), ("liq", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -180,7 +180,7 @@ def recompute_scores(conn, min_winning_tokens: int):
 def top_wallets(conn, limit=20):
     return conn.execute(
         """SELECT address, winning_tokens_count, total_buys_sol, score, is_tracked,
-                  ai_class, alias, pnl_30d, pnl_total
+                  ai_class, alias, pnl_30d, pnl_total, wallet_score
            FROM wallets WHERE is_bot = 0
            ORDER BY score DESC LIMIT ?""",
         (limit,),

@@ -136,6 +136,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/rastrear <address> — revertir un descarte\n"
         "/evidencia <address> — el porqué de una billetera\n"
         "/perfil <address> — investigar una billetera a fondo\n"
+        "/ficha <address> — Wallet Score 0-100 con ROI y riesgo\n"
+        "/preguntar <texto> — pregúntale a la IA sobre tu base\n"
         "/ia <address> — veredicto de la IA sobre una billetera\n"
         "/senales — últimas señales en tiempo real\n"
         "/status — estado de la base de datos",
@@ -267,6 +269,50 @@ async def cmd_ia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_ficha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Uso: /ficha <address>")
+        return
+    address = ctx.args[0].strip()
+    await update.message.reply_text("🧮 Calculando Wallet Score… (~1 min)")
+
+    def _run():
+        from wallet_score import compute_score, format_ficha
+        from signal_tracker import wallet_track_record, format_track_record
+        p = profile_wallet(address)
+        if not p["tx_sampled"]:
+            return None
+        conn = get_conn()
+        track = wallet_track_record(conn, address)
+        row = conn.execute("SELECT alias FROM wallets WHERE address=?",
+                           (address,)).fetchone()
+        conn.close()
+        s = compute_score(p, track)
+        alias = row["alias"] if row and row["alias"] else None
+        return format_ficha(address, s, alias, format_track_record(track))
+
+    ficha = await asyncio.to_thread(_run)
+    if not ficha:
+        await update.message.reply_text("Sin transacciones para esa dirección.")
+        return
+    await update.message.reply_text(ficha, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_preguntar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text(
+            "Uso: /preguntar <pregunta>\nEj: /preguntar ¿qué billetera "
+            "tuvo mejor resultado en sus señales?")
+        return
+    pregunta = " ".join(ctx.args)
+    await update.message.reply_text("🤔 Consultando la base…")
+    from ai_chat import answer_question
+    respuesta = await asyncio.to_thread(answer_question, pregunta)
+    await update.message.reply_text(respuesta)
+
+
+@solo_admin
 async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     rows = conn.execute(
@@ -341,6 +387,8 @@ def main():
     app.add_handler(CommandHandler("rastrear", cmd_rastrear))
     app.add_handler(CommandHandler("evidencia", cmd_evidencia))
     app.add_handler(CommandHandler("perfil", cmd_perfil))
+    app.add_handler(CommandHandler("ficha", cmd_ficha))
+    app.add_handler(CommandHandler("preguntar", cmd_preguntar))
     app.add_handler(CommandHandler("ia", cmd_ia))
     app.add_handler(CommandHandler("senales", cmd_senales))
     app.add_handler(CommandHandler("status", cmd_status))
