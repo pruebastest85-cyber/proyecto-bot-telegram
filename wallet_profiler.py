@@ -4,14 +4,15 @@ Perfilador de billeteras: investiga a fondo una billetera candidata.
 Responde las preguntas clave:
   - ¿Sigue activa? (última transacción, ritmo reciente)
   - ¿En qué otros tokens operó y cuánto ganó/perdió en cada uno?
-  - ¿Cuál es su PnL realizado aproximado en SOL?
+  - ¿Cuál es su PnL realizado aproximado en SOL? (total y últimos 30 días)
   - ¿Parece bot? (frecuencia de transacciones)
 
 Método: descarga sus últimas ~300 transacciones parseadas (Helius),
 detecta compras (SOL sale + token entra) y ventas (token sale + SOL
 entra) y agrega por token. El PnL es REALIZADO y aproximado: SOL que
 entró por ventas menos SOL que salió por compras; no incluye tokens
-que aún mantiene sin vender.
+que aún mantiene sin vender. El PnL 30d se calcula sobre las txs de
+la muestra que caen en los últimos 30 días.
 """
 
 import time
@@ -78,6 +79,7 @@ def profile_wallet(address: str) -> dict:
         "tx_7d": 0,
         "tokens": {},        # mint -> métricas
         "pnl_total_sol": 0.0,
+        "pnl_30d_sol": 0.0,
         "possible_bot": False,
     }
     if not txs:
@@ -85,7 +87,8 @@ def profile_wallet(address: str) -> dict:
 
     result["last_tx_ts"] = txs[0].get("timestamp")
     tokens = defaultdict(lambda: {"sol_out": 0.0, "sol_in": 0.0,
-                                  "buys": 0, "sells": 0, "symbol": ""})
+                                  "buys": 0, "sells": 0, "symbol": "",
+                                  "first_buy_ts": None, "first_sell_ts": None})
     timestamps = []
 
     for tx in txs:
@@ -97,6 +100,7 @@ def profile_wallet(address: str) -> dict:
             continue
 
         delta = _sol_delta(tx, address)
+        reciente = (now - ts) <= 30 * 86400
         for t in (tx.get("tokenTransfers") or []):
             mint = t.get("mint")
             if not mint or mint in STABLE_MINTS:
@@ -106,11 +110,19 @@ def profile_wallet(address: str) -> dict:
             if t.get("toUserAccount") == address and delta < -0.001:
                 info["buys"] += 1
                 info["sol_out"] += abs(delta)
+                if ts and (info["first_buy_ts"] is None or ts < info["first_buy_ts"]):
+                    info["first_buy_ts"] = ts
+                if reciente:
+                    result["pnl_30d_sol"] += delta
                 break  # una tx cuenta una vez
             # Venta: envió token y su SOL subió
             if t.get("fromUserAccount") == address and delta > 0.001:
                 info["sells"] += 1
                 info["sol_in"] += delta
+                if ts and (info["first_sell_ts"] is None or ts < info["first_sell_ts"]):
+                    info["first_sell_ts"] = ts
+                if reciente:
+                    result["pnl_30d_sol"] += delta
                 break
 
     # ¿Bot? Más de BOT_TX_PER_HOUR_LIMIT txs/hora sostenidas en la muestra
@@ -119,9 +131,26 @@ def profile_wallet(address: str) -> dict:
         if len(timestamps) / span_h > config.BOT_TX_PER_HOUR_LIMIT:
             result["possible_bot"] = True
 
+    holds = []
     for mint, info in tokens.items():
         info["pnl_sol"] = info["sol_in"] - info["sol_out"]
         result["pnl_total_sol"] += info["pnl_sol"]
+        if info["first_buy_ts"] and info["first_sell_ts"] \
+                and info["first_sell_ts"] > info["first_buy_ts"]:
+            holds.append((info["first_sell_ts"] - info["first_buy_ts"]) / 60)
+    # Retención mediana: ¿vende en minutos o aguanta horas?
+    if holds:
+        holds.sort()
+        result["hold_median_min"] = round(holds[len(holds) // 2], 1)
+    else:
+        result["hold_median_min"] = None
+    # Win rate sobre posiciones cerradas
+    closed = [i for i in tokens.values() if i["sells"] > 0]
+    if closed:
+        result["win_rate_pct"] = round(
+            100 * sum(1 for i in closed if i["pnl_sol"] > 0) / len(closed))
+    else:
+        result["win_rate_pct"] = None
     result["tokens"] = dict(tokens)
     return result
 
@@ -162,7 +191,15 @@ def format_profile(p: dict) -> str:
                  f"{len(traded)}")
     if closed:
         lines.append(f"✅ Con ventas: {closed} · ganadores: {wins}")
-    lines.append(f"💰 *PnL realizado aprox:* {p['pnl_total_sol']:+.2f} SOL\n")
+    lines.append(f"💰 *PnL realizado (muestra):* {p['pnl_total_sol']:+.2f} SOL")
+    lines.append(f"📅 *PnL últimos 30 días:* {p['pnl_30d_sol']:+.2f} SOL")
+    if p.get("win_rate_pct") is not None:
+        lines.append(f"🎯 *Win rate (cerradas):* {p['win_rate_pct']}%")
+    if p.get("hold_median_min") is not None:
+        h = p["hold_median_min"]
+        ret = f"{h:.0f} min" if h < 120 else f"{h / 60:.1f} h"
+        lines.append(f"⏱ *Retención mediana:* {ret}")
+    lines.append("")
 
     lines.append("*Top operaciones:*")
     for mint, i in traded[:6]:
@@ -172,6 +209,7 @@ def format_profile(p: dict) -> str:
     if len(traded) > 6:
         lines.append(f"…y {len(traded) - 6} más")
 
-    lines.append("\n_PnL realizado: no incluye posiciones aún abiertas._")
+    lines.append("\n_PnL realizado sobre las últimas ~300 txs; "
+                 "no incluye posiciones aún abiertas._")
     lines.append(f"🔗 gmgn.ai/sol/address/{addr}")
     return "\n".join(lines)

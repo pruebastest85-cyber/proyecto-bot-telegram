@@ -1,8 +1,8 @@
 """
 Fase 2 — Monitoreo en tiempo real de billeteras ⭐.
 
-v3: detecta COMPRAS y VENTAS, e incluye en cada señal el link a
-DexScreener y las redes sociales del token (si DexScreener las tiene).
+v4: detecta COMPRAS y VENTAS; cada señal incluye alias IA y PnL de la
+billetera, link a DexScreener y redes sociales del token.
 
 Piezas:
   1. Servidor de webhooks (Flask): recibe de Helius cada transacción
@@ -10,11 +10,10 @@ Piezas:
   2. Sincronizador: registra/actualiza el webhook en Helius con la
      lista actual de billeteras ⭐ (se llama al final de cada ciclo).
   3. Motor de señales: cuando una ⭐ COMPRA o VENDE un token →
-     RugCheck (seguridad) + DexScreener (datos + redes sociales) +
-     consenso entre billeteras + veredicto IA → alerta a Telegram.
+     RugCheck + DexScreener + consenso + veredicto IA → alerta TG.
 
 Variables de entorno usadas:
-  PUBLIC_URL   → dominio público de Railway (ej. worker-xxx.up.railway.app)
+  PUBLIC_URL   → dominio público de Railway
   PORT         → lo inyecta Railway automáticamente
   + las ya existentes (HELIUS_API_KEY, TELEGRAM_*, ANTHROPIC_API_KEY)
 """
@@ -41,15 +40,13 @@ HELIUS_WEBHOOKS = "https://api.helius.xyz/v0/webhooks"
 RUGCHECK_SUMMARY = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 
 IGNORED_MINTS = {
-    "So11111111111111111111111111111111111111112",   # WSOL
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "So11111111111111111111111111111111111111112",
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 }
-MIN_SIGNAL_SOL = 0.3          # ignorar operaciones menores
-CONSENSUS_WINDOW_MIN = 45     # ventana para detectar consenso
+MIN_SIGNAL_SOL = 0.3
+CONSENSUS_WINDOW_MIN = 45
 
-
-# ══════════════ utilidades ══════════════
 
 def tg_send(text: str):
     """Envía mensaje al admin vía HTTP API (seguro desde cualquier hilo)."""
@@ -74,8 +71,6 @@ def tracked_addresses() -> list[str]:
     return [r["address"] for r in rows]
 
 
-# ══════════════ sincronización del webhook en Helius ══════════════
-
 def sync_helius_webhook() -> str:
     """Crea o actualiza el webhook de Helius con las billeteras ⭐."""
     if not PUBLIC_URL:
@@ -91,7 +86,7 @@ def sync_helius_webhook() -> str:
         "transactionTypes": ["ANY"],
         "accountAddresses": addrs,
         "webhookType": "enhanced",
-        "authHeader": config.HELIUS_API_KEY,  # para validar origen
+        "authHeader": config.HELIUS_API_KEY,
     }
     try:
         r = requests.get(HELIUS_WEBHOOKS, params=params, timeout=20)
@@ -111,8 +106,6 @@ def sync_helius_webhook() -> str:
         return f"Error sincronizando webhook: {e}"
 
 
-# ══════════════ motor de señales ══════════════
-
 def _rugcheck(mint: str) -> dict:
     try:
         r = requests.get(RUGCHECK_SUMMARY.format(mint=mint), timeout=15)
@@ -129,18 +122,23 @@ def _rugcheck(mint: str) -> dict:
 def _token_info(mint: str) -> dict:
     """Datos del token en DexScreener, incluyendo web y redes sociales."""
     out = {"symbol": "?", "liq": None, "mc": None, "price_change_h1": None,
-           "websites": [], "socials": []}
+           "price": None, "websites": [], "socials": []}
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
                          timeout=15)
         pairs = (r.json() or {}).get("pairs") or []
         if pairs:
             p = pairs[0]
+            try:
+                precio = float(p.get("priceUsd") or 0) or None
+            except (TypeError, ValueError):
+                precio = None
             out.update({
                 "symbol": (p.get("baseToken") or {}).get("symbol", "?"),
                 "liq": (p.get("liquidity") or {}).get("usd"),
                 "mc": p.get("fdv"),
                 "price_change_h1": (p.get("priceChange") or {}).get("h1"),
+                "price": precio,
             })
             info = p.get("info") or {}
             out["websites"] = [w.get("url") for w in (info.get("websites") or [])
@@ -153,31 +151,42 @@ def _token_info(mint: str) -> dict:
     return out
 
 
-def _ai_signal_verdict(payload: dict) -> dict | None:
+MODEL_FAST = "claude-haiku-4-5-20251001"
+MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
+
+
+def _ai_signal_verdict(payload: dict, smart: bool = False) -> dict | None:
+    """Veredicto IA de la señal. smart=True usa el modelo potente
+    (señales importantes: consenso o montos grandes)."""
     if not ANTHROPIC_API_KEY:
         return None
     prompt = (
         "Eres analista de riesgo en memecoins de Solana. Una billetera "
         "rastreada (clasificada como trader/sniper rentable) acaba de "
         "operar este token; el campo 'accion' dice si fue compra o venta. "
-        "Si es venta, evalúa si conviene salir. Datos:\n"
+        "El campo 'track_record_billetera' resume cómo les fue a sus "
+        "señales anteriores (dato clave). Si es venta, evalúa si conviene "
+        "salir. Datos:\n"
         f"{json.dumps(payload, ensure_ascii=False)}\n\n"
         'Responde SOLO JSON: {"veredicto":"entrar"|"precaucion"|"evitar"|"salir",'
         '"razon":"máx 2 frases en español"}')
+    modelo = MODEL_SMART if smart else MODEL_FAST
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY,
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 200,
+            json={"model": modelo, "max_tokens": 200,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=45)
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json()["content"])
         return json.loads(text.replace("```json", "").replace("```", "").strip())
     except Exception as e:
-        print(f"· IA señal falló: {e}")
+        print(f"· IA señal falló ({modelo}): {e}")
+        if smart:  # respaldo: reintentar con el modelo rápido
+            return _ai_signal_verdict(payload, smart=False)
         return None
 
 
@@ -198,7 +207,6 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
         if not mint or mint in IGNORED_MINTS:
             continue
 
-        # Compra: la rastreada RECIBIÓ el token y su SOL bajó
         buyer = t.get("toUserAccount")
         if buyer in tracked:
             delta = _wallet_sol_delta(tx, buyer)
@@ -208,7 +216,6 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
                         "signature": tx.get("signature", ""),
                         "ts": tx.get("timestamp") or int(time.time())}
 
-        # Venta: la rastreada ENVIÓ el token y su SOL subió
         seller = t.get("fromUserAccount")
         if seller in tracked:
             delta = _wallet_sol_delta(tx, seller)
@@ -220,6 +227,13 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
     return None
 
 
+def _wget(row, key):
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def process_transactions(txs: list[dict]):
     tracked = set(tracked_addresses())
     if not tracked:
@@ -229,7 +243,6 @@ def process_transactions(txs: list[dict]):
         trade = _detect_trade(tx, tracked)
         if not trade:
             continue
-        # dedupe por firma
         cur = conn.execute(
             "INSERT OR IGNORE INTO signals (signature, wallet, mint, sol, ts,"
             " side) VALUES (?,?,?,?,?,?)",
@@ -241,7 +254,6 @@ def process_transactions(txs: list[dict]):
 
         es_compra = trade["side"] == "compra"
 
-        # consenso: ¿cuántas ⭐ distintas hicieron lo mismo hace poco?
         since = trade["ts"] - CONSENSUS_WINDOW_MIN * 60
         consensus = conn.execute(
             "SELECT COUNT(DISTINCT wallet) c FROM signals "
@@ -251,18 +263,37 @@ def process_transactions(txs: list[dict]):
         info = _token_info(trade["mint"])
         rug = _rugcheck(trade["mint"])
         w = conn.execute(
-            "SELECT ai_class, score FROM wallets WHERE address=?",
+            "SELECT ai_class, score, alias, pnl_30d, pnl_total "
+            "FROM wallets WHERE address=?",
             (trade["wallet"],)).fetchone()
 
+        # Guardar precio y símbolo del momento para medir el resultado después
+        if info.get("price"):
+            conn.execute(
+                "UPDATE signals SET price_usd=?, symbol=? WHERE signature=?",
+                (info["price"], info.get("symbol"), trade["signature"]))
+            conn.commit()
+
+        # Track record real de esta billetera (señales pasadas medidas)
+        try:
+            from signal_tracker import wallet_track_record, format_track_record
+            track = wallet_track_record(conn, trade["wallet"])
+            track_line = format_track_record(track)
+        except Exception:
+            track, track_line = None, ""
+
+        # Señal importante → modelo potente
+        importante = consensus >= 2 or trade["sol"] >= 5
         verdict = _ai_signal_verdict({
             "accion": trade["side"],
             "token": {k: info[k] for k in
                       ("symbol", "liq", "mc", "price_change_h1")},
             "rugcheck": rug,
             "monto_sol": round(trade["sol"], 2),
-            "billetera_clase": w["ai_class"] if w else None,
+            "billetera_clase": _wget(w, "ai_class"),
+            "track_record_billetera": track,
             "consenso_billeteras": consensus,
-        }) or {}
+        }, smart=importante) or {}
 
         side_icon = "🟢" if es_compra else "🔴"
         side_txt = "COMPRA" if es_compra else "VENTA"
@@ -284,12 +315,25 @@ def process_transactions(txs: list[dict]):
             links.append("📱 " + "\n📱 ".join(info["socials"]))
         redes = ("\n" + "\n".join(links) + "\n") if links else ""
 
+        alias = _wget(w, "alias") or f"{trade['wallet'][:8]}…"
+        clase = _wget(w, "ai_class") or "?"
+        pnl30, pnltot = _wget(w, "pnl_30d"), _wget(w, "pnl_total")
+        partes = []
+        if pnl30 is not None:
+            partes.append(f"30d: {pnl30:+.1f} SOL")
+        if pnltot is not None:
+            partes.append(f"histórico: {pnltot:+.1f} SOL")
+        pnl_txt = ("\n💰 PnL billetera → " + " · ".join(partes)) if partes else ""
+        track_txt = f"\n{track_line}" if track_line else ""
+
         tg_send(
             f"{side_icon} *SEÑAL: {side_txt} de billetera ⭐*{cons_txt}\n\n"
             f"Token: *{info['symbol']}*\n`{trade['mint']}`\n"
             f"Liquidez: {liq} · MC: {mc}\n"
-            f"{verbo}: {trade['sol']:.2f} SOL · billetera "
-            f"`{trade['wallet'][:8]}…` ({w['ai_class'] if w else '?'})"
+            f"{verbo}: {trade['sol']:.2f} SOL\n"
+            f"👤 Billetera: *{alias}* ({clase})\n"
+            f"`{trade['wallet']}`"
+            f"{pnl_txt}{track_txt}"
             f"{risks}\n{redes}\n"
             f"{v_icon} 🧠 *{verdict.get('veredicto', 'sin veredicto').upper()}*: "
             f"_{verdict.get('razon', '')}_\n\n"
@@ -299,8 +343,6 @@ def process_transactions(txs: list[dict]):
               f"por {trade['wallet'][:8]}")
     conn.close()
 
-
-# ══════════════ servidor Flask ══════════════
 
 flask_app = Flask(__name__)
 
@@ -312,14 +354,12 @@ def health():
 
 @flask_app.post("/helius")
 def helius_hook():
-    # Validar que viene de nuestro webhook (authHeader configurado)
     auth = request.headers.get("Authorization", "")
     if auth != config.HELIUS_API_KEY:
         return jsonify({"error": "unauthorized"}), 401
     txs = request.get_json(silent=True) or []
     if isinstance(txs, dict):
         txs = [txs]
-    # Procesar en segundo plano para responder rápido a Helius
     threading.Thread(target=process_transactions, args=(txs,),
                      daemon=True).start()
     return jsonify({"ok": True})

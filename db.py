@@ -36,9 +36,9 @@ CREATE TABLE IF NOT EXISTS wallets (
     winning_tokens_count INTEGER DEFAULT 0,
     total_buys_sol  REAL DEFAULT 0,
     est_realized_sol REAL DEFAULT 0,
-    label           TEXT,              -- etiqueta pública si se conoce (Arkham, etc.)
+    label           TEXT,
     is_bot          INTEGER DEFAULT 0,
-    is_tracked      INTEGER DEFAULT 0, -- 1 = pasa a monitoreo en tiempo real
+    is_tracked      INTEGER DEFAULT 0,
     score           REAL DEFAULT 0
 );
 
@@ -48,9 +48,9 @@ CREATE TABLE IF NOT EXISTS appearances (
     mint            TEXT NOT NULL,
     buy_sol         REAL,
     buy_time        TEXT,
-    buy_rank        INTEGER,           -- posición entre los primeros compradores
+    buy_rank        INTEGER,
     est_pnl_sol     REAL,
-    reason          TEXT,              -- explicación legible: el "porqué"
+    reason          TEXT,
     UNIQUE(wallet, mint),
     FOREIGN KEY(wallet) REFERENCES wallets(address),
     FOREIGN KEY(mint) REFERENCES winning_tokens(mint)
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS signals (
     mint            TEXT NOT NULL,
     sol             REAL,
     ts              INTEGER,
-    side            TEXT DEFAULT 'compra'  -- 'compra' o 'venta'
+    side            TEXT DEFAULT 'compra'
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
@@ -79,19 +79,24 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    # Migración: columnas de veredicto IA (ignorar si ya existen)
+    # Migraciones (ignorar si la columna ya existe)
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
-                     ("ai_reason", "TEXT")]:
+                     ("ai_reason", "TEXT"), ("alias", "TEXT"),
+                     ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
+                     ("pnl_updated", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
-    # Migración: columna side en signals (bases creadas antes de la v3)
-    try:
-        conn.execute(
-            "ALTER TABLE signals ADD COLUMN side TEXT DEFAULT 'compra'")
-    except sqlite3.OperationalError:
-        pass
+    for col, typ in [("side", "TEXT DEFAULT 'compra'"),
+                     ("price_usd", "REAL"), ("price_1h", "REAL"),
+                     ("price_24h", "REAL"), ("chg_1h", "REAL"),
+                     ("chg_24h", "REAL"), ("alerted_pct", "REAL DEFAULT 0"),
+                     ("symbol", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     return conn
 
@@ -175,7 +180,7 @@ def recompute_scores(conn, min_winning_tokens: int):
 def top_wallets(conn, limit=20):
     return conn.execute(
         """SELECT address, winning_tokens_count, total_buys_sol, score, is_tracked,
-                  ai_class
+                  ai_class, alias, pnl_30d, pnl_total
            FROM wallets WHERE is_bot = 0
            ORDER BY score DESC LIMIT ?""",
         (limit,),

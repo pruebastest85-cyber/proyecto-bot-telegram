@@ -1,34 +1,41 @@
 """
 Analista IA: usa la API de Claude para clasificar billeteras candidatas.
 
-Cuando una billetera alcanza el umbral de apariciones (⭐ candidata),
-este módulo la perfila y le pide a Claude un veredicto:
-  - clasificacion: trader / sniper / bot / insider / copiador / indeterminado
-  - seguir: true/false (¿vale la pena rastrearla?)
-  - razon: explicación breve en español
+v5:
+  - Doble nivel: Haiku filtra rápido; si su confianza es baja (<65)
+    se escala a un modelo más potente para el veredicto final.
+  - Track record: la IA recibe la estadística real de las señales
+    pasadas de la billetera (tasa de acierto a 1h/24h).
+  - Re-evaluación semanal: los veredictos caducan a los 7 días y se
+    renuevan con datos frescos; las que dejaron de ganar pierden la ⭐.
+  - Más contexto: win rate, retención mediana y PnL 30d en el perfil.
 
-Los veredictos se guardan en la tabla wallets (columnas ai_*) y las
-billeteras descartadas por la IA pierden su ⭐ automáticamente.
-
-Modelo: claude-haiku (económico; ~fracciones de centavo por análisis).
 Requiere la variable de entorno ANTHROPIC_API_KEY.
 """
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import requests
 
+from db import now_iso
 from wallet_profiler import profile_wallet
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-haiku-4-5-20251001"
+MODEL_FAST = "claude-haiku-4-5-20251001"
+MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
+CONF_ESCALATE = 65        # confianza mínima de Haiku para no escalar
+REEVAL_DAYS = 7           # caducidad del veredicto
 
 PROMPT = """Eres un analista experto en trading on-chain de Solana. Analiza esta billetera candidata y clasifícala.
 
 DATOS DEL PERFIL (últimas ~300 transacciones):
 {perfil}
+
+TRACK RECORD REAL EN NUESTRO SISTEMA (resultado medido de sus señales pasadas; es el dato MÁS importante si existe):
+{track}
 
 EVIDENCIA (por qué está en nuestra base):
 {evidencia}
@@ -41,25 +48,27 @@ Clasificaciones posibles:
 - "copiador": parece replicar a otros con retraso. NO vale.
 - "indeterminado": datos insuficientes.
 
-Considera: PnL realizado, nº de tokens operados vs días, tamaños de compra, posición de compra (buy_rank) en la evidencia, ratio ganadores/perdedores.
+Considera: track record real (si sus señales pasadas perdieron, NO vale aunque el perfil luzca bien), PnL realizado, win rate, retención mediana (si vende en <5 min es imposible copiarla con provecho), nº de tokens vs días, tamaños de compra, buy_rank en la evidencia.
+
+Además, inventa un ALIAS: nombre corto en español (2-3 palabras, estilo apodo de trader) que refleje su estilo y rendimiento. Ejemplos: "Francotirador Paciente", "Ballena Sigilosa". Si su rendimiento es malo, que el alias lo insinúe.
 
 Responde SOLO con JSON válido, sin markdown ni texto extra:
-{{"clasificacion": "...", "seguir": true/false, "confianza": 0-100, "razon": "máximo 2 frases en español"}}"""
+{{"clasificacion": "...", "seguir": true/false, "confianza": 0-100, "alias": "...", "razon": "máximo 2 frases en español"}}"""
 
 
 def _ensure_columns(conn):
-    """Agrega columnas de IA a la tabla wallets si no existen."""
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
-                     ("ai_reason", "TEXT")]:
+                     ("ai_reason", "TEXT"), ("alias", "TEXT"),
+                     ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
+                     ("pnl_updated", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except Exception:
-            pass  # ya existe
+            pass
     conn.commit()
 
 
 def _resumir_perfil(p: dict) -> str:
-    """Compacta el perfil para no gastar tokens de más."""
     import time as _t
     days_ago = ((_t.time() - p["last_tx_ts"]) / 86400) if p["last_tx_ts"] else None
     tokens = sorted(p["tokens"].items(), key=lambda x: x[1]["pnl_sol"],
@@ -74,32 +83,24 @@ def _resumir_perfil(p: dict) -> str:
         "txs_ultimos_7d": p["tx_7d"],
         "tokens_operados": len(p["tokens"]),
         "pnl_total_sol": round(p["pnl_total_sol"], 2),
+        "pnl_30d_sol": round(p.get("pnl_30d_sol", 0.0), 2),
+        "win_rate_pct": p.get("win_rate_pct"),
+        "retencion_mediana_min": p.get("hold_median_min"),
         "posible_bot_por_frecuencia": p["possible_bot"],
         "mejores": top, "peores": bottom,
     }, ensure_ascii=False)
 
 
-def ai_verdict(profile: dict, evidence_lines: list[str]) -> dict | None:
-    """Llama a Claude y devuelve el veredicto como dict, o None si falla."""
-    if not ANTHROPIC_API_KEY:
-        return None
-    prompt = PROMPT.format(perfil=_resumir_perfil(profile),
-                           evidencia="\n".join(evidence_lines) or "(sin datos)")
+def _call_claude(prompt: str, model: str) -> dict | None:
     try:
         r = requests.post(
             API_URL,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "max_tokens": 300,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=60,
-        )
+            headers={"x-api-key": ANTHROPIC_API_KEY,
+                     "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
+            json={"model": model, "max_tokens": 300,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=60)
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
         text = text.replace("```json", "").replace("```", "").strip()
@@ -107,22 +108,63 @@ def ai_verdict(profile: dict, evidence_lines: list[str]) -> dict | None:
         if v.get("clasificacion") and isinstance(v.get("seguir"), bool):
             return v
     except Exception as e:
-        print(f"  · Error en veredicto IA: {e}")
+        print(f"  · Error IA ({model}): {e}")
     return None
+
+
+def ai_verdict(profile: dict, evidence_lines: list[str],
+               track_record: dict | None = None) -> dict | None:
+    """
+    Veredicto en dos niveles: Haiku primero; si su confianza es baja,
+    se consulta al modelo potente y prevalece su respuesta.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+    prompt = PROMPT.format(
+        perfil=_resumir_perfil(profile),
+        track=json.dumps(track_record, ensure_ascii=False)
+        if track_record else "(sin señales medidas todavía)",
+        evidencia="\n".join(evidence_lines) or "(sin datos)")
+
+    v = _call_claude(prompt, MODEL_FAST)
+    if v is None:
+        return None
+    try:
+        conf = float(v.get("confianza", 0))
+    except (TypeError, ValueError):
+        conf = 0
+    if conf < CONF_ESCALATE:
+        print(f"  · Confianza {conf:.0f}% < {CONF_ESCALATE}: "
+              f"escalando a {MODEL_SMART}")
+        v2 = _call_claude(prompt, MODEL_SMART)
+        if v2:
+            v2["modelo"] = MODEL_SMART
+            return v2
+    v["modelo"] = MODEL_FAST
+    return v
 
 
 def evaluate_tracked(conn) -> int:
     """
-    Perfila y clasifica con IA las billeteras ⭐ que aún no tienen
-    veredicto. Descarta automáticamente bots/insiders/copiadores.
-    Devuelve cuántas evaluó.
+    Perfila y clasifica las billeteras ⭐ sin veredicto, sin alias, o con
+    veredicto caducado (>REEVAL_DAYS días). Guarda alias + PnL y descarta
+    las que la IA rechaza. Devuelve cuántas evaluó.
     """
     _ensure_columns(conn)
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=REEVAL_DAYS)).isoformat(timespec="seconds")
     rows = conn.execute(
-        "SELECT address FROM wallets WHERE is_tracked=1 AND ai_class IS NULL"
-    ).fetchall()
+        """SELECT address FROM wallets
+           WHERE is_tracked=1 AND (ai_class IS NULL OR alias IS NULL
+                 OR pnl_updated IS NULL OR pnl_updated < ?)""",
+        (cutoff,)).fetchall()
     if not rows:
         return 0
+
+    try:
+        from signal_tracker import wallet_track_record
+    except Exception:
+        wallet_track_record = None
 
     evaluated = 0
     for row in rows:
@@ -136,23 +178,31 @@ def evaluate_tracked(conn) -> int:
         ev = conn.execute(
             "SELECT reason FROM appearances WHERE wallet=? LIMIT 6",
             (addr,)).fetchall()
-        verdict = ai_verdict(profile, [e["reason"] for e in ev])
+        track = wallet_track_record(conn, addr) if wallet_track_record else None
+        verdict = ai_verdict(profile, [e["reason"] for e in ev], track)
         if not verdict:
             continue
 
         seguir = 1 if verdict["seguir"] else 0
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
+               alias=COALESCE(?, alias),
+               pnl_30d=?, pnl_total=?, pnl_updated=?,
                is_tracked=?, is_bot=CASE WHEN ?='bot' THEN 1 ELSE is_bot END
                WHERE address=?""",
             (verdict["clasificacion"], seguir,
-             verdict.get("razon", ""), seguir,
-             verdict["clasificacion"], addr),
+             verdict.get("razon", ""),
+             verdict.get("alias"),
+             round(profile.get("pnl_30d_sol", 0.0), 2),
+             round(profile.get("pnl_total_sol", 0.0), 2),
+             now_iso(),
+             seguir, verdict["clasificacion"], addr),
         )
         conn.commit()
         evaluated += 1
         icono = "✅" if seguir else "❌"
         print(f"  {icono} {verdict['clasificacion']} "
+              f"«{verdict.get('alias', 'sin alias')}» "
+              f"[{verdict.get('modelo', '?')}] "
               f"({verdict.get('confianza', '?')}%): {verdict.get('razon','')}")
     return evaluated
-  

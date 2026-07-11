@@ -1,17 +1,7 @@
 """
 Bot de Telegram — Panel de control del pipeline de billeteras.
-v3: /top con botones inline para descartar billeteras y tamaño 10/20/30.
-
-Comandos:
-  /start       → ayuda
-  /ciclo       → corre descubrimiento + análisis completo ahora
-  /descubrir   → solo busca tokens ganadores nuevos
-  /analizar    → solo analiza tokens pendientes
-  /top [n]     → mejores billeteras (10 por defecto; botones para 10/20/30)
-  /descartar <address> → marcar como bot y dejar de rastrear
-  /rastrear <address>  → revertir un descarte
-  /evidencia <address> → el "porqué" de una billetera
-  /status      → resumen de la base de datos
+v4: alias IA por billetera, PnL 30d/histórico en /top y señales,
+    botones inline para descartar y top 10/20/30.
 
 Variables de entorno:
   TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID, HELIUS_API_KEY, DB_PATH
@@ -22,22 +12,21 @@ import asyncio
 import os
 import threading
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes)
 
 import config
-from db import get_conn, top_wallets, wallet_evidence
+from db import get_conn, wallet_evidence
 from discovery import run_discovery
 from wallet_analyzer import run_analysis
 from wallet_profiler import profile_wallet, format_profile
-from realtime import start_webhook_server, sync_helius_webhook, tracked_addresses
+from wallet_admin import (discard_wallet, restore_wallet, build_top_message)
+from realtime import start_webhook_server, sync_helius_webhook
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 AUTO_CYCLE_HOURS = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
-
-TOP_SIZES = (10, 20, 30)
 
 # Evita que el ciclo automático y un comando manual corran a la vez
 cycle_lock = threading.Lock()
@@ -66,6 +55,15 @@ def run_full_cycle() -> str:
         cycle_lock.release()
 
 
+async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Job periódico: mide el resultado (1h/24h) de las señales."""
+    try:
+        from signal_tracker import track_outcomes
+        await asyncio.to_thread(track_outcomes)
+    except Exception as e:
+        print(f"· track_outcomes falló: {e}")
+
+
 async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: corre el ciclo y avisa al admin."""
     resumen = await asyncio.to_thread(run_full_cycle)
@@ -86,82 +84,6 @@ def solo_admin(func):
             return
         return await func(update, ctx)
     return wrapper
-
-
-# ══════════════ descartar / restaurar billeteras ══════════════
-
-def discard_wallet(address: str) -> str:
-    """Marca la billetera como bot, le quita la ⭐ y resincroniza el webhook."""
-    conn = get_conn()
-    row = conn.execute("SELECT address FROM wallets WHERE address=?",
-                       (address,)).fetchone()
-    if not row:
-        conn.close()
-        return "No existe esa dirección en la base."
-    conn.execute(
-        """UPDATE wallets SET is_bot=1, is_tracked=0,
-           ai_class='descartada', ai_follow=0,
-           ai_reason='Descartada manualmente por el admin'
-           WHERE address=?""", (address,))
-    conn.commit()
-    conn.close()
-    hook = sync_helius_webhook()
-    return f"❌ {address[:8]}… descartada. {hook}"
-
-
-def restore_wallet(address: str) -> str:
-    """Revierte un descarte: vuelve a rastrear y la IA la reevaluará."""
-    conn = get_conn()
-    row = conn.execute("SELECT address FROM wallets WHERE address=?",
-                       (address,)).fetchone()
-    if not row:
-        conn.close()
-        return "No existe esa dirección en la base."
-    conn.execute(
-        """UPDATE wallets SET is_bot=0, is_tracked=1,
-           ai_class=NULL, ai_follow=NULL, ai_reason=NULL
-           WHERE address=?""", (address,))
-    conn.commit()
-    conn.close()
-    hook = sync_helius_webhook()
-    return f"⭐ {address[:8]}… vuelve a rastrearse. {hook}"
-
-
-def build_top_message(limit: int = 10):
-    """Arma el texto y el teclado inline del /top."""
-    conn = get_conn()
-    rows = top_wallets(conn, limit)
-    conn.close()
-    if not rows:
-        return ("Aún no hay billeteras. Espera el próximo ciclo o corre /ciclo.",
-                None)
-    lines = [f"🏆 *Top {len(rows)} billeteras candidatas:*\n"]
-    buttons, row_btns = [], []
-    for i, w in enumerate(rows, 1):
-        flag = " ⭐" if w["is_tracked"] else ""
-        try:
-            ai = f" · 🧠 {w['ai_class']}" if w["ai_class"] else ""
-        except (KeyError, IndexError):
-            ai = ""
-        lines.append(
-            f"{i}. `{w['address']}`\n"
-            f"   ganadores: {w['winning_tokens_count']} · "
-            f"score: {w['score']:.1f}{flag}{ai}\n")
-        row_btns.append(InlineKeyboardButton(
-            f"❌ {i}", callback_data=f"d:{limit}:{w['address']}"))
-        if len(row_btns) == 5:
-            buttons.append(row_btns)
-            row_btns = []
-    if row_btns:
-        buttons.append(row_btns)
-    buttons.append([
-        InlineKeyboardButton(("· " if n == limit else "") + f"Top {n}",
-                             callback_data=f"t:{n}")
-        for n in TOP_SIZES
-    ])
-    lines.append("\n❌ n = descartar la billetera nº n (deja de rastrearse "
-                 "y no vuelve al top).\nUsa /evidencia <address> para ver el porqué.")
-    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -313,7 +235,6 @@ async def cmd_ia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Perfilando y consultando a la IA… (~1 min)")
 
     def _run():
-        from wallet_profiler import profile_wallet
         from ai_analyst import ai_verdict
         p = profile_wallet(address)
         if not p["tx_sampled"]:
@@ -334,8 +255,10 @@ async def cmd_ia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "La IA no devolvió veredicto (¿ANTHROPIC_API_KEY configurada?).")
         return
     icono = "✅ SEGUIR" if v["seguir"] else "❌ DESCARTAR"
+    alias_txt = f"Alias: 👤 *{v['alias']}*\n" if v.get("alias") else ""
     await update.message.reply_text(
         f"🧠 *Veredicto IA para* `{address[:16]}…`\n\n"
+        f"{alias_txt}"
         f"Clasificación: *{v['clasificacion'].upper()}*\n"
         f"Recomendación: {icono}\n"
         f"Confianza: {v.get('confianza', '?')}%\n\n"
@@ -362,9 +285,20 @@ async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except (KeyError, IndexError):
             side = "compra"
         emoji = "🟢" if side == "compra" else "🔴"
+        res = ""
+        try:
+            partes = []
+            if s["chg_1h"] is not None:
+                partes.append(f"1h: {s['chg_1h']:+.0f}%")
+            if s["chg_24h"] is not None:
+                partes.append(f"24h: {s['chg_24h']:+.0f}%")
+            if partes:
+                res = " → " + " · ".join(partes)
+        except (KeyError, IndexError):
+            pass
         lines.append(
             f"• {emoji} {side} `{s['mint'][:12]}…` — {s['sol']:.2f} SOL por "
-            f"`{s['wallet'][:8]}…` hace {hace:.1f}h")
+            f"`{s['wallet'][:8]}…` hace {hace:.1f}h{res}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -421,6 +355,13 @@ def main():
         interval=AUTO_CYCLE_HOURS * 3600,
         first=60,
         name="auto_cycle",
+    )
+    # Track record: mide el resultado de las señales cada 15 min
+    app.job_queue.run_repeating(
+        track_outcomes_job,
+        interval=900,
+        first=120,
+        name="track_outcomes",
     )
 
     print(f"🤖 Bot corriendo. Ciclo automático cada {AUTO_CYCLE_HOURS:g} h.")
