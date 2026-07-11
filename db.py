@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS signals (
     side            TEXT DEFAULT 'compra'
 );
 
+CREATE TABLE IF NOT EXISTS chat_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    role            TEXT NOT NULL,      -- 'user' o 'assistant'
+    text            TEXT NOT NULL,
+    ts              TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
 CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);

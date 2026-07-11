@@ -54,12 +54,41 @@ MODIFYING = {"descartar_billetera", "rastrear_billetera", "correr_ciclo"}
 
 SYSTEM = (
     "Eres el asistente del sistema de rastreo de billeteras rentables en "
-    "Solana. Hablas con su dueño por Telegram. Responde en español, breve "
+    "Solana. Hablas con su dueño por Telegram y tienes memoria de los "
+    "últimos mensajes de la conversación. Responde en español, breve "
     "y directo, sin markdown pesado. Abrevia direcciones a 8 caracteres al "
     "mencionarlas (pero pasa la dirección COMPLETA a las herramientas). "
     "Usa las herramientas cuando haga falta; para preguntas de datos usa "
     "consultar_base. Para acciones que modifican, invoca la herramienta "
     "directamente: el sistema le pedirá confirmación al usuario, no tú.")
+
+HISTORY_TURNS = 12   # mensajes de memoria (6 intercambios)
+
+
+def _load_history(conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT role, text FROM chat_history ORDER BY id DESC LIMIT ?",
+        (HISTORY_TURNS,)).fetchall()
+    return [{"role": r["role"], "content": r["text"]}
+            for r in reversed(rows)]
+
+
+def _save_turn(user_text: str, reply: str):
+    try:
+        conn = get_conn()
+        conn.execute(
+            "INSERT INTO chat_history (role, text) VALUES ('user', ?)",
+            (user_text[:2000],))
+        conn.execute(
+            "INSERT INTO chat_history (role, text) VALUES ('assistant', ?)",
+            ((reply or "(propuse una acción)")[:2000],))
+        conn.execute(
+            """DELETE FROM chat_history WHERE id NOT IN
+               (SELECT id FROM chat_history ORDER BY id DESC LIMIT 40)""")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"· No se pudo guardar historial de chat: {e}")
 
 
 def _exec_read(name: str, args: dict) -> str:
@@ -106,7 +135,18 @@ def chat(user_text: str):
     """
     if not ANTHROPIC_API_KEY:
         return "Falta ANTHROPIC_API_KEY para el chat.", None
-    messages = [{"role": "user", "content": user_text}]
+    if user_text.lower().strip() in ("olvida", "olvida todo", "reset",
+                                     "borra la conversacion",
+                                     "borra la conversación"):
+        conn = get_conn()
+        conn.execute("DELETE FROM chat_history")
+        conn.commit()
+        conn.close()
+        return "🧹 Memoria de conversación borrada. Empezamos de cero.", None
+    conn = get_conn()
+    history = _load_history(conn)
+    conn.close()
+    messages = history + [{"role": "user", "content": user_text}]
     try:
         for _ in range(4):
             r = requests.post(
@@ -124,10 +164,14 @@ def chat(user_text: str):
                            if b.get("type") == "text").strip()
             tool_calls = [b for b in content if b.get("type") == "tool_use"]
             if not tool_calls:
-                return text or "No entendí, ¿puedes reformular?", None
+                respuesta = text or "No entendí, ¿puedes reformular?"
+                _save_turn(user_text, respuesta)
+                return respuesta, None
 
             tc = tool_calls[0]
             if tc["name"] in MODIFYING:
+                _save_turn(user_text,
+                           text or f"Propuse ejecutar {tc['name']}")
                 return text, {"tool": tc["name"],
                               "args": tc.get("input", {})}
             resultado = _exec_read(tc["name"], tc.get("input", {}))
@@ -135,7 +179,9 @@ def chat(user_text: str):
             messages.append({"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tc["id"],
                  "content": resultado}]})
-        return "Necesité demasiados pasos; intenta ser más específico.", None
+        respuesta = "Necesité demasiados pasos; intenta ser más específico."
+        _save_turn(user_text, respuesta)
+        return respuesta, None
     except Exception as e:
         return f"Error en el chat: {e}", None
 
