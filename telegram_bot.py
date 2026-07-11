@@ -12,7 +12,8 @@ import asyncio
 import os
 import threading
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
+                      WebAppInfo)
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
@@ -172,7 +173,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔍 *Wallet Discovery Bot*\n\n"
         f"⚙️ Ciclo automático activo: cada {AUTO_CYCLE_HOURS:g} horas\n"
-        "💬 Escríbeme normal (sin /) y te respondo o ejecuto acciones\n\n"
+        "💬 Escríbeme normal (sin /) y te respondo o ejecuto acciones\n"
+        "📊 /app — panel visual con todo en vivo\n\n"
         "/ciclo — descubrimiento + análisis ahora\n"
         "/descubrir — buscar tokens ganadores\n"
         "/analizar — analizar compradores tempranos\n"
@@ -394,6 +396,20 @@ async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_app(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Abre el panel visual (Mini App de Telegram)."""
+    public_url = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    if not public_url:
+        await update.message.reply_text("Falta PUBLIC_URL para el panel.")
+        return
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "📊 Abrir panel", web_app=WebAppInfo(url=f"https://{public_url}/app"))]])
+    await update.message.reply_text(
+        "Tu panel visual — top de billeteras, señales y stats en vivo:",
+        reply_markup=kb)
+
+
+@solo_admin
 async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Chat libre: cualquier mensaje sin /comando activa al agente IA."""
     texto = (update.message.text or "").strip()
@@ -462,6 +478,7 @@ def main():
     app.add_handler(CommandHandler("ia", cmd_ia))
     app.add_handler(CommandHandler("senales", cmd_senales))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_chat))

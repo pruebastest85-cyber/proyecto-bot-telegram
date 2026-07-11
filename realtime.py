@@ -333,6 +333,13 @@ def process_transactions(txs: list[dict]):
 
 flask_app = Flask(__name__)
 
+# Mini App de Telegram (panel visual en /app)
+try:
+    from webapp import register_webapp
+    register_webapp(flask_app)
+except Exception as e:
+    print(f"· Mini app no disponible: {e}")
+
 
 @flask_app.get("/")
 def health():
