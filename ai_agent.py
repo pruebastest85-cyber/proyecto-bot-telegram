@@ -48,9 +48,18 @@ TOOLS = [
                      "y análisis (tarda varios minutos). Requiere "
                      "confirmación del usuario."),
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "cambiar_umbral_senal",
+     "description": ("Cambia el umbral mínimo del score de señal (0-100). "
+                     "Señales de compra con score menor no alertan (pero sí "
+                     "se registran y miden). 0 = alertar todo. Requiere "
+                     "confirmación del usuario."),
+     "input_schema": {"type": "object", "properties": {
+         "valor": {"type": "number", "description": "umbral 0-100"}},
+         "required": ["valor"]}},
 ]
 
-MODIFYING = {"descartar_billetera", "rastrear_billetera", "correr_ciclo"}
+MODIFYING = {"descartar_billetera", "rastrear_billetera", "correr_ciclo",
+             "cambiar_umbral_senal"}
 
 SYSTEM = (
     "Eres el asistente del sistema de rastreo de billeteras rentables en "
@@ -195,6 +204,8 @@ def describe_action(action: dict) -> str:
         return f"⭐ Volver a rastrear la billetera `{addr}…`"
     if tool == "correr_ciclo":
         return "🔄 Correr el ciclo completo de descubrimiento y análisis"
+    if tool == "cambiar_umbral_senal":
+        return f"🎯 Fijar el umbral mínimo de señal en {args.get('valor')}/100"
     return tool
 
 
@@ -211,6 +222,14 @@ def execute_action(action: dict) -> str:
         if tool == "correr_ciclo":
             from telegram_bot import run_full_cycle
             return run_full_cycle()
+        if tool == "cambiar_umbral_senal":
+            from db import set_setting
+            v = max(0, min(100, float(args.get("valor", 0))))
+            conn = get_conn()
+            set_setting(conn, "min_signal_score", v)
+            conn.close()
+            return (f"🎯 Umbral fijado en {v:.0f}/100. Señales de compra "
+                    f"con score menor quedarán silenciadas.")
     except Exception as e:
         return f"Error ejecutando la acción: {e}"
     return "Acción desconocida."

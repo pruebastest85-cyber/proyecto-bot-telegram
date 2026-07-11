@@ -27,10 +27,12 @@ import requests
 from flask import Flask, request, jsonify
 
 import config
-from db import get_conn
+from db import get_conn, get_setting
 from token_check import analyze_token, format_token_block, ai_payload
+from signal_score import compute_signal_score
 
 LAMPORTS = 1_000_000_000
+LAST_HOOK_TS = None   # última vez que Helius nos mandó algo (watchdog)
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -243,8 +245,19 @@ def process_transactions(txs: list[dict]):
         except Exception:
             patron, patron_line = None, ""
 
+        # Score de la señal (0-100) y umbral configurable
+        patron_ok = None
+        if patron and t.get("mc"):
+            patron_ok = (patron["mc_p25"] * 0.5 <= t["mc"]
+                         <= patron["mc_p75"] * 2)
+        score_sig, desglose = compute_signal_score(
+            t, _wget(w, "wallet_score"), track, consensus, patron_ok)
+
+        # Aprendizajes del informe semanal (si existen)
+        aprendizajes = get_setting(conn, "learnings", None)
+
         # Señal importante → modelo potente
-        importante = consensus >= 2 or trade["sol"] >= 5
+        importante = consensus >= 2 or trade["sol"] >= 5 or score_sig >= 75
         verdict = _ai_signal_verdict({
             "accion": trade["side"],
             "token": ai_payload(t),
@@ -253,7 +266,22 @@ def process_transactions(txs: list[dict]):
             "track_record_billetera": track,
             "patron_mc_billetera": patron,
             "consenso_billeteras": consensus,
+            "score_senal": score_sig,
+            "aprendizajes_del_sistema": (aprendizajes or "")[:600] or None,
         }, smart=importante) or {}
+
+        # Guardar score y veredicto para el aprendizaje futuro
+        conn.execute(
+            "UPDATE signals SET signal_score=?, verdict=? WHERE signature=?",
+            (score_sig, verdict.get("veredicto"), trade["signature"]))
+        conn.commit()
+
+        # Filtro: señales de compra bajo el umbral no alertan (sí se miden)
+        umbral = float(get_setting(conn, "min_signal_score", "0") or 0)
+        if es_compra and score_sig < umbral:
+            print(f"🔇 Señal {t['symbol']} silenciada: "
+                  f"score {score_sig} < umbral {umbral:.0f}")
+            continue
 
         side_icon = "🟢" if es_compra else "🔴"
         side_txt = "COMPRA" if es_compra else "VENTA"
@@ -285,7 +313,8 @@ def process_transactions(txs: list[dict]):
         pat_txt = f"\n{patron_line}" if patron_line else ""
 
         tg_send(
-            f"{side_icon} *SEÑAL: {side_txt} de billetera ⭐*{cons_txt}\n\n"
+            f"{side_icon} *SEÑAL: {side_txt} de billetera ⭐*{cons_txt}\n"
+            f"🎯 *Score de señal: {score_sig}/100* ({desglose})\n\n"
             f"Token: *{t['symbol']}*\n`{trade['mint']}`\n"
             f"{token_block}\n"
             f"{verbo}: {trade['sol']:.2f} SOL\n"
@@ -312,6 +341,8 @@ def health():
 
 @flask_app.post("/helius")
 def helius_hook():
+    global LAST_HOOK_TS
+    LAST_HOOK_TS = time.time()
     auth = request.headers.get("Authorization", "")
     if auth != config.HELIUS_API_KEY:
         return jsonify({"error": "unauthorized"}), 401

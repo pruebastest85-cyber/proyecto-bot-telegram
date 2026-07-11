@@ -65,6 +65,11 @@ CREATE TABLE IF NOT EXISTS signals (
     side            TEXT DEFAULT 'compra'
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+    key             TEXT PRIMARY KEY,
+    value           TEXT
+);
+
 CREATE TABLE IF NOT EXISTS chat_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     role            TEXT NOT NULL,      -- 'user' o 'assistant'
@@ -80,6 +85,20 @@ CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def get_setting(conn, key: str, default=None):
+    row = conn.execute("SELECT value FROM settings WHERE key=?",
+                       (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn, key: str, value):
+    conn.execute(
+        """INSERT INTO settings (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+        (key, str(value)))
+    conn.commit()
 
 
 def get_conn() -> sqlite3.Connection:
@@ -99,7 +118,8 @@ def get_conn() -> sqlite3.Connection:
                      ("price_usd", "REAL"), ("price_1h", "REAL"),
                      ("price_24h", "REAL"), ("chg_1h", "REAL"),
                      ("chg_24h", "REAL"), ("alerted_pct", "REAL DEFAULT 0"),
-                     ("symbol", "TEXT"), ("mc", "REAL"), ("liq", "REAL")]:
+                     ("symbol", "TEXT"), ("mc", "REAL"), ("liq", "REAL"),
+                     ("signal_score", "REAL"), ("verdict", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

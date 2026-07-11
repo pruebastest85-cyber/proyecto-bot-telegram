@@ -4,8 +4,11 @@ Módulo 1: Descubrimiento de tokens ganadores en Solana.
 Estrategia inversa: en lugar de buscar billeteras al azar, encontramos
 tokens que YA subieron fuerte y luego extraemos quién compró temprano.
 
+v2: además de los pools en tendencia, escanea los pools NUEVOS de
+GeckoTerminal para detectar ganadores más temprano.
+
 Fuentes gratuitas:
-  - GeckoTerminal trending pools (sin clave, 30 req/min)
+  - GeckoTerminal trending + new pools (sin clave, 30 req/min)
   - DexScreener (sin clave) para validar métricas del par
 """
 
@@ -16,7 +19,7 @@ import config
 from db import get_conn, save_winning_token
 
 HEADERS = {"accept": "application/json",
-           "user-agent": "wallet-discovery-pipeline/0.1"}
+           "user-agent": "wallet-discovery-pipeline/0.2"}
 
 
 def _get(url: str, params: dict | None = None, delay: float = 1.0) -> dict | None:
@@ -35,17 +38,25 @@ def _get(url: str, params: dict | None = None, delay: float = 1.0) -> dict | Non
         return None
 
 
-def fetch_trending_pools(pages: int = 3) -> list[dict]:
-    """Descarga pools en tendencia de Solana desde GeckoTerminal."""
+def _fetch_pools(url: str, pages: int, etiqueta: str) -> list[dict]:
     pools = []
     for page in range(1, pages + 1):
-        data = _get(config.GECKO_TRENDING, params={"page": page},
-                    delay=config.GECKO_DELAY)
+        data = _get(url, params={"page": page}, delay=config.GECKO_DELAY)
         if not data or "data" not in data:
             break
         pools.extend(data["data"])
-    print(f"→ {len(pools)} pools en tendencia descargados")
+    print(f"→ {len(pools)} pools {etiqueta} descargados")
     return pools
+
+
+def fetch_trending_pools(pages: int = 3) -> list[dict]:
+    """Pools en tendencia de Solana (los que ya están explotando)."""
+    return _fetch_pools(config.GECKO_TRENDING, pages, "en tendencia")
+
+
+def fetch_new_pools(pages: int = 2) -> list[dict]:
+    """Pools recién creados (para cazar ganadores más temprano)."""
+    return _fetch_pools(config.GECKO_NEW_POOLS, pages, "nuevos")
 
 
 def pool_to_candidate(pool: dict) -> dict | None:
@@ -88,14 +99,19 @@ def pool_to_candidate(pool: dict) -> dict | None:
 
 
 def run_discovery() -> int:
-    """Ciclo completo: descarga tendencias, filtra y guarda ganadores nuevos."""
+    """Ciclo completo: tendencias + pools nuevos, filtra y guarda ganadores."""
     conn = get_conn()
     pools = fetch_trending_pools()
-    saved = 0
+    try:
+        pools += fetch_new_pools()
+    except Exception as e:
+        print(f"  · new_pools falló (no crítico): {e}")
+    saved, vistos = 0, set()
     for pool in pools:
         cand = pool_to_candidate(pool)
-        if not cand:
+        if not cand or cand["mint"] in vistos:
             continue
+        vistos.add(cand["mint"])
         save_winning_token(conn, cand)
         saved += 1
         print(f"  ✓ Ganador: {cand['symbol']:<12} "

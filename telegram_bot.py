@@ -58,6 +58,30 @@ def run_full_cycle() -> str:
         cycle_lock.release()
 
 
+async def backup_job(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        from maintenance import send_db_backup
+        await asyncio.to_thread(send_db_backup)
+    except Exception as e:
+        print(f"· backup_job falló: {e}")
+
+
+async def watchdog_job(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        from maintenance import watchdog_check
+        await asyncio.to_thread(watchdog_check)
+    except Exception as e:
+        print(f"· watchdog_job falló: {e}")
+
+
+async def learning_job(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        from maintenance import weekly_learning
+        await asyncio.to_thread(weekly_learning)
+    except Exception as e:
+        print(f"· learning_job falló: {e}")
+
+
 async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: mide el resultado (1h/24h) de las señales."""
     try:
@@ -402,10 +426,13 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
     descartadas = conn.execute(
         "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
+    from db import get_setting
+    umbral = get_setting(conn, "min_signal_score", "0")
     conn.close()
     await update.message.reply_text(
         f"📊 *Estado del sistema*\n\n"
         f"⚙️ Ciclo automático: cada {AUTO_CYCLE_HOURS:g} h\n"
+        f"🎯 Umbral de señal: {float(umbral or 0):.0f}/100\n"
         f"Tokens ganadores: {tokens} ({pend} pendientes)\n"
         f"Billeteras registradas: {wallets}\n"
         f"Billeteras rastreadas ⭐: {tracked}\n"
@@ -456,6 +483,13 @@ def main():
         first=120,
         name="track_outcomes",
     )
+    # Backup diario de la base + watchdog del webhook + aprendizaje semanal
+    app.job_queue.run_repeating(backup_job, interval=86400, first=7200,
+                                name="db_backup")
+    app.job_queue.run_repeating(watchdog_job, interval=3600, first=1800,
+                                name="watchdog")
+    app.job_queue.run_repeating(learning_job, interval=7 * 86400,
+                                first=3 * 86400, name="weekly_learning")
 
     print(f"🤖 Bot corriendo. Ciclo automático cada {AUTO_CYCLE_HOURS:g} h.")
     app.run_polling()
