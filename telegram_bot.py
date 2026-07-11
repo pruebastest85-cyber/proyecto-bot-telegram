@@ -12,9 +12,9 @@ import asyncio
 import os
 import threading
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                          ContextTypes)
+                          ContextTypes, MessageHandler, filters)
 
 import config
 from db import get_conn, wallet_evidence
@@ -30,6 +30,9 @@ AUTO_CYCLE_HOURS = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
 
 # Evita que el ciclo automático y un comando manual corran a la vez
 cycle_lock = threading.Lock()
+
+# Acciones del agente pendientes de confirmación (una por usuario)
+PENDING_ACTIONS: dict[int, dict] = {}
 
 
 def run_full_cycle() -> str:
@@ -93,6 +96,23 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("⛔ No autorizado", show_alert=True)
         return
     data = q.data or ""
+    if data == "agc:y" or data == "agc:n":
+        accion = PENDING_ACTIONS.pop(q.from_user.id, None)
+        if data == "agc:n" or not accion:
+            await q.answer("Cancelado")
+            try:
+                await q.edit_message_text("❌ Acción cancelada.")
+            except Exception:
+                pass
+            return
+        await q.answer("Ejecutando…")
+        from ai_agent import execute_action
+        resultado = await asyncio.to_thread(execute_action, accion)
+        try:
+            await q.edit_message_text(f"✅ {resultado}")
+        except Exception:
+            pass
+        return
     if data.startswith("d:"):
         try:
             _, limit, address = data.split(":", 2)
@@ -127,7 +147,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔍 *Wallet Discovery Bot*\n\n"
-        f"⚙️ Ciclo automático activo: cada {AUTO_CYCLE_HOURS:g} horas\n\n"
+        f"⚙️ Ciclo automático activo: cada {AUTO_CYCLE_HOURS:g} horas\n"
+        "💬 Escríbeme normal (sin /) y te respondo o ejecuto acciones\n\n"
         "/ciclo — descubrimiento + análisis ahora\n"
         "/descubrir — buscar tokens ganadores\n"
         "/analizar — analizar compradores tempranos\n"
@@ -349,6 +370,28 @@ async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Chat libre: cualquier mensaje sin /comando activa al agente IA."""
+    texto = (update.message.text or "").strip()
+    if not texto:
+        return
+    await update.message.chat.send_action("typing")
+    from ai_agent import chat, describe_action
+    respuesta, accion = await asyncio.to_thread(chat, texto)
+    if accion:
+        PENDING_ACTIONS[update.effective_user.id] = accion
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirmar", callback_data="agc:y"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="agc:n")]])
+        msg = (respuesta + "\n\n" if respuesta else "") + \
+            f"¿Ejecuto esta acción?\n{describe_action(accion)}"
+        await update.message.reply_text(msg, parse_mode="Markdown",
+                                        reply_markup=kb)
+    else:
+        await update.message.reply_text(respuesta)
+
+
+@solo_admin
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
     tokens = conn.execute("SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"]
@@ -393,6 +436,8 @@ def main():
     app.add_handler(CommandHandler("senales", cmd_senales))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(on_callback))
+    # Chat libre: cualquier texto sin comando activa al agente
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_chat))
 
     # Servidor de webhooks para señales en tiempo real (Fase 2)
     start_webhook_server()
