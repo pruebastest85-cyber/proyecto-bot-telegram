@@ -1,13 +1,15 @@
 """
 Módulo 2: Análisis de compradores tempranos.
 
-v2 — Detección de compras corregida:
-Helius no siempre llena events.swap (pump.fun, Raydium y otros DEX
-aparecen con formatos distintos). Método robusto: leer tokenTransfers
-y nativeTransfers directamente:
+v3 — Presupuesto de Helius:
+  - Analiza máximo MAX_TOKENS_PER_CYCLE tokens por ciclo (el resto
+    queda en cola para el siguiente), y HISTORY_MAX_PAGES páginas de
+    historial por token. Así la cuota gratuita alcanza todo el mes.
+
+Detección de compras robusta: leer tokenTransfers y nativeTransfers
+directamente (cubre pump.fun, Raydium, Jupiter, Meteora, etc.):
   - la billetera (feePayer) RECIBIÓ el mint  → tokenTransfers
   - la billetera ENVIÓ SOL en esa misma tx   → nativeTransfers
-Eso es una compra, sin importar en qué DEX ocurrió.
 """
 
 import time
@@ -43,11 +45,13 @@ def fetch_parsed_txs(address: str, before: str | None = None,
         return []
 
 
-def fetch_earliest_txs(mint: str, max_pages: int = 8) -> list[dict]:
+def fetch_earliest_txs(mint: str, max_pages: int | None = None) -> list[dict]:
     """
     Pagina hacia atrás hasta las transacciones más antiguas del mint
     y devuelve las primeras EARLY_BUYER_WINDOW en orden cronológico.
     """
+    if max_pages is None:
+        max_pages = getattr(config, "HISTORY_MAX_PAGES", 5)
     pages, before = [], None
     for _ in range(max_pages):
         batch = fetch_parsed_txs(mint, before=before)
@@ -68,7 +72,6 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
     """
     Detecta compras leyendo transferencias directamente:
       compra = feePayer recibió el mint Y envió SOL en la misma tx.
-    Cubre pump.fun, Raydium, Jupiter, Meteora, etc.
     """
     buys = []
     for tx in txs:
@@ -78,7 +81,6 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
         if not buyer:
             continue
 
-        # ¿Recibió el token?
         got_token = False
         for t in (tx.get("tokenTransfers") or []):
             if t.get("mint") == mint and t.get("toUserAccount") == buyer:
@@ -87,14 +89,11 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
         if not got_token:
             continue
 
-        # ¿Cuánto SOL salió de su billetera en esta tx?
         sol_out = 0.0
         for n in (tx.get("nativeTransfers") or []):
             if n.get("fromUserAccount") == buyer:
                 sol_out += int(n.get("amount", 0)) / LAMPORTS
 
-        # Respaldo: usar accountData/nativeBalanceChange si no hubo
-        # nativeTransfers claros (algunos DEX mueven SOL vía cuentas WSOL)
         if sol_out <= 0:
             for acc in (tx.get("accountData") or []):
                 if acc.get("account") == buyer:
@@ -152,7 +151,11 @@ def run_analysis():
     if not tokens:
         print("No hay tokens pendientes. Corre primero discovery.py")
         return
-    print(f"→ {len(tokens)} tokens ganadores pendientes de análisis")
+    limite = getattr(config, "MAX_TOKENS_PER_CYCLE", 6)
+    en_cola = max(0, len(tokens) - limite)
+    tokens = tokens[:limite]
+    print(f"→ Analizando {len(tokens)} tokens ganadores"
+          + (f" ({en_cola} en cola para el próximo ciclo)" if en_cola else ""))
 
     for token in tokens:
         analyze_token(conn, token)

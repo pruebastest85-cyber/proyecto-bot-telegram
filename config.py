@@ -1,6 +1,10 @@
 """
 Configuración central del pipeline de descubrimiento de billeteras.
 Rellena HELIUS_API_KEY con tu clave gratuita de https://dev.helius.xyz
+
+v2: calibrada para acelerar la toma de datos SIN agotar la cuota
+gratuita de Helius (~500k créditos/mes ≈ 160 consultas de historial
+al día). El control clave es MAX_TOKENS_PER_CYCLE.
 """
 
 import os
@@ -19,10 +23,15 @@ GECKO_TRENDING = "https://api.geckoterminal.com/api/v2/networks/solana/trending_
 GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 
 # ── Criterios para considerar un token "ganador" ─────────────────────────
-MIN_PRICE_CHANGE_24H = 200.0      # % mínimo de subida en 24h
+MIN_PRICE_CHANGE_24H = 150.0      # % mínimo de subida en 24h
 MIN_VOLUME_24H_USD = 100_000      # volumen mínimo para descartar tokens muertos
 MIN_LIQUIDITY_USD = 20_000        # liquidez mínima para descartar rug pulls obvios
 MAX_TOKEN_AGE_DAYS = 14           # solo tokens recientes (memecoins nuevos)
+
+# ── Presupuesto de Helius (para no agotar la cuota del mes) ───────────────
+# Plan gratuito: ~1M créditos/mes ≈ 330 consultas de historial al día.
+MAX_TOKENS_PER_CYCLE = 6          # tokens analizados por ciclo; el resto en cola
+HISTORY_MAX_PAGES = 5             # páginas de historial por token (100 txs c/u)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
 EARLY_BUYER_WINDOW = 100          # nº de primeras transacciones a analizar por token
