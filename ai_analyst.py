@@ -44,9 +44,13 @@ Clasificaciones posibles:
 - "trader": opera con criterio, PnL positivo, ritmo humano. VALE seguirla.
 - "sniper": entra muy temprano en lanzamientos con método consistente y gana. VALE seguirla.
 - "insider": compra de primerísimo en tokens que luego explotan; probable dev/equipo. NO vale (no replicable).
-- "bot": frecuencia inhumana de transacciones, spray a decenas de tokens. NO vale.
+- "bot": frecuencia inhumana, spray a decenas de tokens. NO vale.
+- "mev_bot": flips en <1 minuto de forma sistemática (flips_menos_1min_pct alto), micro-ganancias en serie. NO vale (imposible copiar a mano).
+- "market_maker": opera ambas direcciones del mismo token con posición neta ~0 (tokens_estilo_market_maker alto). NO vale (no direcciona precio).
 - "copiador": parece replicar a otros con retraso. NO vale.
 - "indeterminado": datos insuficientes.
+
+Huellas clave de NO-humano: activa las 24 horas del día (horas_del_dia_activas_de_24 ≥ 22), compras de tamaño idéntico repetido (compras_tamano_identico_pct ≥ 70), flips <1 min. Un humano duerme, varía sus montos y tarda minutos u horas en vender.
 
 Considera: track record real (si sus señales pasadas perdieron, NO vale aunque el perfil luzca bien), PnL realizado, win rate, retención mediana (si vende en <5 min es imposible copiarla con provecho), nº de tokens vs días, tamaños de compra, buy_rank en la evidencia.
 
@@ -87,6 +91,10 @@ def _resumir_perfil(p: dict) -> str:
         "win_rate_pct": p.get("win_rate_pct"),
         "retencion_mediana_min": p.get("hold_median_min"),
         "posible_bot_por_frecuencia": p["possible_bot"],
+        "flips_menos_1min_pct": p.get("flips_1min_pct"),
+        "horas_del_dia_activas_de_24": p.get("active_hours_24"),
+        "compras_tamano_identico_pct": p.get("uniform_buys_pct"),
+        "tokens_estilo_market_maker": p.get("mm_tokens"),
         "mejores": top, "peores": bottom,
     }, ensure_ascii=False)
 
@@ -144,6 +152,24 @@ def ai_verdict(profile: dict, evidence_lines: list[str],
     return v
 
 
+def _hard_bot_reason(p: dict) -> str | None:
+    """Filtro duro pre-IA: descarta casos flagrantes de bot/MEV/MM."""
+    if p["possible_bot"]:
+        return "frecuencia de transacciones inhumana"
+    flips = p.get("flips_1min_pct")
+    if flips is not None and flips >= 50 and p.get("closed_positions", 0) >= 4:
+        return f"MEV/sniper bot: {flips}% de sus posiciones cierran en <1 min"
+    if p.get("active_hours_24", 0) >= 22 and p["tx_sampled"] >= 200:
+        return "activa las 24 horas del día sin pausas humanas"
+    uni = p.get("uniform_buys_pct")
+    if uni is not None and uni >= 80:
+        return f"compras de tamaño idéntico ({uni}%): patrón de bot"
+    mm = p.get("mm_tokens", 0)
+    if mm >= 3:
+        return f"market maker: {mm} tokens operados con posición neta ~0"
+    return None
+
+
 def evaluate_tracked(conn) -> int:
     """
     Perfila y clasifica las billeteras ⭐ sin veredicto, sin alias, o con
@@ -173,6 +199,23 @@ def evaluate_tracked(conn) -> int:
         profile = profile_wallet(addr)
         if not profile["tx_sampled"]:
             print("  · Sin datos; se deja pendiente para el próximo ciclo")
+            continue
+
+        # Filtro duro: bots/MEV/MM flagrantes se descartan sin gastar IA
+        razon_bot = _hard_bot_reason(profile)
+        if razon_bot:
+            conn.execute(
+                """UPDATE wallets SET is_bot=1, is_tracked=0, ai_class='bot',
+                   ai_follow=0, ai_reason=?, alias=COALESCE(alias,'Bot Descartado'),
+                   pnl_30d=?, pnl_total=?, pnl_updated=?
+                   WHERE address=?""",
+                (f"Descarte automático: {razon_bot}",
+                 round(profile.get("pnl_30d_sol", 0.0), 2),
+                 round(profile.get("pnl_total_sol", 0.0), 2),
+                 now_iso(), addr))
+            conn.commit()
+            evaluated += 1
+            print(f"  🤖 Descartada sin IA: {razon_bot}")
             continue
 
         ev = conn.execute(

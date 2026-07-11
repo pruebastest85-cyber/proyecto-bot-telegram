@@ -90,6 +90,7 @@ def profile_wallet(address: str) -> dict:
                                   "buys": 0, "sells": 0, "symbol": "",
                                   "first_buy_ts": None, "first_sell_ts": None})
     timestamps = []
+    buy_sizes = []
 
     for tx in txs:
         ts = tx.get("timestamp") or 0
@@ -110,6 +111,7 @@ def profile_wallet(address: str) -> dict:
             if t.get("toUserAccount") == address and delta < -0.001:
                 info["buys"] += 1
                 info["sol_out"] += abs(delta)
+                buy_sizes.append(round(abs(delta), 2))
                 if ts and (info["first_buy_ts"] is None or ts < info["first_buy_ts"]):
                     info["first_buy_ts"] = ts
                 if reciente:
@@ -151,6 +153,28 @@ def profile_wallet(address: str) -> dict:
             100 * sum(1 for i in closed if i["pnl_sol"] > 0) / len(closed))
     else:
         result["win_rate_pct"] = None
+    result["closed_positions"] = len(closed)
+
+    # ── Huellas de bot / MEV / market maker ─────────────────────────
+    # Flips: % de posiciones cerradas en menos de 1 minuto (MEV/sniper bot)
+    result["flips_1min_pct"] = (
+        round(100 * sum(1 for h in holds if h <= 1) / len(holds))
+        if holds else None)
+    # Actividad 24/7: horas del día (0-23) con transacciones; un humano duerme
+    result["active_hours_24"] = len(
+        {time.gmtime(t).tm_hour for t in timestamps if t})
+    # Compras de tamaño idéntico: % de la compra más repetida
+    if len(buy_sizes) >= 5:
+        mas_comun = max(buy_sizes.count(s) for s in set(buy_sizes))
+        result["uniform_buys_pct"] = round(100 * mas_comun / len(buy_sizes))
+    else:
+        result["uniform_buys_pct"] = None
+    # Market maker: tokens operados en ambas direcciones con posición neta ~0
+    mm = sum(1 for i in tokens.values()
+             if i["buys"] >= 3 and i["sells"] >= 3
+             and abs(i["pnl_sol"]) <= 0.05 * (i["sol_in"] + i["sol_out"]))
+    result["mm_tokens"] = mm
+
     result["tokens"] = dict(tokens)
     return result
 
@@ -179,6 +203,17 @@ def format_profile(p: dict) -> str:
 
     if p["possible_bot"]:
         lines.append("⚠️ *Posible bot*: frecuencia de txs muy alta\n")
+    huellas = []
+    if p.get("flips_1min_pct"):
+        huellas.append(f"flips <1min: {p['flips_1min_pct']}%")
+    if p.get("active_hours_24"):
+        huellas.append(f"horas activas: {p['active_hours_24']}/24")
+    if p.get("uniform_buys_pct"):
+        huellas.append(f"compras idénticas: {p['uniform_buys_pct']}%")
+    if p.get("mm_tokens"):
+        huellas.append(f"tokens estilo MM: {p['mm_tokens']}")
+    if huellas:
+        lines.append("🤖 Huellas bot/MM: " + " · ".join(huellas) + "\n")
 
     # Tokens por PnL
     traded = [(m, i) for m, i in p["tokens"].items()
