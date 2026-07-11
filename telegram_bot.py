@@ -1,19 +1,23 @@
 """
 Bot de Telegram — Panel de control del pipeline de billeteras.
-v4: alias IA por billetera, PnL 30d/histórico en /top y señales,
-    botones inline para descartar y top 10/20/30.
+v5: HUB de navegación con menú de botones inline (se edita en el mismo
+mensaje), secciones agrupadas, botones « Inicio / Cancelar y flujo
+"pídeme la dirección" para los comandos que necesitan un <address>.
+Mantiene TODO lo de v4 (alias IA, PnL, /top con botones, chat libre,
+jobs automáticos, Mini App /app).
 
 Variables de entorno:
   TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID, HELIUS_API_KEY, DB_PATH
-  AUTO_CYCLE_HOURS (opcional, default 6)
+  AUTO_CYCLE_HOURS (opcional, default 6), PUBLIC_URL (para /app)
 """
 
 import asyncio
 import os
 import threading
+import time as _t
 
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
-                      WebAppInfo)
+                      WebAppInfo, BotCommand)
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
@@ -35,6 +39,123 @@ cycle_lock = threading.Lock()
 # Acciones del agente pendientes de confirmación (una por usuario)
 PENDING_ACTIONS: dict[int, dict] = {}
 
+# Usuarios a los que el hub les pidió un dato (address o pregunta).
+# user_id -> nombre del comando ("perfil", "ficha", "preguntar"…)
+AWAITING: dict[int, str] = {}
+
+
+# ─────────────────────────── HUB / MENÚ ────────────────────────────
+
+def hub_text() -> str:
+    return (
+        "🔍 *Wallet Discovery Bot*\n"
+        f"⚙️ Ciclo automático cada {AUTO_CYCLE_HOURS:g} h  ·  "
+        "💬 escríbeme normal para chatear con la IA\n\n"
+        "Elige una sección 👇"
+    )
+
+
+def _btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text, callback_data=data)
+
+
+def _row_inicio() -> list:
+    return [_btn("« Inicio", "h:home")]
+
+
+def kb_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("⚡ Acciones", "h:acciones"), _btn("🏆 Billeteras", "h:wallets")],
+        [_btn("🔎 Analizar wallet", "h:consultar"), _btn("🤖 IA & Chat", "h:ia")],
+        [_btn("📊 Estado", "h:run:status"), _btn("📱 Panel visual", "h:app")],
+        [_btn("ℹ️ Todos los comandos", "h:help")],
+    ])
+
+
+def kb_acciones() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("🔄 Ciclo completo", "h:run:ciclo")],
+        [_btn("🔍 Descubrir tokens", "h:run:descubrir")],
+        [_btn("🧮 Analizar compradores", "h:run:analizar")],
+        _row_inicio(),
+    ])
+
+
+def kb_wallets() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("🏆 Top 10", "h:run:top10"), _btn("🏆 Top 20", "h:run:top20")],
+        [_btn("📡 Últimas señales", "h:run:senales")],
+        _row_inicio(),
+    ])
+
+
+def kb_consultar() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("🔬 Perfil", "h:ask:perfil"), _btn("🧮 Ficha / Score", "h:ask:ficha")],
+        [_btn("🧠 Veredicto IA", "h:ask:ia"), _btn("📋 Evidencia", "h:ask:evidencia")],
+        [_btn("❌ Descartar", "h:ask:descartar"), _btn("⭐ Rastrear", "h:ask:rastrear")],
+        _row_inicio(),
+    ])
+
+
+def kb_ia() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [_btn("💬 Preguntar a la IA", "h:ask:preguntar")],
+        _row_inicio(),
+    ])
+
+
+def kb_solo_inicio() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([_row_inicio()])
+
+
+def kb_cancelar() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[_btn("« Cancelar", "h:home")]])
+
+
+SECCIONES = {
+    "acciones": ("⚡ *Acciones del pipeline*\n\nEjecuta tareas ahora mismo:",
+                 kb_acciones),
+    "wallets": ("🏆 *Billeteras*\n\nMira el ranking y las señales:", kb_wallets),
+    "consultar": ("🔎 *Analizar una wallet*\n\nElige qué quieres ver; luego te "
+                  "pediré la dirección:", kb_consultar),
+    "ia": ("🤖 *IA & Chat*\n\nPregúntale a la IA sobre tu base, o simplemente "
+           "escríbeme un mensaje normal y el agente responde o propone "
+           "acciones:", kb_ia),
+}
+
+ASK_PROMPTS = {
+    "perfil": "🔬 *Perfil de billetera*\nEnvíame la *dirección* de la wallet a investigar:",
+    "ficha": "🧮 *Ficha / Wallet Score*\nEnvíame la *dirección* de la wallet:",
+    "ia": "🧠 *Veredicto IA*\nEnvíame la *dirección* de la wallet:",
+    "evidencia": "📋 *Evidencia*\nEnvíame la *dirección* de la wallet:",
+    "descartar": "❌ *Descartar billetera*\nEnvíame la *dirección* a dejar de rastrear:",
+    "rastrear": "⭐ *Rastrear billetera*\nEnvíame la *dirección* a revertir el descarte:",
+    "preguntar": ("💬 *Preguntar a la IA*\nEscríbeme tu pregunta sobre la base "
+                  "(top, señales, ROI, quién acumula…):"),
+}
+
+HELP_TEXT = (
+    "ℹ️ *Todos los comandos*\n\n"
+    "/ciclo — descubrimiento + análisis ahora\n"
+    "/descubrir — buscar tokens ganadores\n"
+    "/analizar — analizar compradores tempranos\n"
+    "/top [n] — mejores billeteras (10/20/30) con ❌ para descartar\n"
+    "/descartar <address> — dejar de rastrear una billetera\n"
+    "/rastrear <address> — revertir un descarte\n"
+    "/evidencia <address> — el porqué de una billetera\n"
+    "/perfil <address> — investigar una billetera a fondo\n"
+    "/ficha <address> — Wallet Score 0-100 con ROI y riesgo\n"
+    "/preguntar <texto> — pregúntale a la IA sobre tu base\n"
+    "/ia <address> — veredicto de la IA sobre una billetera\n"
+    "/senales — últimas señales en tiempo real\n"
+    "/status — estado de la base de datos\n"
+    "/app — panel visual (Mini App)\n\n"
+    "💬 También puedes escribirme normal (sin /) para chatear con el agente."
+)
+
+
+# ──────────────────── LÓGICA REUTILIZABLE (bloqueante) ─────────────────
 
 def run_full_cycle() -> str:
     """Ejecuta descubrimiento + análisis. Devuelve resumen en texto."""
@@ -58,6 +179,159 @@ def run_full_cycle() -> str:
     finally:
         cycle_lock.release()
 
+
+def _status_text() -> str:
+    conn = get_conn()
+    tokens = conn.execute("SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"]
+    pend = conn.execute(
+        "SELECT COUNT(*) c FROM winning_tokens WHERE analyzed=0").fetchone()["c"]
+    wallets = conn.execute("SELECT COUNT(*) c FROM wallets").fetchone()["c"]
+    tracked = conn.execute(
+        "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
+    descartadas = conn.execute(
+        "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
+    from db import get_setting
+    umbral = get_setting(conn, "min_signal_score", "0")
+    conn.close()
+    return (
+        f"📊 *Estado del sistema*\n\n"
+        f"⚙️ Ciclo automático: cada {AUTO_CYCLE_HOURS:g} h\n"
+        f"🎯 Umbral de señal: {float(umbral or 0):.0f}/100\n"
+        f"Tokens ganadores: {tokens} ({pend} pendientes)\n"
+        f"Billeteras registradas: {wallets}\n"
+        f"Billeteras rastreadas ⭐: {tracked}\n"
+        f"Descartadas/bots ❌: {descartadas}")
+
+
+def _senales_text() -> str:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM signals ORDER BY ts DESC LIMIT 10").fetchall()
+    conn.close()
+    if not rows:
+        return "Sin señales aún. Llegarán cuando una billetera ⭐ compre algo."
+    lines = ["📡 *Últimas señales:*\n"]
+    for s in rows:
+        hace = (_t.time() - s["ts"]) / 3600
+        try:
+            side = s["side"] or "compra"
+        except (KeyError, IndexError):
+            side = "compra"
+        emoji = "🟢" if side == "compra" else "🔴"
+        res = ""
+        try:
+            partes = []
+            if s["chg_1h"] is not None:
+                partes.append(f"1h: {s['chg_1h']:+.0f}%")
+            if s["chg_24h"] is not None:
+                partes.append(f"24h: {s['chg_24h']:+.0f}%")
+            if partes:
+                res = " → " + " · ".join(partes)
+        except (KeyError, IndexError):
+            pass
+        lines.append(
+            f"• {emoji} {side} `{s['mint'][:12]}…` — {s['sol']:.2f} SOL por "
+            f"`{s['wallet'][:8]}…` hace {hace:.1f}h{res}")
+    return "\n".join(lines)
+
+
+def _evidencia_text(address: str) -> str:
+    conn = get_conn()
+    rows = wallet_evidence(conn, address)
+    conn.close()
+    if not rows:
+        return "Sin registros para esa dirección."
+    lines = [f"📋 *Evidencia de* `{address[:20]}…`:\n"]
+    for ev in rows:
+        lines.append(f"• {ev['reason']}\n")
+    lines.append(f"\n🔗 Verificar: gmgn.ai/sol/address/{address}")
+    return "\n".join(lines)
+
+
+def _ficha_text(address: str):
+    from wallet_score import compute_score, format_ficha
+    from signal_tracker import wallet_track_record, format_track_record
+    p = profile_wallet(address)
+    if not p["tx_sampled"]:
+        return None
+    conn = get_conn()
+    track = wallet_track_record(conn, address)
+    row = conn.execute("SELECT alias FROM wallets WHERE address=?",
+                       (address,)).fetchone()
+    conn.close()
+    s = compute_score(p, track)
+    alias = row["alias"] if row and row["alias"] else None
+    return format_ficha(address, s, alias, format_track_record(track))
+
+
+def _ia_text(address: str) -> str:
+    from ai_analyst import ai_verdict
+    p = profile_wallet(address)
+    if not p["tx_sampled"]:
+        return "Sin transacciones para esa dirección."
+    conn = get_conn()
+    ev = conn.execute(
+        "SELECT reason FROM appearances WHERE wallet=? LIMIT 6",
+        (address,)).fetchall()
+    conn.close()
+    v = ai_verdict(p, [e["reason"] for e in ev])
+    if not v:
+        return "La IA no devolvió veredicto (¿ANTHROPIC_API_KEY configurada?)."
+    icono = "✅ SEGUIR" if v["seguir"] else "❌ DESCARTAR"
+    alias_txt = f"Alias: 👤 *{v['alias']}*\n" if v.get("alias") else ""
+    return (f"🧠 *Veredicto IA para* `{address[:16]}…`\n\n"
+            f"{alias_txt}"
+            f"Clasificación: *{v['clasificacion'].upper()}*\n"
+            f"Recomendación: {icono}\n"
+            f"Confianza: {v.get('confianza', '?')}%\n\n"
+            f"_{v.get('razon', '')}_")
+
+
+def app_keyboard():
+    """Teclado con el botón de la Mini App, o None si falta PUBLIC_URL."""
+    public_url = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    if not public_url:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "📊 Abrir panel", web_app=WebAppInfo(url=f"https://{public_url}/app"))]])
+
+
+# ──────────────── DISPATCHERS ASÍNCRONOS (comando + hub) ───────────────
+
+async def run_address_command(chat, cmd: str, arg: str):
+    """Ejecuta un comando que necesita un dato (address o pregunta).
+    Usado tanto por los /comandos como por el flujo de botones del hub."""
+    arg = (arg or "").strip()
+    if cmd == "perfil":
+        await chat.send_message("🔬 Investigando billetera… (30-60 segundos)")
+        p = await asyncio.to_thread(profile_wallet, arg)
+        await chat.send_message(format_profile(p), parse_mode="Markdown")
+    elif cmd == "ficha":
+        await chat.send_message("🧮 Calculando Wallet Score… (~1 min)")
+        ficha = await asyncio.to_thread(_ficha_text, arg)
+        await chat.send_message(ficha or "Sin transacciones para esa dirección.",
+                                parse_mode="Markdown")
+    elif cmd == "ia":
+        await chat.send_message("🧠 Perfilando y consultando a la IA… (~1 min)")
+        text = await asyncio.to_thread(_ia_text, arg)
+        await chat.send_message(text, parse_mode="Markdown")
+    elif cmd == "evidencia":
+        text = await asyncio.to_thread(_evidencia_text, arg)
+        await chat.send_message(text, parse_mode="Markdown")
+    elif cmd == "descartar":
+        msg = await asyncio.to_thread(discard_wallet, arg)
+        await chat.send_message(msg)
+    elif cmd == "rastrear":
+        msg = await asyncio.to_thread(restore_wallet, arg)
+        await chat.send_message(msg)
+    elif cmd == "preguntar":
+        await chat.send_message("🤔 Consultando la base…")
+        from ai_chat import answer_question
+        resp = await asyncio.to_thread(answer_question, arg)
+        await chat.send_message(resp)
+
+
+# ─────────────────────────── JOBS PERIÓDICOS ──────────────────────────
 
 async def backup_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -104,6 +378,8 @@ async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
             print(f"No se pudo avisar al admin: {e}")
 
 
+# ─────────────────────────── SEGURIDAD ────────────────────────────────
+
 def solo_admin(func):
     """Decorador: ignora mensajes de cualquiera que no sea el dueño."""
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -114,13 +390,95 @@ def solo_admin(func):
     return wrapper
 
 
+# ─────────────────────────── CALLBACKS ────────────────────────────────
+
+async def _hub_run(q, name: str):
+    """Ejecuta una acción de botón del hub (h:run:<name>)."""
+    chat = q.message.chat
+    if name == "status":
+        await q.answer()
+        await q.edit_message_text(_status_text(), parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
+    elif name in ("top10", "top20"):
+        limit = 10 if name == "top10" else 20
+        await q.answer()
+        text, kb = await asyncio.to_thread(build_top_message, limit)
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    elif name == "senales":
+        await q.answer()
+        await q.edit_message_text(_senales_text(), parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
+    elif name == "ciclo":
+        await q.answer("⏳ Iniciando ciclo…")
+        await chat.send_message("⏳ Ciclo completo iniciado…")
+        resumen = await asyncio.to_thread(run_full_cycle)
+        await chat.send_message(resumen)
+    elif name == "descubrir":
+        await q.answer("⏳ Buscando…")
+        await chat.send_message("⏳ Buscando tokens ganadores…")
+        saved = await asyncio.to_thread(run_discovery)
+        await chat.send_message(f"✅ {saved} tokens ganadores guardados.")
+    elif name == "analizar":
+        await q.answer("⏳ Analizando…")
+        await chat.send_message("⏳ Analizando compradores tempranos…")
+        await asyncio.to_thread(run_analysis)
+        await chat.send_message("✅ Análisis terminado. Usa /top.")
+
+
+async def handle_hub(q, ctx: ContextTypes.DEFAULT_TYPE):
+    """Router de navegación del hub (callback_data que empieza con 'h:')."""
+    action = (q.data or "")[2:]
+    if action == "home":
+        await q.answer()
+        await q.edit_message_text(hub_text(), parse_mode="Markdown",
+                                  reply_markup=kb_home())
+    elif action == "help":
+        await q.answer()
+        await q.edit_message_text(HELP_TEXT, parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
+    elif action in SECCIONES:
+        texto, kb = SECCIONES[action]
+        await q.answer()
+        await q.edit_message_text(texto, parse_mode="Markdown", reply_markup=kb())
+    elif action == "app":
+        kb = app_keyboard()
+        if not kb:
+            await q.answer("Falta PUBLIC_URL para el panel.", show_alert=True)
+            return
+        await q.answer()
+        await q.message.chat.send_message(
+            "Tu panel visual — top de billeteras, señales y stats en vivo:",
+            reply_markup=kb)
+    elif action.startswith("run:"):
+        await _hub_run(q, action[4:])
+    elif action.startswith("ask:"):
+        cmd = action[4:]
+        AWAITING[q.from_user.id] = cmd
+        await q.answer()
+        await q.edit_message_text(
+            ASK_PROMPTS.get(cmd, "Envíame el dato:"),
+            parse_mode="Markdown", reply_markup=kb_cancelar())
+    else:
+        await q.answer()
+
+
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Maneja los botones inline del /top."""
+    """Maneja todos los botones inline: hub, /top y confirmaciones del agente."""
     q = update.callback_query
     if ADMIN_ID and q.from_user.id != ADMIN_ID:
         await q.answer("⛔ No autorizado", show_alert=True)
         return
     data = q.data or ""
+
+    # Navegación del hub
+    if data.startswith("h:"):
+        # si el usuario estaba en un "envíame la dirección", lo cancelamos
+        if not data.startswith("h:ask:"):
+            AWAITING.pop(q.from_user.id, None)
+        await handle_hub(q, ctx)
+        return
+
+    # Confirmación de acciones del agente IA
     if data == "agc:y" or data == "agc:n":
         accion = PENDING_ACTIONS.pop(q.from_user.id, None)
         if data == "agc:n" or not accion:
@@ -138,6 +496,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
+
+    # Botones del /top: descartar (d:) o cambiar tamaño (t:)
     if data.startswith("d:"):
         try:
             _, limit, address = data.split(":", 2)
@@ -168,28 +528,18 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+# ─────────────────────────── COMANDOS ─────────────────────────────────
+
 @solo_admin
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔍 *Wallet Discovery Bot*\n\n"
-        f"⚙️ Ciclo automático activo: cada {AUTO_CYCLE_HOURS:g} horas\n"
-        "💬 Escríbeme normal (sin /) y te respondo o ejecuto acciones\n"
-        "📊 /app — panel visual con todo en vivo\n\n"
-        "/ciclo — descubrimiento + análisis ahora\n"
-        "/descubrir — buscar tokens ganadores\n"
-        "/analizar — analizar compradores tempranos\n"
-        "/top [n] — mejores billeteras (10/20/30) con botón ❌ para descartar\n"
-        "/descartar <address> — dejar de rastrear una billetera\n"
-        "/rastrear <address> — revertir un descarte\n"
-        "/evidencia <address> — el porqué de una billetera\n"
-        "/perfil <address> — investigar una billetera a fondo\n"
-        "/ficha <address> — Wallet Score 0-100 con ROI y riesgo\n"
-        "/preguntar <texto> — pregúntale a la IA sobre tu base\n"
-        "/ia <address> — veredicto de la IA sobre una billetera\n"
-        "/senales — últimas señales en tiempo real\n"
-        "/status — estado de la base de datos",
-        parse_mode="Markdown",
-    )
+    AWAITING.pop(update.effective_user.id, None)
+    await update.message.reply_text(hub_text(), parse_mode="Markdown",
+                                    reply_markup=kb_home())
+
+
+@solo_admin
+async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await cmd_start(update, ctx)
 
 
 @solo_admin
@@ -231,8 +581,7 @@ async def cmd_descartar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Uso: /descartar <address>")
         return
-    msg = await asyncio.to_thread(discard_wallet, ctx.args[0].strip())
-    await update.message.reply_text(msg)
+    await run_address_command(update.message.chat, "descartar", ctx.args[0])
 
 
 @solo_admin
@@ -240,8 +589,7 @@ async def cmd_rastrear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Uso: /rastrear <address>")
         return
-    msg = await asyncio.to_thread(restore_wallet, ctx.args[0].strip())
-    await update.message.reply_text(msg)
+    await run_address_command(update.message.chat, "rastrear", ctx.args[0])
 
 
 @solo_admin
@@ -249,18 +597,7 @@ async def cmd_evidencia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Uso: /evidencia <address>")
         return
-    address = ctx.args[0].strip()
-    conn = get_conn()
-    rows = wallet_evidence(conn, address)
-    conn.close()
-    if not rows:
-        await update.message.reply_text("Sin registros para esa dirección.")
-        return
-    lines = [f"📋 *Evidencia de* `{address[:20]}…`:\n"]
-    for ev in rows:
-        lines.append(f"• {ev['reason']}\n")
-    lines.append(f"\n🔗 Verificar: gmgn.ai/sol/address/{address}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await run_address_command(update.message.chat, "evidencia", ctx.args[0])
 
 
 @solo_admin
@@ -268,11 +605,7 @@ async def cmd_perfil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Uso: /perfil <address>")
         return
-    address = ctx.args[0].strip()
-    await update.message.reply_text(
-        "🔬 Investigando billetera… (30-60 segundos)")
-    p = await asyncio.to_thread(profile_wallet, address)
-    await update.message.reply_text(format_profile(p), parse_mode="Markdown")
+    await run_address_command(update.message.chat, "perfil", ctx.args[0])
 
 
 @solo_admin
@@ -280,39 +613,7 @@ async def cmd_ia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Uso: /ia <address>")
         return
-    address = ctx.args[0].strip()
-    await update.message.reply_text("🧠 Perfilando y consultando a la IA… (~1 min)")
-
-    def _run():
-        from ai_analyst import ai_verdict
-        p = profile_wallet(address)
-        if not p["tx_sampled"]:
-            return None, None
-        conn = get_conn()
-        ev = conn.execute(
-            "SELECT reason FROM appearances WHERE wallet=? LIMIT 6",
-            (address,)).fetchall()
-        conn.close()
-        return p, ai_verdict(p, [e["reason"] for e in ev])
-
-    p, v = await asyncio.to_thread(_run)
-    if not p:
-        await update.message.reply_text("Sin transacciones para esa dirección.")
-        return
-    if not v:
-        await update.message.reply_text(
-            "La IA no devolvió veredicto (¿ANTHROPIC_API_KEY configurada?).")
-        return
-    icono = "✅ SEGUIR" if v["seguir"] else "❌ DESCARTAR"
-    alias_txt = f"Alias: 👤 *{v['alias']}*\n" if v.get("alias") else ""
-    await update.message.reply_text(
-        f"🧠 *Veredicto IA para* `{address[:16]}…`\n\n"
-        f"{alias_txt}"
-        f"Clasificación: *{v['clasificacion'].upper()}*\n"
-        f"Recomendación: {icono}\n"
-        f"Confianza: {v.get('confianza', '?')}%\n\n"
-        f"_{v.get('razon', '')}_",
-        parse_mode="Markdown")
+    await run_address_command(update.message.chat, "ia", ctx.args[0])
 
 
 @solo_admin
@@ -320,29 +621,7 @@ async def cmd_ficha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Uso: /ficha <address>")
         return
-    address = ctx.args[0].strip()
-    await update.message.reply_text("🧮 Calculando Wallet Score… (~1 min)")
-
-    def _run():
-        from wallet_score import compute_score, format_ficha
-        from signal_tracker import wallet_track_record, format_track_record
-        p = profile_wallet(address)
-        if not p["tx_sampled"]:
-            return None
-        conn = get_conn()
-        track = wallet_track_record(conn, address)
-        row = conn.execute("SELECT alias FROM wallets WHERE address=?",
-                           (address,)).fetchone()
-        conn.close()
-        s = compute_score(p, track)
-        alias = row["alias"] if row and row["alias"] else None
-        return format_ficha(address, s, alias, format_track_record(track))
-
-    ficha = await asyncio.to_thread(_run)
-    if not ficha:
-        await update.message.reply_text("Sin transacciones para esa dirección.")
-        return
-    await update.message.reply_text(ficha, parse_mode="Markdown")
+    await run_address_command(update.message.chat, "ficha", ctx.args[0])
 
 
 @solo_admin
@@ -352,69 +631,46 @@ async def cmd_preguntar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Uso: /preguntar <pregunta>\nEj: /preguntar ¿qué billetera "
             "tuvo mejor resultado en sus señales?")
         return
-    pregunta = " ".join(ctx.args)
-    await update.message.reply_text("🤔 Consultando la base…")
-    from ai_chat import answer_question
-    respuesta = await asyncio.to_thread(answer_question, pregunta)
-    await update.message.reply_text(respuesta)
+    await run_address_command(update.message.chat, "preguntar",
+                              " ".join(ctx.args))
 
 
 @solo_admin
 async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM signals ORDER BY ts DESC LIMIT 10").fetchall()
-    conn.close()
-    if not rows:
-        await update.message.reply_text(
-            "Sin señales aún. Llegarán cuando una billetera ⭐ compre algo.")
-        return
-    import time as _t
-    lines = ["📡 *Últimas señales:*\n"]
-    for s in rows:
-        hace = (_t.time() - s["ts"]) / 3600
-        try:
-            side = s["side"] or "compra"
-        except (KeyError, IndexError):
-            side = "compra"
-        emoji = "🟢" if side == "compra" else "🔴"
-        res = ""
-        try:
-            partes = []
-            if s["chg_1h"] is not None:
-                partes.append(f"1h: {s['chg_1h']:+.0f}%")
-            if s["chg_24h"] is not None:
-                partes.append(f"24h: {s['chg_24h']:+.0f}%")
-            if partes:
-                res = " → " + " · ".join(partes)
-        except (KeyError, IndexError):
-            pass
-        lines.append(
-            f"• {emoji} {side} `{s['mint'][:12]}…` — {s['sol']:.2f} SOL por "
-            f"`{s['wallet'][:8]}…` hace {hace:.1f}h{res}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text(_senales_text(), parse_mode="Markdown")
 
 
 @solo_admin
 async def cmd_app(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Abre el panel visual (Mini App de Telegram)."""
-    public_url = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
-    if not public_url:
+    kb = app_keyboard()
+    if not kb:
         await update.message.reply_text("Falta PUBLIC_URL para el panel.")
         return
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-        "📊 Abrir panel", web_app=WebAppInfo(url=f"https://{public_url}/app"))]])
     await update.message.reply_text(
         "Tu panel visual — top de billeteras, señales y stats en vivo:",
         reply_markup=kb)
 
 
 @solo_admin
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(_status_text(), parse_mode="Markdown")
+
+
+@solo_admin
 async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Chat libre: cualquier mensaje sin /comando activa al agente IA."""
+    """Chat libre. Si el hub estaba esperando un dato, lo consume aquí;
+    si no, cualquier texto sin /comando activa al agente IA."""
     texto = (update.message.text or "").strip()
     if not texto:
         return
+
+    # ¿El usuario había pulsado un botón que pedía dirección/pregunta?
+    cmd = AWAITING.pop(update.effective_user.id, None)
+    if cmd:
+        await run_address_command(update.message.chat, cmd, texto)
+        return
+
     await update.message.chat.send_action("typing")
     from ai_agent import chat, describe_action
     respuesta, accion = await asyncio.to_thread(chat, texto)
@@ -431,30 +687,23 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(respuesta)
 
 
-@solo_admin
-async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    conn = get_conn()
-    tokens = conn.execute("SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"]
-    pend = conn.execute(
-        "SELECT COUNT(*) c FROM winning_tokens WHERE analyzed=0").fetchone()["c"]
-    wallets = conn.execute("SELECT COUNT(*) c FROM wallets").fetchone()["c"]
-    tracked = conn.execute(
-        "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
-    descartadas = conn.execute(
-        "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
-    from db import get_setting
-    umbral = get_setting(conn, "min_signal_score", "0")
-    conn.close()
-    await update.message.reply_text(
-        f"📊 *Estado del sistema*\n\n"
-        f"⚙️ Ciclo automático: cada {AUTO_CYCLE_HOURS:g} h\n"
-        f"🎯 Umbral de señal: {float(umbral or 0):.0f}/100\n"
-        f"Tokens ganadores: {tokens} ({pend} pendientes)\n"
-        f"Billeteras registradas: {wallets}\n"
-        f"Billeteras rastreadas ⭐: {tracked}\n"
-        f"Descartadas/bots ❌: {descartadas}",
-        parse_mode="Markdown",
-    )
+# ─────────────────────────── ARRANQUE ─────────────────────────────────
+
+async def _post_init(app: Application):
+    """Registra el menú de comandos que se ve al pulsar '/' en Telegram."""
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("start", "Abrir el menú principal"),
+            BotCommand("menu", "Abrir el menú principal"),
+            BotCommand("top", "Top de billeteras"),
+            BotCommand("senales", "Últimas señales"),
+            BotCommand("status", "Estado del sistema"),
+            BotCommand("app", "Panel visual (Mini App)"),
+            BotCommand("ciclo", "Correr el pipeline ahora"),
+            BotCommand("preguntar", "Preguntar a la IA sobre tu base"),
+        ])
+    except Exception as e:
+        print(f"· set_my_commands falló: {e}")
 
 
 def main():
@@ -463,8 +712,9 @@ def main():
     if not ADMIN_ID:
         print("⚠️  TELEGRAM_ADMIN_ID no configurado: el bot responderá a "
               "CUALQUIERA. Configúralo antes de usarlo en serio.")
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("ciclo", cmd_ciclo))
     app.add_handler(CommandHandler("descubrir", cmd_descubrir))
     app.add_handler(CommandHandler("analizar", cmd_analizar))
