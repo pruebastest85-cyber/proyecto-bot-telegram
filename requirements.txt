@@ -1,3 +1,4 @@
 requests>=2.31
 python-telegram-bot[job-queue]>=21.0
 flask>=3.0
+psycopg2-binary>=2.9

@@ -1,19 +1,38 @@
 """
-Capa de base de datos (SQLite para la fase de validación).
-Cuando el sistema crezca, migrar a PostgreSQL es directo porque
-todo el SQL está concentrado aquí.
+Capa de base de datos con SOPORTE DOBLE: SQLite o PostgreSQL.
+
+Modo automático:
+  - Si existe la variable de entorno DATABASE_URL  → usa PostgreSQL.
+  - Si NO existe                                    → usa SQLite (como antes).
+
+Así el bot sigue funcionando exactamente igual con SQLite, y si algo
+falla en Postgres basta con quitar DATABASE_URL para volver atrás al
+instante. Todo el SQL de la app usa placeholders '?' e 'INSERT OR
+IGNORE' (estilo SQLite); en modo Postgres una capa fina los traduce a
+'%s' y 'ON CONFLICT DO NOTHING', para no reescribir el resto de módulos.
 
 Esquema:
   winning_tokens   → tokens que detectamos como ganadores y por qué
   wallets          → billeteras candidatas con sus métricas acumuladas
   appearances      → relación billetera↔token: la EVIDENCIA del porqué
   signals          → operaciones en tiempo real de billeteras ⭐
+  settings         → configuración (umbral de señal, aprendizajes…)
+  chat_history     → memoria del agente conversacional
 """
 
+import os
+import re
 import sqlite3
 from datetime import datetime, timezone
+
 from config import DB_PATH
 
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_PG = bool(DATABASE_URL)
+
+# ──────────────────────────── ESQUEMAS ────────────────────────────────────
+
+# Esquema SQLite (idéntico al histórico; las migraciones añaden columnas).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS winning_tokens (
     mint            TEXT PRIMARY KEY,
@@ -72,7 +91,95 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS chat_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    role            TEXT NOT NULL,      -- 'user' o 'assistant'
+    role            TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    ts              TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
+CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
+"""
+
+# Esquema PostgreSQL: mismas tablas con TODAS las columnas ya incluidas
+# (las que en SQLite se agregan por migración). REAL→DOUBLE PRECISION para
+# no perder precisión de precios; AUTOINCREMENT→SERIAL; ts→BIGINT.
+PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS winning_tokens (
+    mint             TEXT PRIMARY KEY,
+    symbol           TEXT,
+    name             TEXT,
+    chain            TEXT DEFAULT 'solana',
+    price_change_24h DOUBLE PRECISION,
+    volume_24h_usd   DOUBLE PRECISION,
+    liquidity_usd    DOUBLE PRECISION,
+    pair_address     TEXT,
+    detected_at      TEXT,
+    analyzed         INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS wallets (
+    address          TEXT PRIMARY KEY,
+    chain            TEXT DEFAULT 'solana',
+    first_seen       TEXT,
+    last_updated     TEXT,
+    winning_tokens_count INTEGER DEFAULT 0,
+    total_buys_sol   DOUBLE PRECISION DEFAULT 0,
+    est_realized_sol DOUBLE PRECISION DEFAULT 0,
+    label            TEXT,
+    is_bot           INTEGER DEFAULT 0,
+    is_tracked       INTEGER DEFAULT 0,
+    score            DOUBLE PRECISION DEFAULT 0,
+    ai_class         TEXT,
+    ai_follow        INTEGER,
+    ai_reason        TEXT,
+    alias            TEXT,
+    pnl_30d          DOUBLE PRECISION,
+    pnl_total        DOUBLE PRECISION,
+    pnl_updated      TEXT,
+    wallet_score     DOUBLE PRECISION
+);
+
+CREATE TABLE IF NOT EXISTS appearances (
+    id              SERIAL PRIMARY KEY,
+    wallet          TEXT NOT NULL,
+    mint            TEXT NOT NULL,
+    buy_sol         DOUBLE PRECISION,
+    buy_time        TEXT,
+    buy_rank        INTEGER,
+    est_pnl_sol     DOUBLE PRECISION,
+    reason          TEXT,
+    UNIQUE(wallet, mint)
+);
+
+CREATE TABLE IF NOT EXISTS signals (
+    signature       TEXT PRIMARY KEY,
+    wallet          TEXT NOT NULL,
+    mint            TEXT NOT NULL,
+    sol             DOUBLE PRECISION,
+    ts              BIGINT,
+    side            TEXT DEFAULT 'compra',
+    price_usd       DOUBLE PRECISION,
+    price_1h        DOUBLE PRECISION,
+    price_24h       DOUBLE PRECISION,
+    chg_1h          DOUBLE PRECISION,
+    chg_24h         DOUBLE PRECISION,
+    alerted_pct     DOUBLE PRECISION DEFAULT 0,
+    symbol          TEXT,
+    mc              DOUBLE PRECISION,
+    liq             DOUBLE PRECISION,
+    signal_score    DOUBLE PRECISION,
+    verdict         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key             TEXT PRIMARY KEY,
+    value           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chat_history (
+    id              SERIAL PRIMARY KEY,
+    role            TEXT NOT NULL,
     text            TEXT NOT NULL,
     ts              TEXT
 );
@@ -87,21 +194,91 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def get_setting(conn, key: str, default=None):
-    row = conn.execute("SELECT value FROM settings WHERE key=?",
-                       (key,)).fetchone()
-    return row["value"] if row else default
+# ─────────────── Capa de compatibilidad para PostgreSQL ───────────────────
+
+def _translate(sql: str) -> str:
+    """Traduce SQL estilo SQLite a PostgreSQL:
+       'INSERT OR IGNORE' → 'INSERT ... ON CONFLICT DO NOTHING'
+       placeholders '?'   → '%s'
+    """
+    ignore = re.search(r'INSERT\s+OR\s+IGNORE', sql, flags=re.I) is not None
+    q = re.sub(r'INSERT\s+OR\s+IGNORE', 'INSERT', sql, flags=re.I)
+    q = q.replace('?', '%s')
+    if ignore:
+        q = q.rstrip().rstrip(';') + ' ON CONFLICT DO NOTHING'
+    return q
 
 
-def set_setting(conn, key: str, value):
-    conn.execute(
-        """INSERT INTO settings (key, value) VALUES (?, ?)
-           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-        (key, str(value)))
-    conn.commit()
+class _PgCursor:
+    """Cursor mínimo compatible con el uso que hace la app (fetchone,
+    fetchall, rowcount, iteración)."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    def __iter__(self):
+        return iter(self._cur.fetchall())
 
 
-def get_conn() -> sqlite3.Connection:
+class _PgConn:
+    """Envoltura sobre una conexión psycopg2 que imita el subconjunto de la
+    API de sqlite3.Connection que usa la app: execute(), executescript(),
+    commit(), close(). Funciona en autocommit para evitar transacciones
+    colgadas y replicar el comportamiento de SQLite."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        import psycopg2.extras
+        cur = self._conn.cursor(
+            cursor_factory=psycopg2.extras.RealDictCursor)
+        q = _translate(sql)
+        if params:
+            cur.execute(q, tuple(params))
+        else:
+            cur.execute(q)
+        return _PgCursor(cur)
+
+    def executescript(self, script: str):
+        cur = self._conn.cursor()
+        cur.execute(script)
+        cur.close()
+
+    def commit(self):
+        # autocommit activado; no-op para compatibilidad.
+        pass
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+
+# ──────────────────────────── CONEXIÓN ────────────────────────────────────
+
+def get_conn():
+    """Devuelve una conexión lista para usar (SQLite o Postgres) con el
+    esquema ya creado. La interfaz es la misma en ambos modos."""
+    if USE_PG:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = True
+        pg = _PgConn(conn)
+        pg.executescript(PG_SCHEMA)
+        return pg
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
@@ -126,6 +303,20 @@ def get_conn() -> sqlite3.Connection:
             pass
     conn.commit()
     return conn
+
+
+def get_setting(conn, key: str, default=None):
+    row = conn.execute("SELECT value FROM settings WHERE key=?",
+                       (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn, key: str, value):
+    conn.execute(
+        """INSERT INTO settings (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+        (key, str(value)))
+    conn.commit()
 
 
 # ── Tokens ganadores ──────────────────────────────────────────────────────
