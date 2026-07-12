@@ -74,14 +74,27 @@ def _alert_milestone(conn, s, pct: float, price: float):
     hace = (time.time() - s["ts"]) / 3600
     simbolo = s["symbol"] or s["mint"][:8]
     subida = (mult - 1) * 100
-    tg_send(
-        f"🚀 *x{mult}*  ·  *{simbolo}*\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"📈 *+{subida:.0f}%* desde la señal\n"
-        f"💵 ${base:.6g}  →  *${price:.6g}*\n\n"
+    caption = (
+        f"🚀 *{simbolo}* hizo *x{mult}*  (+{subida:.0f}%)\n"
+        f"💵 ${base:.6g}  →  *${price:.6g}*\n"
         f"👤 Primer llamado: *{alias}*  ·  hace {hace:.1f}h\n"
-        f"`{s['mint']}`\n\n"
+        f"`{s['mint']}`\n"
         f"📊 [DexScreener](https://dexscreener.com/solana/{s['mint']})")
+
+    # Tarjeta con imagen (estilo Trojan); si falla, cae al texto normal
+    enviado = False
+    try:
+        from card_image import make_multiple_card
+        from realtime import tg_send_photo
+        img = make_multiple_card(mult, simbolo, subida, base, price,
+                                 alias, hace)
+        tg_send_photo(img, caption)
+        enviado = True
+    except Exception as e:
+        print(f"· Tarjeta de imagen falló, uso texto: {e}")
+    if not enviado:
+        tg_send(caption)
+
     set_setting(conn, key, mult)      # marca el múltiplo avisado para el token
     print(f"🚀 Alerta de subida: {simbolo} x{mult}")
 

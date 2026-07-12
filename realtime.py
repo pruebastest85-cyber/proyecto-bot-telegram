@@ -72,6 +72,21 @@ def tg_send(text: str):
         print(f"· No se pudo enviar alerta TG: {e}")
 
 
+def tg_send_photo(photo_bytes: bytes, caption: str = ""):
+    """Envía una foto con caption (Markdown) al admin — para tarjetas."""
+    if not (BOT_TOKEN and ADMIN_ID):
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data={"chat_id": int(ADMIN_ID), "caption": caption[:1000],
+                  "parse_mode": "Markdown"},
+            files={"photo": ("card.jpg", photo_bytes, "image/jpeg")},
+            timeout=25)
+    except requests.RequestException as e:
+        print(f"· No se pudo enviar foto TG: {e}")
+
+
 def tracked_addresses() -> list[str]:
     conn = get_conn()
     rows = conn.execute(
