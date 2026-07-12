@@ -75,11 +75,13 @@ def _alert_milestone(conn, s, pct: float, price: float):
     simbolo = s["symbol"] or s["mint"][:8]
     subida = (mult - 1) * 100
     tg_send(
-        f"🚀 *{simbolo} hizo x{mult}*  (+{subida:.0f}% desde la señal)\n\n"
-        f"Token: *{simbolo}*\n`{s['mint']}`\n"
-        f"Primer llamado: 👤 *{alias}* hace {hace:.1f}h\n"
-        f"Precio señal: ${base:.8g} → ahora: ${price:.8g}\n\n"
-        f"📊 dexscreener.com/solana/{s['mint']}")
+        f"🚀 *x{mult}*  ·  *{simbolo}*\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"📈 *+{subida:.0f}%* desde la señal\n"
+        f"💵 ${base:.6g}  →  *${price:.6g}*\n\n"
+        f"👤 Primer llamado: *{alias}*  ·  hace {hace:.1f}h\n"
+        f"`{s['mint']}`\n\n"
+        f"📊 [DexScreener](https://dexscreener.com/solana/{s['mint']})")
     set_setting(conn, key, mult)      # marca el múltiplo avisado para el token
     print(f"🚀 Alerta de subida: {simbolo} x{mult}")
 

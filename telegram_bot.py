@@ -209,30 +209,38 @@ def _senales_text() -> str:
         "SELECT * FROM signals ORDER BY ts DESC LIMIT 10").fetchall()
     conn.close()
     if not rows:
-        return "Sin señales aún. Llegarán cuando una billetera ⭐ compre algo."
-    lines = ["📡 *Últimas señales:*\n"]
+        return ("📡 *Últimas señales*\n\n"
+                "_Aún no hay señales. Llegarán cuando una billetera ⭐ "
+                "compre o venda algo._")
+    lines = ["📡 *Últimas señales*", "━━━━━━━━━━━━━━", ""]
     for s in rows:
         hace = (_t.time() - s["ts"]) / 3600
+        cuando = f"hace {hace:.1f}h" if hace >= 1 else f"hace {hace*60:.0f} min"
         try:
             side = s["side"] or "compra"
         except (KeyError, IndexError):
             side = "compra"
         emoji = "🟢" if side == "compra" else "🔴"
+        verbo = "compra" if side == "compra" else "venta"
+        try:
+            simbolo = s["symbol"] or (s["mint"][:10] + "…")
+        except (KeyError, IndexError):
+            simbolo = s["mint"][:10] + "…"
         res = ""
         try:
             partes = []
             if s["chg_1h"] is not None:
-                partes.append(f"1h: {s['chg_1h']:+.0f}%")
+                partes.append(f"1h {s['chg_1h']:+.0f}%")
             if s["chg_24h"] is not None:
-                partes.append(f"24h: {s['chg_24h']:+.0f}%")
+                partes.append(f"24h {s['chg_24h']:+.0f}%")
             if partes:
-                res = " → " + " · ".join(partes)
+                res = "\n    📈 " + "  ·  ".join(partes)
         except (KeyError, IndexError):
             pass
         lines.append(
-            f"• {emoji} {side} `{s['mint'][:12]}…` — {s['sol']:.2f} SOL por "
-            f"`{s['wallet'][:8]}…` hace {hace:.1f}h{res}")
-    return "\n".join(lines)
+            f"{emoji} *{simbolo}*  ·  {verbo}  ·  {s['sol']:.2f} SOL"
+            f"\n    🕒 {cuando}{res}\n")
+    return "\n".join(lines).rstrip()
 
 
 def _evidencia_text(address: str) -> str:

@@ -198,6 +198,16 @@ def _wget(row, key):
         return None
 
 
+def _bar(score, width=10) -> str:
+    """Barra visual del score, ej. 63/100 -> ▰▰▰▰▰▰▱▱▱▱."""
+    try:
+        s = max(0.0, min(100.0, float(score)))
+    except (TypeError, ValueError):
+        s = 0.0
+    filled = int(round(s / 100 * width))
+    return "▰" * filled + "▱" * (width - filled)
+
+
 def process_transactions(txs: list[dict]):
     tracked = set(tracked_addresses())
     if not tracked:
@@ -323,20 +333,23 @@ def process_transactions(txs: list[dict]):
         track_txt = f"\n{track_line}" if track_line else ""
         pat_txt = f"\n{patron_line}" if patron_line else ""
 
+        bar = _bar(score_sig)
+        div = "━━━━━━━━━━━━━━"
         tg_send(
-            f"{side_icon} *SEÑAL: {side_txt} de billetera ⭐*{cons_txt}\n"
-            f"🎯 *Score de señal: {score_sig}/100* ({desglose})\n\n"
-            f"Token: *{t['symbol']}*\n`{trade['mint']}`\n"
-            f"{token_block}\n"
-            f"{verbo}: {trade['sol']:.2f} SOL\n"
-            f"👤 Billetera: *{alias}* ({clase})\n"
-            f"`{trade['wallet']}`"
-            f"{pnl_txt}{track_txt}{pat_txt}"
-            f"\n{redes}\n"
-            f"{v_icon} 🧠 *{verdict.get('veredicto', 'sin veredicto').upper()}*: "
+            f"{side_icon} *{side_txt}* de billetera ⭐{cons_txt}\n"
+            f"{div}\n"
+            f"💎 *{t['symbol']}*\n`{trade['mint']}`\n\n"
+            f"🎯 Señal  {bar}  *{score_sig}/100*\n\n"
+            f"👤 *{alias}*  ·  _{clase}_\n"
+            f"💵 {verbo}: *{trade['sol']:.2f} SOL*"
+            f"{pnl_txt}{track_txt}{pat_txt}\n"
+            f"{div}\n"
+            f"📋 *Token*\n{token_block}{redes}\n"
+            f"{div}\n"
+            f"{v_icon} *{verdict.get('veredicto', 'sin veredicto').upper()}*\n"
             f"_{verdict.get('razon', '')}_\n\n"
-            f"📊 dexscreener.com/solana/{trade['mint']}\n"
-            f"📈 gmgn.ai/sol/token/{trade['mint']}")
+            f"📊 [DexScreener](https://dexscreener.com/solana/{trade['mint']})"
+            f"  ·  📈 [GMGN](https://gmgn.ai/sol/token/{trade['mint']})")
         print(f"📡 Señal {trade['side']}: {t['symbol']} "
               f"por {trade['wallet'][:8]}")
     conn.close()
