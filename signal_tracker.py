@@ -5,6 +5,11 @@ Track record de señales: mide qué pasó con el precio de cada token
 Esto le da a la IA el dato definitivo para decidir si una billetera
 vale la pena: no cómo se ve su historial, sino cuántas de sus señales
 REALMENTE ganaron dentro de nuestro sistema.
+
+Alertas de subida (v6): saltan por MÚLTIPLOS del precio de la señal
+(x2, x3, x4, x5…) y solo UNA vez por token, aunque varias billeteras ⭐
+lo hayan comprado. El mayor múltiplo ya avisado por token se guarda en
+la tabla settings (clave "mult_alert:<mint>").
 """
 
 import time
@@ -12,14 +17,13 @@ import time
 import requests
 
 import config
-from db import get_conn
+from db import get_conn, get_setting, set_setting
 
 HOUR = 3600
 DAY = 86400
 
-# Hitos de subida (%) que disparan alerta, una sola vez cada uno
-MILESTONES = (50, 100, 200, 500, 1000)
 WATCH_HOURS = 48   # cuánto tiempo vigilamos el precio tras la señal
+MIN_MULTIPLE = 2   # empezar a avisar desde el doble (x2) en adelante
 
 
 def _price(mint: str) -> float | None:
@@ -37,37 +41,55 @@ def _price(mint: str) -> float | None:
 
 
 def _alert_milestone(conn, s, pct: float, price: float):
-    """Alerta al admin cuando un token señalado cruza un hito de subida."""
-    hito = max((m for m in MILESTONES if pct >= m), default=None)
-    if hito is None or (s["alerted_pct"] or 0) >= hito:
+    """Avisa cuando el token señalado alcanza un NUEVO múltiplo (x2, x3, x4…).
+
+    Se deduplica POR TOKEN: se guarda en settings el mayor múltiplo ya
+    avisado para ese mint, así que aunque el token lo hayan comprado
+    varias billeteras ⭐, solo se manda una alerta por cada múltiplo.
+    """
+    base = s["price_usd"]
+    if not base or base <= 0:
         return
+    mult = int(price / base)          # 2 = x2 (doble), 3 = x3, …
+    if mult < MIN_MULTIPLE:
+        return
+
+    key = f"mult_alert:{s['mint']}"
+    last = 0
+    try:
+        last = int(float(get_setting(conn, key, "0") or 0))
+    except (TypeError, ValueError):
+        last = 0
+    if mult <= last:
+        return                        # ese múltiplo ya se avisó
+
     try:
         from realtime import tg_send
     except Exception:
         return
+
     w = conn.execute("SELECT alias FROM wallets WHERE address=?",
                      (s["wallet"],)).fetchone()
     alias = (w["alias"] if w and w["alias"] else f"{s['wallet'][:8]}…")
     hace = (time.time() - s["ts"]) / 3600
     simbolo = s["symbol"] or s["mint"][:8]
+    subida = (mult - 1) * 100
     tg_send(
-        f"🚀 *+{pct:.0f}% desde la señal*\n\n"
+        f"🚀 *{simbolo} hizo x{mult}*  (+{subida:.0f}% desde la señal)\n\n"
         f"Token: *{simbolo}*\n`{s['mint']}`\n"
-        f"Lo compró: 👤 *{alias}* hace {hace:.1f}h\n"
-        f"Precio señal: ${s['price_usd']:.8g} → ahora: ${price:.8g}\n\n"
+        f"Primer llamado: 👤 *{alias}* hace {hace:.1f}h\n"
+        f"Precio señal: ${base:.8g} → ahora: ${price:.8g}\n\n"
         f"📊 dexscreener.com/solana/{s['mint']}")
-    conn.execute("UPDATE signals SET alerted_pct=? WHERE signature=?",
-                 (float(hito), s["signature"]))
-    conn.commit()
-    print(f"🚀 Alerta de subida: {simbolo} +{pct:.0f}%")
+    set_setting(conn, key, mult)      # marca el múltiplo avisado para el token
+    print(f"🚀 Alerta de subida: {simbolo} x{mult}")
 
 
 def track_outcomes() -> int:
     """
     1) Rellena price_1h/price_24h (y % de cambio) de las señales de
        compra que ya cumplieron la edad necesaria.
-    2) Vigila el precio de las señales recientes (<48h) y alerta al
-       cruzar hitos de subida (+50%, +100%, +200%, +500%, +1000%).
+    2) Vigila el precio de las señales recientes (<48h) y avisa cuando
+       el token alcanza un nuevo múltiplo (x2, x3, x4…).
     Pensado para correr como job periódico (cada ~15 min).
     """
     now = time.time()
@@ -98,7 +120,7 @@ def track_outcomes() -> int:
                 "UPDATE signals SET price_24h=?, chg_24h=? WHERE signature=?",
                 (p, pct, s["signature"]))
             updated += 1
-        # Alertas de subida solo para señales recientes
+        # Alertas de múltiplos solo para señales recientes
         if now - s["ts"] <= WATCH_HOURS * HOUR:
             _alert_milestone(conn, s, pct, p)
     conn.commit()

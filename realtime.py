@@ -1,8 +1,10 @@
 """
 Fase 2 — Monitoreo en tiempo real de billeteras ⭐.
 
-v4: detecta COMPRAS y VENTAS; cada señal incluye alias IA y PnL de la
+v5: detecta COMPRAS y VENTAS; cada señal incluye alias IA y PnL de la
 billetera, link a DexScreener y redes sociales del token.
+Anti-duplicados: un candado global evita que dos entregas simultáneas
+del mismo webhook de Helius alerten la misma operación dos veces.
 
 Piezas:
   1. Servidor de webhooks (Flask): recibe de Helius cada transacción
@@ -38,6 +40,11 @@ PORT = int(os.getenv("PORT", "8080"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# Candado anti-duplicados: serializa el "quién registra primero la señal"
+# para que dos hilos (entregas simultáneas del mismo webhook) no alerten
+# la misma operación dos veces.
+_SIGNAL_LOCK = threading.Lock()
 
 HELIUS_WEBHOOKS = "https://api.helius.xyz/v0/webhooks"
 
@@ -200,14 +207,18 @@ def process_transactions(txs: list[dict]):
         trade = _detect_trade(tx, tracked)
         if not trade:
             continue
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO signals (signature, wallet, mint, sol, ts,"
-            " side) VALUES (?,?,?,?,?,?)",
-            (trade["signature"], trade["wallet"], trade["mint"], trade["sol"],
-             trade["ts"], trade["side"]))
-        conn.commit()
-        if not cur.rowcount:
-            continue  # ya procesada
+        # Candado anti-duplicados: solo un hilo puede "ganar" el registro
+        # de esta firma; el resto la ve ya existente y no re-alerta.
+        with _SIGNAL_LOCK:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO signals (signature, wallet, mint, sol,"
+                " ts, side) VALUES (?,?,?,?,?,?)",
+                (trade["signature"], trade["wallet"], trade["mint"],
+                 trade["sol"], trade["ts"], trade["side"]))
+            conn.commit()
+            es_nueva = cur.rowcount
+        if not es_nueva:
+            continue  # ya procesada, no re-alertar
 
         es_compra = trade["side"] == "compra"
 
