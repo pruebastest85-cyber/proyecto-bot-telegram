@@ -96,6 +96,19 @@ CREATE TABLE IF NOT EXISTS chat_history (
     ts              TEXT
 );
 
+CREATE TABLE IF NOT EXISTS positions (
+    wallet          TEXT NOT NULL,
+    mint            TEXT NOT NULL,
+    tokens          REAL DEFAULT 0,     -- tokens que tiene ahora
+    sol_cost        REAL DEFAULT 0,     -- SOL gastado en lo que aún tiene
+    realized_sol    REAL DEFAULT 0,     -- profit realizado acumulado (SOL)
+    buys            INTEGER DEFAULT 0,
+    sells           INTEGER DEFAULT 0,
+    first_ts        INTEGER,
+    last_ts         INTEGER,
+    PRIMARY KEY (wallet, mint)
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
 CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
@@ -317,6 +330,120 @@ def set_setting(conn, key: str, value):
            ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
         (key, str(value)))
     conn.commit()
+
+
+# ── Posiciones (tokens que tiene cada billetera y su profit) ──────────────
+
+def get_position(conn, wallet: str, mint: str):
+    return conn.execute(
+        "SELECT * FROM positions WHERE wallet=? AND mint=?",
+        (wallet, mint)).fetchone()
+
+
+def apply_buy(conn, wallet: str, mint: str, sol: float, tokens: float,
+              ts: int) -> dict:
+    """Registra una compra y devuelve info para la alerta (incluye si es
+    acumulación: ya tenía tokens de ese mint)."""
+    sol = sol or 0.0
+    tokens = tokens or 0.0
+    row = get_position(conn, wallet, mint)
+    if row is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO positions (wallet, mint, first_ts) "
+            "VALUES (?,?,?)", (wallet, mint, ts))
+        tokens0 = cost0 = 0.0
+        buys0 = 0
+    else:
+        tokens0 = row["tokens"] or 0.0
+        cost0 = row["sol_cost"] or 0.0
+        buys0 = row["buys"] or 0
+    is_accum = buys0 >= 1 or tokens0 > 0
+    tokens_new = tokens0 + tokens
+    cost_new = cost0 + sol
+    buys_new = buys0 + 1
+    conn.execute(
+        "UPDATE positions SET tokens=?, sol_cost=?, buys=?, last_ts=? "
+        "WHERE wallet=? AND mint=?",
+        (tokens_new, cost_new, buys_new, ts, wallet, mint))
+    conn.commit()
+    return {"tokens_bought": tokens, "total_tokens": tokens_new,
+            "buys": buys_new, "is_accumulation": is_accum,
+            "sol_invertido": cost_new}
+
+
+def apply_sell(conn, wallet: str, mint: str, sol: float, tokens: float,
+               ts: int) -> dict:
+    """Registra una venta y calcula profit realizado, % vendido y remanente.
+    Si no habíamos visto la compra, marca known=False."""
+    sol = sol or 0.0
+    tokens = tokens or 0.0
+    row = get_position(conn, wallet, mint)
+    tokens0 = (row["tokens"] if row else 0.0) or 0.0
+    if row is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO positions (wallet, mint, first_ts) "
+            "VALUES (?,?,?)", (wallet, mint, ts))
+    if tokens0 <= 0:
+        # No conocemos su compra: registramos la venta sin PnL fiable.
+        conn.execute(
+            "UPDATE positions SET sells=COALESCE(sells,0)+1, last_ts=? "
+            "WHERE wallet=? AND mint=?", (ts, wallet, mint))
+        conn.commit()
+        return {"known": False, "tokens_sold": tokens, "proceeds": sol,
+                "realized_this": None, "realized_total": None,
+                "remaining_tokens": None, "pct_sold": None,
+                "fully_sold": None}
+    cost0 = row["sol_cost"] or 0.0
+    real0 = row["realized_sol"] or 0.0
+    sells0 = row["sells"] or 0
+    frac = min(1.0, tokens / tokens0) if tokens0 > 0 else 1.0
+    cost_of_sold = cost0 * frac
+    realized_this = sol - cost_of_sold
+    tokens_left = max(0.0, tokens0 - tokens)
+    cost_left = max(0.0, cost0 - cost_of_sold)
+    realized_total = real0 + realized_this
+    fully = tokens_left <= tokens0 * 0.02          # ≤2% restante = vendió todo
+    conn.execute(
+        "UPDATE positions SET tokens=?, sol_cost=?, realized_sol=?, "
+        "sells=?, last_ts=? WHERE wallet=? AND mint=?",
+        (tokens_left, cost_left, realized_total, sells0 + 1, ts, wallet, mint))
+    conn.commit()
+    return {"known": True, "tokens_sold": tokens, "proceeds": sol,
+            "realized_this": realized_this, "realized_total": realized_total,
+            "remaining_tokens": tokens_left, "pct_sold": frac * 100,
+            "fully_sold": fully}
+
+
+def wallet_positions(conn, wallet: str, limit: int = 25):
+    return conn.execute(
+        "SELECT mint, tokens, sol_cost, realized_sol, buys, sells, last_ts "
+        "FROM positions WHERE wallet=? ORDER BY last_ts DESC LIMIT ?",
+        (wallet, limit)).fetchall()
+
+
+def wallet_positions_summary(conn, wallet: str):
+    """Resumen de posiciones/transacciones de una billetera (para la IA)."""
+    rows = wallet_positions(conn, wallet, 30)
+    if not rows:
+        return None
+    abiertas = [r for r in rows if (r["tokens"] or 0) > 0]
+    realizado = sum((r["realized_sol"] or 0) for r in rows)
+    invertido_abierto = sum((r["sol_cost"] or 0) for r in abiertas)
+    return {
+        "posiciones_totales": len(rows),
+        "posiciones_abiertas": len(abiertas),
+        "profit_realizado_sol": round(realizado, 2),
+        "sol_invertido_en_abiertas": round(invertido_abierto, 2),
+        "detalle": [
+            {"mint": r["mint"],
+             "tokens_actuales": r["tokens"],
+             "sol_invertido": round(r["sol_cost"] or 0, 3),
+             "profit_realizado_sol": round(r["realized_sol"] or 0, 2),
+             "sigue_dentro": (r["tokens"] or 0) > 0,
+             "compras": r["buys"], "ventas": r["sells"]}
+            for r in rows[:12]
+        ],
+    }
 
 
 # ── Tokens ganadores ──────────────────────────────────────────────────────

@@ -2,20 +2,27 @@
 Chat con la base de datos: /preguntar <pregunta en lenguaje natural>.
 
 Arma un snapshot compacto de la base (billeteras, señales recientes con
-resultados, totales) y se lo pasa a Claude para que responda preguntas
-como "¿qué billetera tuvo mejor ROI este mes?" o "¿quién acumula hoy?".
+resultados, posiciones/transacciones, totales) y se lo pasa a Claude para
+que responda preguntas como "¿qué billetera tuvo mejor ROI este mes?",
+"¿quién acumula hoy?" o "¿cuánto profit lleva la billetera X y qué tiene?".
+Si la pregunta menciona una dirección, se adjunta el detalle de esa
+billetera (tokens que tiene, invertido, profit realizado, compras/ventas).
 """
 
 import json
 import os
+import re
 
 import requests
 
-from db import get_conn
+from db import get_conn, wallet_positions_summary
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
 MODEL = "claude-haiku-4-5-20251001"
+
+# Detecta una dirección estilo Solana dentro de la pregunta
+_ADDR = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
 
 
 def _snapshot() -> dict:
@@ -28,6 +35,9 @@ def _snapshot() -> dict:
     senales = [dict(r) for r in conn.execute(
         """SELECT wallet, mint, symbol, side, sol, ts, chg_1h, chg_24h, mc
            FROM signals ORDER BY ts DESC LIMIT 20""").fetchall()]
+    posiciones = [dict(r) for r in conn.execute(
+        """SELECT wallet, mint, tokens, sol_cost, realized_sol, buys, sells
+           FROM positions ORDER BY last_ts DESC LIMIT 25""").fetchall()]
     tot = {
         "billeteras": conn.execute(
             "SELECT COUNT(*) c FROM wallets").fetchone()["c"],
@@ -42,7 +52,8 @@ def _snapshot() -> dict:
     }
     conn.close()
     return {"totales": tot, "top_billeteras": wallets,
-            "senales_recientes": senales}
+            "senales_recientes": senales,
+            "posiciones_recientes": posiciones}
 
 
 def answer_question(pregunta: str) -> str:
@@ -52,15 +63,34 @@ def answer_question(pregunta: str) -> str:
         data = _snapshot()
     except Exception as e:
         return f"No pude leer la base: {e}"
+
+    # Si la pregunta menciona una dirección, adjunta su detalle de posiciones
+    detalle_billetera = None
+    m = _ADDR.search(pregunta or "")
+    if m:
+        try:
+            conn = get_conn()
+            detalle_billetera = wallet_positions_summary(conn, m.group(0))
+            conn.close()
+        except Exception:
+            detalle_billetera = None
+    if detalle_billetera:
+        data["billetera_consultada"] = {"address": m.group(0),
+                                        **detalle_billetera}
+
     prompt = (
         "Eres el analista del sistema de rastreo de billeteras rentables "
         "en Solana del usuario. Responde su pregunta usando SOLO los datos "
-        "del snapshot JSON (campos en SOL salvo mc que es USD; ts es epoch; "
-        "chg_1h/chg_24h son % de cambio del token tras la señal). "
+        "del snapshot JSON. Notas de campos: montos en SOL salvo mc (USD); "
+        "ts es epoch; chg_1h/chg_24h son % del token tras la señal; "
+        "'posiciones_recientes' y 'billetera_consultada' traen lo que cada "
+        "billetera tiene ahora (tokens_actuales), lo invertido (sol_cost), "
+        "el profit ya realizado (realized_sol) y cuántas compras/ventas "
+        "hizo. Si 'billetera_consultada' existe, la pregunta es sobre esa "
+        "billetera: responde con sus tenencias y profit. "
         "Responde en español, breve y directo, abrevia direcciones a los "
-        "primeros 8 caracteres. Si los datos no alcanzan para responder, "
-        "dilo honestamente y sugiere qué comando usar (/top, /senales, "
-        "/perfil, /ficha).\n\n"
+        "primeros 8 caracteres. Si los datos no alcanzan, dilo y sugiere un "
+        "comando (/top, /senales, /perfil, /ficha).\n\n"
         f"SNAPSHOT: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
         f"PREGUNTA: {pregunta}")
     try:

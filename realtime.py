@@ -191,7 +191,7 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
             delta = _wallet_sol_delta(tx, buyer)
             if delta < 0 and abs(delta) >= MIN_SIGNAL_SOL:
                 return {"wallet": buyer, "mint": mint, "sol": abs(delta),
-                        "side": "compra",
+                        "side": "compra", "tokens": _tok_amount(t),
                         "signature": tx.get("signature", ""),
                         "ts": tx.get("timestamp") or int(time.time())}
 
@@ -200,7 +200,7 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
             delta = _wallet_sol_delta(tx, seller)
             if delta > 0 and delta >= MIN_SIGNAL_SOL:
                 return {"wallet": seller, "mint": mint, "sol": delta,
-                        "side": "venta",
+                        "side": "venta", "tokens": _tok_amount(t),
                         "signature": tx.get("signature", ""),
                         "ts": tx.get("timestamp") or int(time.time())}
     return None
@@ -221,6 +221,33 @@ def _bar(score, width=10) -> str:
         s = 0.0
     filled = int(round(s / 100 * width))
     return "▰" * filled + "▱" * (width - filled)
+
+
+def _tok_amount(transfer: dict) -> float:
+    """Cantidad de tokens (UI amount) de un tokenTransfer de Helius."""
+    v = transfer.get("tokenAmount")
+    try:
+        return abs(float(v)) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_amount(x) -> str:
+    """Formatea cantidades de tokens: 1.20B, 850.00K, 1.50M…"""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "?"
+    a = abs(x)
+    if a >= 1_000_000_000:
+        return f"{x / 1_000_000_000:.2f}B"
+    if a >= 1_000_000:
+        return f"{x / 1_000_000:.2f}M"
+    if a >= 1_000:
+        return f"{x / 1_000:.2f}K"
+    if a >= 1:
+        return f"{x:.0f}"
+    return f"{x:.4g}"
 
 
 def process_transactions(txs: list[dict]):
@@ -246,6 +273,17 @@ def process_transactions(txs: list[dict]):
             continue  # ya procesada, no re-alertar
 
         es_compra = trade["side"] == "compra"
+
+        # Posición de la billetera en este token (acumulación / profit)
+        from db import apply_buy, apply_sell
+        tokens_tx = trade.get("tokens") or 0.0
+        if es_compra:
+            pos = apply_buy(conn, trade["wallet"], trade["mint"],
+                            trade["sol"], tokens_tx, trade["ts"])
+        else:
+            pos = apply_sell(conn, trade["wallet"], trade["mint"],
+                             trade["sol"], tokens_tx, trade["ts"])
+        es_acum = bool(es_compra and pos.get("is_accumulation"))
 
         since = trade["ts"] - CONSENSUS_WINDOW_MIN * 60
         consensus = conn.execute(
@@ -319,9 +357,18 @@ def process_transactions(txs: list[dict]):
                   f"score {score_sig} < umbral {umbral:.0f}")
             continue
 
-        side_icon = "🟢" if es_compra else "🔴"
-        side_txt = "COMPRA" if es_compra else "VENTA"
-        verbo = "Compró" if es_compra else "Vendió por"
+        if es_acum:
+            side_icon = "🟢➕"
+            side_txt = f"ACUMULANDO · compra #{pos['buys']}"
+            verbo = "Acumuló"
+        elif es_compra:
+            side_icon = "🟢"
+            side_txt = "COMPRA"
+            verbo = "Compró"
+        else:
+            side_icon = "🔴"
+            side_txt = "VENTA"
+            verbo = "Vendió"
         v_icon = {"entrar": "🟢", "precaucion": "🟡", "evitar": "🔴",
                   "salir": "🚪"}.get(verdict.get("veredicto"), "⚪")
         cons_txt = (f"\n🔥 *CONSENSO: {consensus} billeteras ⭐ "
@@ -348,6 +395,34 @@ def process_transactions(txs: list[dict]):
         track_txt = f"\n{track_line}" if track_line else ""
         pat_txt = f"\n{patron_line}" if patron_line else ""
 
+        # Bloque de posición: tokens obtenidos/vendidos, total y profit
+        sym = t.get('symbol') or trade['mint'][:6]
+        if es_compra:
+            linea_sol = f"💵 {verbo}: *{trade['sol']:.2f} SOL*"
+            pos_txt = (
+                f"\n📥 Obtuvo: *{_fmt_amount(pos['tokens_bought'])} {sym}*"
+                f"\n📦 Tiene ahora: *{_fmt_amount(pos['total_tokens'])} {sym}*"
+                f"  ·  invertido {pos['sol_invertido']:.2f} SOL")
+        else:
+            linea_sol = f"💵 Recibió: *{trade['sol']:.2f} SOL*"
+            if pos.get("known"):
+                pl = pos["realized_this"] or 0.0
+                pl_icon = "🟢" if pl >= 0 else "🔴"
+                if pos["fully_sold"]:
+                    resto = "✅ Vendió el *100%* (cerró la posición)"
+                else:
+                    resto = (f"📦 Le queda: *{_fmt_amount(pos['remaining_tokens'])} {sym}*"
+                             f"  ·  vendió *{pos['pct_sold']:.0f}%*")
+                pos_txt = (
+                    f"\n📤 Vendió: *{_fmt_amount(pos['tokens_sold'])} {sym}*"
+                    f"\n{pl_icon} Profit realizado: *{pl:+.2f} SOL*"
+                    f"  (total {pos['realized_total']:+.2f} SOL)"
+                    f"\n{resto}")
+            else:
+                pos_txt = (
+                    f"\n📤 Vendió: *{_fmt_amount(pos['tokens_sold'])} {sym}*"
+                    f"\n_(no vi su compra; profit desconocido)_")
+
         bar = _bar(score_sig)
         div = "━━━━━━━━━━━━━━"
         tg_send(
@@ -356,7 +431,7 @@ def process_transactions(txs: list[dict]):
             f"💎 *{t['symbol']}*\n`{trade['mint']}`\n\n"
             f"🎯 Señal  {bar}  *{score_sig}/100*\n\n"
             f"👤 *{alias}*  ·  _{clase}_\n"
-            f"💵 {verbo}: *{trade['sol']:.2f} SOL*"
+            f"{linea_sol}{pos_txt}"
             f"{pnl_txt}{track_txt}{pat_txt}\n"
             f"{div}\n"
             f"📋 *Token*\n{token_block}{redes}\n"

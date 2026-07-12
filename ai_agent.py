@@ -22,13 +22,17 @@ TOOLS = [
     {"name": "consultar_base",
      "description": ("Lee el snapshot de la base de datos: top billeteras "
                      "(alias, scores, PnL, clase), señales recientes con "
-                     "resultados 1h/24h y totales del sistema. Úsala para "
-                     "cualquier pregunta sobre los datos."),
+                     "resultados 1h/24h, POSICIONES (qué tiene cada billetera, "
+                     "invertido, profit realizado, compras/ventas) y totales "
+                     "del sistema. Úsala para cualquier pregunta sobre los "
+                     "datos, incluido cuánto tiene o cuánto ganó una billetera."),
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "perfil_billetera",
      "description": ("Investiga a fondo una billetera on-chain (~1 min): "
-                     "actividad, PnL, win rate, retención, huellas de bot "
-                     "y Wallet Score 0-100."),
+                     "actividad, PnL, win rate, retención, huellas de bot, "
+                     "Wallet Score 0-100 y sus POSICIONES seguidas por el "
+                     "sistema (tokens que tiene ahora, SOL invertido, profit "
+                     "realizado y nº de compras/ventas de cada token)."),
      "input_schema": {"type": "object", "properties": {
          "address": {"type": "string", "description": "dirección Solana"}},
          "required": ["address"]}},
@@ -67,8 +71,10 @@ SYSTEM = (
     "últimos mensajes de la conversación. Responde en español, breve "
     "y directo, sin markdown pesado. Abrevia direcciones a 8 caracteres al "
     "mencionarlas (pero pasa la dirección COMPLETA a las herramientas). "
-    "Usa las herramientas cuando haga falta; para preguntas de datos usa "
-    "consultar_base. Para acciones que modifican, invoca la herramienta "
+    "Usa las herramientas cuando haga falta; para preguntas de datos "
+    "(incluido cuánto tiene o cuánto profit hizo una billetera) usa "
+    "consultar_base, y perfil_billetera si preguntan por una dirección "
+    "concreta. Para acciones que modifican, invoca la herramienta "
     "directamente: el sistema le pedirá confirmación al usuario, no tú.")
 
 HISTORY_TURNS = 12   # mensajes de memoria (6 intercambios)
@@ -106,17 +112,19 @@ def _exec_read(name: str, args: dict) -> str:
         if name == "consultar_base":
             from ai_chat import _snapshot
             return json.dumps(_snapshot(), ensure_ascii=False,
-                              default=str)[:7000]
+                              default=str)[:8000]
         if name == "perfil_billetera":
             from wallet_profiler import profile_wallet
             from wallet_score import compute_score
             from signal_tracker import wallet_track_record
+            from db import wallet_positions_summary
             addr = (args.get("address") or "").strip()
             p = profile_wallet(addr)
             if not p["tx_sampled"]:
                 return "Sin transacciones recuperadas para esa dirección."
             conn = get_conn()
             tr = wallet_track_record(conn, addr)
+            posiciones = wallet_positions_summary(conn, addr)
             conn.close()
             s = compute_score(p, tr)
             comp = {"wallet_score": s,
@@ -129,7 +137,8 @@ def _exec_read(name: str, args: dict) -> str:
                     "posible_bot": p["possible_bot"],
                     "flips_1min_pct": p.get("flips_1min_pct"),
                     "horas_activas_24": p.get("active_hours_24"),
-                    "track_record": tr}
+                    "track_record": tr,
+                    "posiciones_seguidas": posiciones}
             return json.dumps(comp, ensure_ascii=False, default=str)
     except Exception as e:
         return f"Error ejecutando {name}: {e}"
