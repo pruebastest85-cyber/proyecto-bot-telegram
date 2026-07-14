@@ -523,11 +523,18 @@ def recompute_scores(conn, min_winning_tokens: int):
 
 
 def top_wallets(conn, limit=20):
+    # Primero las ⭐ rastreadas, ordenadas por su calidad real (Wallet Score
+    # 0-100 de la IA); luego el resto de candidatas por el score de
+    # descubrimiento. Así las mejores probadas quedan siempre arriba.
     return conn.execute(
         """SELECT address, winning_tokens_count, total_buys_sol, score, is_tracked,
                   ai_class, alias, pnl_30d, pnl_total, wallet_score
            FROM wallets WHERE is_bot = 0
-           ORDER BY score DESC LIMIT ?""",
+           ORDER BY is_tracked DESC,
+                    CASE WHEN wallet_score IS NULL THEN 1 ELSE 0 END,
+                    wallet_score DESC,
+                    score DESC
+           LIMIT ?""",
         (limit,),
     ).fetchall()
 
