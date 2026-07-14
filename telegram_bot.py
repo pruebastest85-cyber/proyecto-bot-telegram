@@ -386,6 +386,17 @@ async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
             print(f"No se pudo avisar al admin: {e}")
 
 
+async def sync_webhook_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Re-sincroniza el webhook de Helius con las billeteras ⭐ actuales, por
+    si alguna se volvió rastreada entre ciclos (así ninguna se queda sin
+    monitorear hasta el próximo ciclo de 6h)."""
+    try:
+        msg = await asyncio.to_thread(sync_helius_webhook)
+        print(f"📡 Re-sync webhook: {msg}")
+    except Exception as e:
+        print(f"· sync_webhook_job falló: {e}")
+
+
 # ─────────────────────────── SEGURIDAD ────────────────────────────────
 
 def solo_admin(func):
@@ -765,6 +776,9 @@ def main():
                                 name="watchdog")
     app.job_queue.run_repeating(learning_job, interval=7 * 86400,
                                 first=3 * 86400, name="weekly_learning")
+    # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
+    app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
+                                name="sync_webhook")
 
     print(f"🤖 Bot corriendo. Ciclo automático cada {AUTO_CYCLE_HOURS:g} h.")
     app.run_polling()

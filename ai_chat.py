@@ -32,6 +32,12 @@ def _snapshot() -> dict:
                   winning_tokens_count, pnl_30d, pnl_total, is_tracked
            FROM wallets WHERE is_bot=0
            ORDER BY score DESC LIMIT 15""").fetchall()]
+    # TODAS las billeteras rastreadas (⭐) — sin límite, para no confundir
+    rastreadas = [dict(r) for r in conn.execute(
+        """SELECT address, alias, ai_class, score, wallet_score,
+                  winning_tokens_count, pnl_30d, pnl_total
+           FROM wallets WHERE is_tracked=1
+           ORDER BY score DESC""").fetchall()]
     senales = [dict(r) for r in conn.execute(
         """SELECT wallet, mint, symbol, side, sol, ts, chg_1h, chg_24h, mc
            FROM signals ORDER BY ts DESC LIMIT 20""").fetchall()]
@@ -52,6 +58,7 @@ def _snapshot() -> dict:
     }
     conn.close()
     return {"totales": tot, "top_billeteras": wallets,
+            "billeteras_rastreadas": rastreadas,
             "senales_recientes": senales,
             "posiciones_recientes": posiciones}
 
@@ -81,7 +88,11 @@ def answer_question(pregunta: str) -> str:
     prompt = (
         "Eres el analista del sistema de rastreo de billeteras rentables "
         "en Solana del usuario. Responde su pregunta usando SOLO los datos "
-        "del snapshot JSON. Notas de campos: montos en SOL salvo mc (USD); "
+        "del snapshot JSON. 'billeteras_rastreadas' es la lista COMPLETA de "
+        "billeteras ⭐ que el sistema monitorea (úsala para '¿cuántas/cuáles "
+        "rastrea?'); 'top_billeteras' es solo el top 15 por score, así que si "
+        "una ⭐ no aparece ahí NO significa que falte. Notas de campos: montos "
+        "en SOL salvo mc (USD); "
         "ts es epoch; chg_1h/chg_24h son % del token tras la señal; "
         "'posiciones_recientes' y 'billetera_consultada' traen lo que cada "
         "billetera tiene ahora (tokens_actuales), lo invertido (sol_cost), "
