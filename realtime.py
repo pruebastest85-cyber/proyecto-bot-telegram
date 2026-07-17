@@ -95,11 +95,26 @@ def tracked_addresses() -> list[str]:
     return [r["address"] for r in rows]
 
 
+def watch_addresses() -> list[str]:
+    """⭐ + candidatas prometedoras (liga de ascenso): las candidatas se
+    monitorean en silencio para construir su track record real antes de
+    darles la estrella."""
+    conn = get_conn()
+    stars = [r["address"] for r in conn.execute(
+        "SELECT address FROM wallets WHERE is_tracked=1").fetchall()]
+    cands = [r["address"] for r in conn.execute(
+        """SELECT address FROM wallets
+           WHERE is_tracked=0 AND is_bot=0 AND winning_tokens_count >= 2
+           ORDER BY score DESC LIMIT 40""").fetchall()]
+    conn.close()
+    return stars + [c for c in cands if c not in stars]
+
+
 def sync_helius_webhook() -> str:
     """Crea o actualiza el webhook de Helius con las billeteras ⭐."""
     if not PUBLIC_URL:
         return "PUBLIC_URL no configurada; webhook no sincronizado"
-    addrs = tracked_addresses()
+    addrs = watch_addresses()
     if not addrs:
         return "Sin billeteras ⭐ aún; nada que monitorear"
 
@@ -250,8 +265,31 @@ def _fmt_amount(x) -> str:
     return f"{x:.4g}"
 
 
+def _recarga_reciente(wallet: str, ts: int) -> float:
+    """SOL recibido por transferencia directa en los ~30 min previos a la
+    compra. Una recarga justo antes de comprar suele indicar convicción."""
+    try:
+        url = config.HELIUS_PARSED_TX.format(address=wallet)
+        r = requests.get(url, params={"api-key": config.HELIUS_API_KEY,
+                                      "limit": 50}, timeout=20)
+        r.raise_for_status()
+        total = 0.0
+        for tx in r.json() or []:
+            tts = tx.get("timestamp", 0)
+            if not (ts - 1800 <= tts <= ts):
+                continue
+            for nt in tx.get("nativeTransfers") or []:
+                if nt.get("toUserAccount") == wallet and \
+                   nt.get("fromUserAccount") != wallet:
+                    total += (nt.get("amount") or 0) / 1e9
+        return total
+    except Exception:
+        return 0.0
+
+
 def process_transactions(txs: list[dict]):
-    tracked = set(tracked_addresses())
+    tracked = set(watch_addresses())
+    stars = set(tracked_addresses())
     if not tracked:
         return
     conn = get_conn()
@@ -350,12 +388,25 @@ def process_transactions(txs: list[dict]):
             (score_sig, verdict.get("veredicto"), trade["signature"]))
         conn.commit()
 
+        # Liga de ascenso: candidatas sin ⭐ se miden en silencio
+        if trade["wallet"] not in stars:
+            print(f"👁 Candidata {trade['wallet'][:8]}… {trade['side']} "
+                  f"{trade['sol']:.2f} SOL — registrada sin alertar")
+            continue
+
         # Filtro: señales de compra bajo el umbral no alertan (sí se miden)
         umbral = float(get_setting(conn, "min_signal_score", "0") or 0)
         if es_compra and score_sig < umbral:
             print(f"🔇 Señal {t['symbol']} silenciada: "
                   f"score {score_sig} < umbral {umbral:.0f}")
             continue
+
+        # Convicción: ¿recibió SOL fresco justo antes de comprar?
+        if es_compra:
+            recarga = _recarga_reciente(trade["wallet"], trade["ts"])
+            if recarga >= 1:
+                tg_send(f"⚡ *Convicción alta:* la billetera recargó "
+                        f"{recarga:.1f} SOL minutos antes de esta compra.")
 
         if es_acum:
             side_icon = "🟢➕"
