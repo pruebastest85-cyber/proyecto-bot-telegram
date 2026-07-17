@@ -30,11 +30,11 @@ MAX_TOKEN_AGE_DAYS = 14           # solo tokens recientes (memecoins nuevos)
 
 # ── Presupuesto de Helius (para no agotar la cuota del mes) ───────────────
 # Plan gratuito: ~1M créditos/mes ≈ 330 consultas de historial al día.
-MAX_TOKENS_PER_CYCLE = 6          # tokens analizados por ciclo; el resto en cola
-HISTORY_MAX_PAGES = 5             # páginas de historial por token (100 txs c/u)
+MAX_TOKENS_PER_CYCLE = 12         # tokens analizados por ciclo; el resto en cola
+HISTORY_MAX_PAGES = 12            # páginas de historial por token (100 txs c/u)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
-EARLY_BUYER_WINDOW = 100          # nº de primeras transacciones a analizar por token
+EARLY_BUYER_WINDOW = 200          # nº de primeras transacciones a analizar por token
 MIN_BUY_SOL = 0.5                 # ignorar compras de prueba menores a esto
 MAX_BUY_SOL = 500                 # ignorar market makers / billeteras enormes
 MIN_WINNING_TOKENS = 2            # billetera debe aparecer en ≥2 tokens ganadores
@@ -45,5 +45,5 @@ DB_PATH = os.getenv("DB_PATH", "wallets.db")
 
 # ── Rate limiting (respetar planes gratuitos) ─────────────────────────────
 GECKO_DELAY = 2.5                 # segundos entre requests a GeckoTerminal
-HELIUS_DELAY = 0.6                # segundos entre requests a Helius (free tier)
+HELIUS_DELAY = 0.12               # plan Developer: 50 RPS; vamos holgados a ~8
 DEXSCREENER_DELAY = 0.3
