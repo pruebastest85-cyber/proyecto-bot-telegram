@@ -57,16 +57,22 @@ MIN_SIGNAL_SOL = 0.3
 CONSENSUS_WINDOW_MIN = 45
 
 
-def tg_send(text: str):
-    """Envía mensaje al admin vía HTTP API (seguro desde cualquier hilo)."""
+def tg_send(text: str, buttons: list | None = None):
+    """Envía mensaje al admin vía HTTP API (seguro desde cualquier hilo).
+    buttons: lista de filas [[(texto, callback_data), …], …]."""
     if not (BOT_TOKEN and ADMIN_ID):
         return
+    payload = {"chat_id": int(ADMIN_ID), "text": text,
+               "parse_mode": "Markdown",
+               "disable_web_page_preview": True}
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": [
+            [{"text": tx, "callback_data": cb} for tx, cb in fila]
+            for fila in buttons]}
     try:
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": int(ADMIN_ID), "text": text,
-                  "parse_mode": "Markdown",
-                  "disable_web_page_preview": True},
+            json=payload,
             timeout=15)
     except requests.RequestException as e:
         print(f"· No se pudo enviar alerta TG: {e}")
@@ -490,7 +496,10 @@ def process_transactions(txs: list[dict]):
             f"{v_icon} *{verdict.get('veredicto', 'sin veredicto').upper()}*\n"
             f"_{verdict.get('razon', '')}_\n\n"
             f"📊 [DexScreener](https://dexscreener.com/solana/{trade['mint']})"
-            f"  ·  📈 [GMGN](https://gmgn.ai/sol/token/{trade['mint']})")
+            f"  ·  📈 [GMGN](https://gmgn.ai/sol/token/{trade['mint']})",
+            buttons=[[("📋 Ficha", f"ficha:{trade['wallet']}"),
+                      ("💰 Saldo", f"saldo1:{trade['wallet']}"),
+                      ("❌ Descartar", f"adel:{trade['wallet']}")]])
         print(f"📡 Señal {trade['side']}: {t['symbol']} "
               f"por {trade['wallet'][:8]}")
     conn.close()
