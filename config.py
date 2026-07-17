@@ -30,8 +30,8 @@ MAX_TOKEN_AGE_DAYS = 14           # solo tokens recientes (memecoins nuevos)
 
 # ── Presupuesto de Helius (para no agotar la cuota del mes) ───────────────
 # Plan gratuito: ~1M créditos/mes ≈ 330 consultas de historial al día.
-MAX_TOKENS_PER_CYCLE = 12         # tokens analizados por ciclo; el resto en cola
-HISTORY_MAX_PAGES = 12            # páginas de historial por token (100 txs c/u)
+MAX_TOKENS_PER_CYCLE = 18         # tokens analizados por ciclo; el resto en cola
+HISTORY_MAX_PAGES = 14            # páginas de historial por token (100 txs c/u)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
 EARLY_BUYER_WINDOW = 200          # nº de primeras transacciones a analizar por token
