@@ -281,6 +281,33 @@ class _PgConn:
 
 # ──────────────────────────── CONEXIÓN ────────────────────────────────────
 
+def _dedupe_aliases(conn):
+    """Limpieza de apodos duplicados heredados: la billetera más antigua
+    conserva el nombre limpio; el resto recibe un sufijo con su dirección.
+    Idempotente; ignora bots descartados."""
+    try:
+        dups = conn.execute(
+            """SELECT alias FROM wallets
+               WHERE alias IS NOT NULL AND COALESCE(is_bot, 0) = 0
+               GROUP BY alias HAVING COUNT(*) > 1""").fetchall()
+        for d in dups:
+            rows = conn.execute(
+                """SELECT address FROM wallets WHERE alias = ?
+                   ORDER BY COALESCE(first_seen, ''), address""",
+                (d["alias"],)).fetchall()
+            for r in rows[1:]:
+                conn.execute(
+                    "UPDATE wallets SET alias = ? WHERE address = ?",
+                    (f"{d['alias']} ({r['address'][:4]})", r["address"]))
+            if rows[1:]:
+                print(f"· Alias duplicado corregido: {d['alias']} "
+                      f"({len(rows) - 1} renombradas)")
+        if dups:
+            conn.commit()
+    except Exception as e:
+        print(f"· Dedupe de alias omitido: {e}")
+
+
 def get_conn():
     """Devuelve una conexión lista para usar (SQLite o Postgres) con el
     esquema ya creado. La interfaz es la misma en ambos modos."""
@@ -290,6 +317,7 @@ def get_conn():
         conn.autocommit = True
         pg = _PgConn(conn)
         pg.executescript(PG_SCHEMA)
+        _dedupe_aliases(pg)
         return pg
 
     conn = sqlite3.connect(DB_PATH)
@@ -315,6 +343,7 @@ def get_conn():
         except sqlite3.OperationalError:
             pass
     conn.commit()
+    _dedupe_aliases(conn)
     return conn
 
 
