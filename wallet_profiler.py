@@ -7,7 +7,7 @@ Responde las preguntas clave:
   - ¿Cuál es su PnL realizado aproximado en SOL? (total y últimos 30 días)
   - ¿Parece bot? (frecuencia de transacciones)
 
-Método: descarga sus últimas ~300 transacciones parseadas (Helius),
+Método: descarga sus últimas ~1000 transacciones parseadas (Helius),
 detecta compras (SOL sale + token entra) y ventas (token sale + SOL
 entra) y agrega por token. El PnL es REALIZADO y aproximado: SOL que
 entró por ventas menos SOL que salió por compras; no incluye tokens
@@ -28,7 +28,7 @@ STABLE_MINTS = {
 }
 
 
-def _fetch_txs(address: str, pages: int = 3) -> list[dict]:
+def _fetch_txs(address: str, pages: int = 10) -> list[dict]:
     url = config.HELIUS_PARSED_TX.format(address=address)
     all_txs, before = [], None
     for _ in range(pages):
@@ -244,7 +244,7 @@ def format_profile(p: dict) -> str:
     if len(traded) > 6:
         lines.append(f"…y {len(traded) - 6} más")
 
-    lines.append("\n_PnL realizado sobre las últimas ~300 txs; "
+    lines.append("\n_PnL realizado sobre las últimas ~1000 txs; "
                  "no incluye posiciones aún abiertas._")
     lines.append(f"🔗 gmgn.ai/sol/address/{addr}")
     return "\n".join(lines)
