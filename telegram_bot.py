@@ -745,6 +745,15 @@ async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
+@solo_admin
+async def cmd_hermanas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔗 Buscando vínculos entre billeteras ⭐… (puede tardar ~1 min)")
+    from wallet_links import find_links
+    txt = await asyncio.to_thread(find_links)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN. Créalo con @BotFather.")
@@ -769,6 +778,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
+    app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
