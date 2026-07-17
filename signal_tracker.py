@@ -139,6 +139,38 @@ def _check_streaks(conn):
             print(f"· Aviso de racha falló: {e}")
 
 
+def _auto_threshold(conn):
+    """Umbral que aprende: elige el min_signal_score que maximiza el
+    win rate histórico a 24h (manteniendo un mínimo de señales)."""
+    rows = conn.execute(
+        "SELECT signal_score, chg_24h FROM signals "
+        "WHERE side='compra' AND chg_24h IS NOT NULL "
+        "AND signal_score IS NOT NULL").fetchall()
+    if len(rows) < 10:
+        return  # aún pocos datos para decidir
+    mejor, mejor_wr = 0, -1.0
+    for umbral in (0, 40, 50, 60, 70):
+        sel = [r for r in rows if r["signal_score"] >= umbral]
+        if len(sel) < 5:
+            continue
+        wr = sum(1 for r in sel if r["chg_24h"] > 0) / len(sel)
+        if wr > mejor_wr:
+            mejor, mejor_wr = umbral, wr
+    from db import get_setting, set_setting
+    actual = float(get_setting(conn, "min_signal_score", "0") or 0)
+    if mejor != actual:
+        set_setting(conn, "min_signal_score", str(mejor))
+        print(f"🎚️ Umbral auto-ajustado: {actual:.0f} → {mejor} "
+              f"(win rate {mejor_wr*100:.0f}%)")
+        try:
+            from realtime import tg_send
+            tg_send(f"🎚️ Umbral de alerta auto-ajustado a *{mejor}* "
+                    f"(win rate histórico {mejor_wr*100:.0f}% con ese corte). "
+                    "Las señales por debajo se miden pero no alertan.")
+        except Exception:
+            pass
+
+
 def track_outcomes() -> int:
     """
     1) Rellena price_1h/price_24h (y % de cambio) de las señales de
@@ -180,6 +212,7 @@ def track_outcomes() -> int:
             _alert_milestone(conn, s, pct, p)
     conn.commit()
     _check_streaks(conn)
+    _auto_threshold(conn)
     conn.close()
     if updated:
         print(f"📈 Track record: {updated} mediciones de señales actualizadas")
