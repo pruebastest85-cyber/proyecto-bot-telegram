@@ -269,7 +269,19 @@ def _ficha_text(address: str):
     conn.close()
     s = compute_score(p, track)
     alias = row["alias"] if row and row["alias"] else None
-    return format_ficha(address, s, alias, format_track_record(track))
+    ficha = format_ficha(address, s, alias, format_track_record(track))
+    # Saldo actual on-chain
+    try:
+        import requests as _rq
+        resp = _rq.post(config.HELIUS_RPC,
+                        json={"jsonrpc": "2.0", "id": 1,
+                              "method": "getBalance", "params": [address]},
+                        timeout=15)
+        sol = resp.json()["result"]["value"] / 1e9
+        ficha += f"\n💰 Saldo actual: *{sol:,.2f} SOL*"
+    except Exception:
+        pass
+    return ficha
 
 
 def _ia_text(address: str) -> str:
