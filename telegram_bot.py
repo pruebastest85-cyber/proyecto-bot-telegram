@@ -94,6 +94,8 @@ def kb_consultar() -> InlineKeyboardMarkup:
         [_btn("🔬 Perfil", "h:ask:perfil"), _btn("🧮 Ficha / Score", "h:ask:ficha")],
         [_btn("🧠 Veredicto IA", "h:ask:ia"), _btn("📋 Evidencia", "h:ask:evidencia")],
         [_btn("❌ Descartar", "h:ask:descartar"), _btn("⭐ Rastrear", "h:ask:rastrear")],
+        [_btn("📊 Rendimiento", "h:run:rendimiento"), _btn("🧪 Backtest", "h:run:backtest")],
+        [_btn("💰 Saldos", "h:run:saldos"), _btn("🔗 Hermanas", "h:run:hermanas")],
         _row_inicio(),
     ])
 
@@ -386,6 +388,41 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· track_outcomes falló: {e}")
 
 
+def _resumen_diario_text() -> str:
+    import time as _t
+    conn = get_conn()
+    ahora = int(_t.time())
+    n24 = conn.execute(
+        "SELECT COUNT(*) c FROM signals WHERE ts>=? AND side='compra'",
+        (ahora - 86400,)).fetchone()["c"]
+    med = conn.execute(
+        "SELECT COUNT(*) c, SUM(CASE WHEN chg_24h>0 THEN 1 ELSE 0 END) w "
+        "FROM signals WHERE ts>=? AND side='compra' "
+        "AND chg_24h IS NOT NULL", (ahora - 7 * 86400,)).fetchone()
+    stars = conn.execute(
+        "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
+    conn.close()
+    out = ["☀️ *Resumen diario*\n",
+           f"Señales de compra (24h): {n24}",
+           f"⭐ activas: {stars}"]
+    if med["c"]:
+        wr = 100.0 * (med["w"] or 0) / med["c"]
+        out.append(f"Win rate 7 días: {wr:.0f}% ({med['c']} medidas)")
+    out.append("\nDetalle: /rendimiento · Simulación: /backtest")
+    return "\n".join(out)
+
+
+async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_ID:
+        return
+    try:
+        txt = await asyncio.to_thread(_resumen_diario_text)
+        await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
+                                   parse_mode="Markdown")
+    except Exception as e:
+        print(f"· resumen diario falló: {e}")
+
+
 async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: corre el ciclo y avisa al admin."""
     resumen = await asyncio.to_thread(run_full_cycle)
@@ -435,6 +472,29 @@ async def _hub_run(q, name: str):
         await q.answer()
         text, kb = await asyncio.to_thread(build_top_message, limit)
         await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    elif name == "rendimiento":
+        await q.answer()
+        from rendimiento import rendimiento_text
+        txt = await asyncio.to_thread(rendimiento_text)
+        await q.edit_message_text(txt, parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
+    elif name == "backtest":
+        await q.answer()
+        from rendimiento import backtest_text
+        txt = await asyncio.to_thread(backtest_text, 0.5)
+        await q.edit_message_text(txt, parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
+    elif name == "saldos":
+        await q.answer("💰 Consultando saldos…")
+        txt = await asyncio.to_thread(_saldos_text)
+        await q.edit_message_text(txt, parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
+    elif name == "hermanas":
+        await q.answer("🔗 Buscando vínculos… (~1 min)")
+        from wallet_links import find_links
+        txt = await asyncio.to_thread(find_links)
+        await q.edit_message_text(txt, parse_mode="Markdown",
+                                  reply_markup=kb_solo_inicio())
     elif name == "senales":
         await q.answer()
         await q.edit_message_text(_senales_text(), parse_mode="Markdown",
@@ -507,6 +567,23 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not data.startswith("h:ask:"):
             AWAITING.pop(q.from_user.id, None)
         await handle_hub(q, ctx)
+        return
+
+    # Botones bajo las alertas de señal
+    if data.startswith("ficha:") or data.startswith("saldo1:") \
+            or data.startswith("adel:"):
+        addr = data.split(":", 1)[1]
+        if data.startswith("adel:"):
+            ok = await asyncio.to_thread(discard_wallet, addr)
+            await q.answer("❌ Descartada" if ok else "No encontrada")
+            return
+        await q.answer("⏳ Consultando…")
+        if data.startswith("ficha:"):
+            txt = await asyncio.to_thread(_ficha_text, addr)
+            txt = txt or "Sin datos para esa dirección."
+        else:
+            txt = await asyncio.to_thread(_saldo_uno_text, addr)
+        await q.message.chat.send_message(txt, parse_mode="Markdown")
         return
 
     # Confirmación de acciones del agente IA
@@ -732,6 +809,11 @@ async def _post_init(app: Application):
             BotCommand("app", "Panel visual (Mini App)"),
             BotCommand("ciclo", "Correr el pipeline ahora"),
             BotCommand("preguntar", "Preguntar a la IA sobre tu base"),
+            BotCommand("rendimiento", "Win rate de las señales"),
+            BotCommand("backtest", "Simular copiar las señales"),
+            BotCommand("saldos", "Saldo SOL de las vigiladas"),
+            BotCommand("hermanas", "Billeteras del mismo dueño"),
+            BotCommand("ficha", "Ficha completa de una billetera"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -766,11 +848,28 @@ async def cmd_hermanas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
+def _saldo_uno_text(addr: str) -> str:
+    import requests as _rq
+    try:
+        resp = _rq.post(config.HELIUS_RPC,
+                        json={"jsonrpc": "2.0", "id": 1,
+                              "method": "getBalance", "params": [addr]},
+                        timeout=15)
+        sol = resp.json()["result"]["value"] / 1e9
+        return f"💰 Saldo de `{addr[:10]}…`: *{sol:,.2f} SOL*"
+    except Exception:
+        return "No pude consultar el saldo."
+
+
 @solo_admin
 async def cmd_saldos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💰 Consultando saldos on-chain…")
+    txt = await asyncio.to_thread(_saldos_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
 
-    def _run():
+
+def _saldos_text():
+    if True:
         import requests as _rq
         conn = get_conn()
         rows = conn.execute(
@@ -800,10 +899,8 @@ async def cmd_saldos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 out.append(f"{icono} {nombre}: *{sol:,.2f} SOL*"
                            f"  `{r['address'][:8]}…`")
         out.append(f"\nTotal combinado: *{total:,.2f} SOL*")
-        return "\n".join(out)
 
-    txt = await asyncio.to_thread(_run)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    return "\n".join(out)
 
 
 def main():
@@ -864,6 +961,15 @@ def main():
     # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
     app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
                                 name="sync_webhook")
+    # Resumen diario a las 13:00 UTC (~8am América)
+    import datetime as _dt
+    _now = _dt.datetime.now(_dt.timezone.utc)
+    _target = _now.replace(hour=13, minute=0, second=0, microsecond=0)
+    if _target <= _now:
+        _target += _dt.timedelta(days=1)
+    app.job_queue.run_repeating(daily_summary_job, interval=86400,
+                                first=(_target - _now).total_seconds(),
+                                name="daily_summary")
 
     print(f"🤖 Bot corriendo. Ciclo automático cada {AUTO_CYCLE_HOURS:g} h.")
     app.run_polling()
