@@ -725,6 +725,26 @@ async def _post_init(app: Application):
         print(f"· set_my_commands falló: {e}")
 
 
+@solo_admin
+async def cmd_rendimiento(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    from rendimiento import rendimiento_text
+    txt = await asyncio.to_thread(rendimiento_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    monto = 0.5
+    if ctx.args:
+        try:
+            monto = max(0.05, min(50.0, float(ctx.args[0])))
+        except ValueError:
+            pass
+    from rendimiento import backtest_text
+    txt = await asyncio.to_thread(backtest_text, monto)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN. Créalo con @BotFather.")
@@ -747,6 +767,8 @@ def main():
     app.add_handler(CommandHandler("ia", cmd_ia))
     app.add_handler(CommandHandler("senales", cmd_senales))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
+    app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
