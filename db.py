@@ -283,7 +283,8 @@ class _PgConn:
 
 def _dedupe_aliases(conn):
     """Limpieza de apodos duplicados heredados: la billetera más antigua
-    conserva el nombre limpio; el resto recibe un sufijo con su dirección.
+    conserva el nombre limpio; a las ⭐ activas se les borra el apodo para
+    que la IA les invente uno nuevo y único; el resto recibe sufijo.
     Idempotente; ignora bots descartados."""
     try:
         dups = conn.execute(
@@ -296,12 +297,22 @@ def _dedupe_aliases(conn):
                    ORDER BY COALESCE(first_seen, ''), address""",
                 (d["alias"],)).fetchall()
             for r in rows[1:]:
-                conn.execute(
-                    "UPDATE wallets SET alias = ? WHERE address = ?",
-                    (f"{d['alias']} ({r['address'][:4]})", r["address"]))
+                w = conn.execute(
+                    "SELECT is_tracked FROM wallets WHERE address = ?",
+                    (r["address"],)).fetchone()
+                if w and w["is_tracked"]:
+                    # ⭐ activa: se borra el apodo y la IA le inventará
+                    # uno nuevo y único en el próximo ciclo
+                    conn.execute(
+                        "UPDATE wallets SET alias = NULL WHERE address = ?",
+                        (r["address"],))
+                else:
+                    conn.execute(
+                        "UPDATE wallets SET alias = ? WHERE address = ?",
+                        (f"{d['alias']} ({r['address'][:4]})", r["address"]))
             if rows[1:]:
-                print(f"· Alias duplicado corregido: {d['alias']} "
-                      f"({len(rows) - 1} renombradas)")
+                print(f"· Alias duplicado: {d['alias']} → "
+                      f"{len(rows) - 1} se renombrarán")
         if dups:
             conn.commit()
     except Exception as e:
