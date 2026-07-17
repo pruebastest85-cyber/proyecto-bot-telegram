@@ -99,6 +99,46 @@ def _alert_milestone(conn, s, pct: float, price: float):
     print(f"🚀 Alerta de subida: {simbolo} x{mult}")
 
 
+STREAK_N = 4  # señales perdedoras seguidas para perder la ⭐
+
+
+def _check_streaks(conn):
+    """Degrada ⭐ con racha perdedora: si sus últimas STREAK_N señales
+    medidas a 24h cerraron todas en negativo, pierde la estrella.
+    Se puede restaurar a mano con /rastrear <address>."""
+    ws = conn.execute(
+        "SELECT DISTINCT wallet FROM signals "
+        "WHERE side='compra' AND chg_24h IS NOT NULL").fetchall()
+    for row in ws:
+        w = row["wallet"]
+        info = conn.execute(
+            "SELECT is_tracked, alias FROM wallets WHERE address=?",
+            (w,)).fetchone()
+        if not info or not info["is_tracked"]:
+            continue
+        ult = conn.execute(
+            "SELECT chg_24h FROM signals WHERE wallet=? AND side='compra' "
+            "AND chg_24h IS NOT NULL ORDER BY ts DESC LIMIT ?",
+            (w, STREAK_N)).fetchall()
+        if len(ult) < STREAK_N or any(r["chg_24h"] > 0 for r in ult):
+            continue
+        conn.execute(
+            "UPDATE wallets SET is_tracked=0, ai_follow=0, ai_reason=? "
+            "WHERE address=?",
+            (f"Racha perdedora: últimas {STREAK_N} señales en negativo", w))
+        conn.commit()
+        alias = (info["alias"] or w[:8]).replace("*", "").replace("_", " ")
+        print(f"📉 {alias} pierde la estrella por racha perdedora")
+        try:
+            from realtime import tg_send, sync_helius_webhook
+            tg_send(f"📉 *{alias}* pierde la ⭐: sus últimas {STREAK_N} "
+                    "señales cerraron en negativo.\n"
+                    f"Restaurar: /rastrear {w}")
+            sync_helius_webhook()
+        except Exception as e:
+            print(f"· Aviso de racha falló: {e}")
+
+
 def track_outcomes() -> int:
     """
     1) Rellena price_1h/price_24h (y % de cambio) de las señales de
@@ -139,6 +179,7 @@ def track_outcomes() -> int:
         if now - s["ts"] <= WATCH_HOURS * HOUR:
             _alert_milestone(conn, s, pct, p)
     conn.commit()
+    _check_streaks(conn)
     conn.close()
     if updated:
         print(f"📈 Track record: {updated} mediciones de señales actualizadas")
