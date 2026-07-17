@@ -754,6 +754,46 @@ async def cmd_hermanas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
+@solo_admin
+async def cmd_saldos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("💰 Consultando saldos on-chain…")
+
+    def _run():
+        import requests as _rq
+        conn = get_conn()
+        rows = conn.execute(
+            """SELECT address, alias, is_tracked FROM wallets
+               WHERE is_tracked=1
+                  OR (is_bot=0 AND winning_tokens_count >= 2)
+               ORDER BY is_tracked DESC, score DESC LIMIT 25""").fetchall()
+        conn.close()
+        out = ["💰 *Saldos de billeteras vigiladas:*\n"]
+        total = 0.0
+        for r in rows:
+            try:
+                resp = _rq.post(config.HELIUS_RPC,
+                                json={"jsonrpc": "2.0", "id": 1,
+                                      "method": "getBalance",
+                                      "params": [r["address"]]},
+                                timeout=15)
+                sol = resp.json()["result"]["value"] / 1e9
+            except Exception:
+                sol = None
+            nombre = (r["alias"] or r["address"][:8]).replace("*", "")
+            icono = "⭐" if r["is_tracked"] else "👁"
+            if sol is None:
+                out.append(f"{icono} {nombre}: _error al consultar_")
+            else:
+                total += sol
+                out.append(f"{icono} {nombre}: *{sol:,.2f} SOL*"
+                           f"  `{r['address'][:8]}…`")
+        out.append(f"\nTotal combinado: *{total:,.2f} SOL*")
+        return "\n".join(out)
+
+    txt = await asyncio.to_thread(_run)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN. Créalo con @BotFather.")
@@ -779,6 +819,7 @@ def main():
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
+    app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
