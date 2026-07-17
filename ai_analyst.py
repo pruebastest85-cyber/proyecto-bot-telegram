@@ -27,7 +27,7 @@ API_URL = "https://api.anthropic.com/v1/messages"
 MODEL_FAST = "claude-haiku-4-5-20251001"
 MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
 CONF_ESCALATE = 65        # confianza mínima de Haiku para no escalar
-REEVAL_DAYS = 7           # caducidad del veredicto
+REEVAL_DAYS = 3           # caducidad del veredicto
 
 PROMPT = """Eres un analista experto en trading on-chain de Solana. Analiza esta billetera candidata y clasifícala.
 
