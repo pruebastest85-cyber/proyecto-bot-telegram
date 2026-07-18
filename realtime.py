@@ -407,6 +407,34 @@ def process_transactions(txs: list[dict]):
                   f"score {score_sig} < umbral {umbral:.0f}")
             continue
 
+        # Máximo por señal: cap de alertas por billetera y por token en
+        # la última hora (configurable en settings). Las señales tapadas
+        # se siguen midiendo (track record), solo no alertan.
+        if es_compra:
+            try:
+                max_w = int(float(get_setting(
+                    conn, "max_alertas_wallet", "3") or 3))
+                max_t = int(float(get_setting(
+                    conn, "max_alertas_token", "2") or 2))
+            except (TypeError, ValueError):
+                max_w, max_t = 3, 2
+            hace_1h = trade["ts"] - 3600
+            n_w = conn.execute(
+                "SELECT COUNT(*) c FROM signals WHERE wallet=? AND ts>=? "
+                "AND side='compra' AND alerted=1 AND signature<>?",
+                (trade["wallet"], hace_1h,
+                 trade["signature"])).fetchone()["c"]
+            n_t = conn.execute(
+                "SELECT COUNT(*) c FROM signals WHERE mint=? AND ts>=? "
+                "AND side='compra' AND alerted=1 AND signature<>?",
+                (trade["mint"], hace_1h, trade["signature"])).fetchone()["c"]
+            if n_w >= max_w or n_t >= max_t:
+                motivo = (f"billetera ({n_w}/{max_w} en 1h)"
+                          if n_w >= max_w else f"token ({n_t}/{max_t} en 1h)")
+                print(f"🔇 Señal {t['symbol']} silenciada: "
+                      f"máximo por {motivo} alcanzado")
+                continue
+
         # Convicción: ¿recibió SOL fresco justo antes de comprar?
         if es_compra:
             recarga = _recarga_reciente(trade["wallet"], trade["ts"])
@@ -502,6 +530,22 @@ def process_transactions(txs: list[dict]):
                       ("❌ Descartar", f"adel:{trade['wallet']}")]])
         print(f"📡 Señal {trade['side']}: {t['symbol']} "
               f"por {trade['wallet'][:8]}")
+
+        # Marca la señal como alertada (para el cap de máximos por señal)
+        conn.execute("UPDATE signals SET alerted=1 WHERE signature=?",
+                     (trade["signature"],))
+        conn.commit()
+
+        # Paper trading: abre posición simulada con la compra alertada;
+        # si es venta de la ⭐ que dio la señal, cierra la simulada.
+        try:
+            import paper_trading
+            if es_compra:
+                paper_trading.open_trade(conn, trade, t, score_sig)
+            else:
+                paper_trading.close_on_wallet_sell(conn, trade, t)
+        except Exception as e:
+            print(f"· Paper trading falló: {e}")
     conn.close()
 
 

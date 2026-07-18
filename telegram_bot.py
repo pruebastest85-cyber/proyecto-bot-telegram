@@ -388,6 +388,15 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· track_outcomes falló: {e}")
 
 
+async def paper_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Job periódico: revisa TP/SL/tiempo de las posiciones simuladas."""
+    try:
+        from paper_trading import update_open_trades
+        await asyncio.to_thread(update_open_trades)
+    except Exception as e:
+        print(f"· paper_job falló: {e}")
+
+
 def _resumen_diario_text() -> str:
     import time as _t
     conn = get_conn()
@@ -766,6 +775,43 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Paper trading: /paper (resumen) · /paper on|off · /paper max <SOL>."""
+    from db import set_setting
+    from paper_trading import resumen_text
+    args = [a.lower() for a in (ctx.args or [])]
+    if args:
+        conn = get_conn()
+        if args[0] in ("on", "off"):
+            set_setting(conn, "paper_enabled", "1" if args[0] == "on" else "0")
+            estado = "activado 🟢" if args[0] == "on" else "apagado 🔴"
+            conn.close()
+            await update.message.reply_text(f"🧪 Paper trading {estado}.")
+            return
+        if args[0] == "max" and len(args) > 1:
+            try:
+                v = float(args[1])
+                if v <= 0:
+                    raise ValueError
+            except ValueError:
+                conn.close()
+                await update.message.reply_text(
+                    "Uso: /paper max <SOL>  (ej: /paper max 1.5)")
+                return
+            set_setting(conn, "paper_max_sol", v)
+            conn.close()
+            await update.message.reply_text(
+                f"🧪 Tope por señal: *{v:g} SOL*", parse_mode="Markdown")
+            return
+        conn.close()
+        await update.message.reply_text(
+            "Uso: /paper · /paper on · /paper off · /paper max <SOL>")
+        return
+    txt = await asyncio.to_thread(resumen_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
 async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Chat libre. Si el hub estaba esperando un dato, lo consume aquí;
     si no, cualquier texto sin /comando activa al agente IA."""
@@ -811,6 +857,7 @@ async def _post_init(app: Application):
             BotCommand("preguntar", "Preguntar a la IA sobre tu base"),
             BotCommand("rendimiento", "Win rate de las señales"),
             BotCommand("backtest", "Simular copiar las señales"),
+            BotCommand("paper", "Paper trading simulado"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -929,6 +976,7 @@ def main():
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
+    app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
@@ -950,6 +998,13 @@ def main():
         interval=900,
         first=120,
         name="track_outcomes",
+    )
+    # Paper trading: revisa TP/SL/tiempo de las simuladas cada 15 min
+    app.job_queue.run_repeating(
+        paper_job,
+        interval=900,
+        first=300,
+        name="paper_trading",
     )
     # Backup diario de la base + watchdog del webhook + aprendizaje semanal
     app.job_queue.run_repeating(backup_job, interval=86400, first=7200,

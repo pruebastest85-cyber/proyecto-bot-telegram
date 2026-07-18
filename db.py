@@ -109,7 +109,26 @@ CREATE TABLE IF NOT EXISTS positions (
     PRIMARY KEY (wallet, mint)
 );
 
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signature       TEXT,               -- señal que originó la operación
+    wallet          TEXT,
+    mint            TEXT,
+    symbol          TEXT,
+    stake_sol       REAL,               -- monto simulado (con tope)
+    entry_price     REAL,
+    entry_ts        INTEGER,
+    exit_price      REAL,
+    exit_ts         INTEGER,
+    exit_reason     TEXT,               -- take-profit/stop-loss/tiempo/venta
+    pnl_pct         REAL,
+    pnl_sol         REAL,
+    signal_score    REAL,
+    status          TEXT DEFAULT 'abierta'
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
+CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
 CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
 """
@@ -182,7 +201,8 @@ CREATE TABLE IF NOT EXISTS signals (
     mc              DOUBLE PRECISION,
     liq             DOUBLE PRECISION,
     signal_score    DOUBLE PRECISION,
-    verdict         TEXT
+    verdict         TEXT,
+    alerted         INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -196,6 +216,38 @@ CREATE TABLE IF NOT EXISTS chat_history (
     text            TEXT NOT NULL,
     ts              TEXT
 );
+
+CREATE TABLE IF NOT EXISTS positions (
+    wallet          TEXT NOT NULL,
+    mint            TEXT NOT NULL,
+    tokens          DOUBLE PRECISION DEFAULT 0,
+    sol_cost        DOUBLE PRECISION DEFAULT 0,
+    realized_sol    DOUBLE PRECISION DEFAULT 0,
+    buys            INTEGER DEFAULT 0,
+    sells           INTEGER DEFAULT 0,
+    first_ts        BIGINT,
+    last_ts         BIGINT,
+    PRIMARY KEY (wallet, mint)
+);
+
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id              SERIAL PRIMARY KEY,
+    signature       TEXT,
+    wallet          TEXT,
+    mint            TEXT,
+    symbol          TEXT,
+    stake_sol       DOUBLE PRECISION,
+    entry_price     DOUBLE PRECISION,
+    entry_ts        BIGINT,
+    exit_price      DOUBLE PRECISION,
+    exit_ts         BIGINT,
+    exit_reason     TEXT,
+    pnl_pct         DOUBLE PRECISION,
+    pnl_sol         DOUBLE PRECISION,
+    signal_score    DOUBLE PRECISION,
+    status          TEXT DEFAULT 'abierta'
+);
+CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
@@ -348,7 +400,8 @@ def get_conn():
                      ("price_24h", "REAL"), ("chg_1h", "REAL"),
                      ("chg_24h", "REAL"), ("alerted_pct", "REAL DEFAULT 0"),
                      ("symbol", "TEXT"), ("mc", "REAL"), ("liq", "REAL"),
-                     ("signal_score", "REAL"), ("verdict", "TEXT")]:
+                     ("signal_score", "REAL"), ("verdict", "TEXT"),
+                     ("alerted", "INTEGER DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
