@@ -9,10 +9,11 @@ Responde las preguntas clave:
 
 Método: descarga sus últimas ~1000 transacciones parseadas (Helius),
 detecta compras (SOL sale + token entra) y ventas (token sale + SOL
-entra) y agrega por token. El PnL es REALIZADO y aproximado: SOL que
-entró por ventas menos SOL que salió por compras; no incluye tokens
-que aún mantiene sin vender. El PnL 30d se calcula sobre las txs de
-la muestra que caen en los últimos 30 días.
+entra) y agrega por token. El SOL de cada swap se mide SIN comisiones
+de red ni propinas de Jito, para no sesgar el costo. El PnL realizado
+es SOL que entró por ventas menos SOL que salió por compras; el PnL
+neto le suma el valor de los tokens que aún mantiene (ver unrealized_pnl).
+El PnL 30d se calcula sobre las txs de la muestra de los últimos 30 días.
 """
 
 import time
@@ -25,6 +26,19 @@ import config
 LAMPORTS = 1_000_000_000
 STABLE_MINTS = {
     "So11111111111111111111111111111111111111112",  # WSOL
+}
+
+# Cuentas de propina de Jito (MEV bundles). La propina NO es precio del
+# token: se resta para no inflar el costo de las operaciones.
+JITO_TIP_ACCOUNTS = {
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 }
 
 
@@ -56,17 +70,52 @@ def _fetch_txs(address: str, pages: int = 10) -> list[dict]:
 
 
 def _sol_delta(tx: dict, wallet: str) -> float:
-    """SOL neto de la billetera en esta tx (negativo = gastó)."""
+    """
+    SOL del SWAP para la billetera (negativo = compró, positivo = vendió).
+
+    Parte del cambio de SOL nativo y RESTA lo que no es precio del token:
+    la comisión de red (base + prioridad, campo `fee`) y las propinas de
+    Jito. Antes se usaba el cambio bruto, lo que inflaba el costo de las
+    compras y encogía las ventas → PnL sesgado sistemáticamente a negativo.
+
+    Nota: no descuenta el rent de las cuentas de token (~0.002 SOL, casi
+    siempre recuperable al cerrar la posición); su efecto es marginal.
+    """
+    # 1) Cambio de SOL nativo bruto. accountData ya incluye la comisión;
+    #    la suma de nativeTransfers NO la incluye (se marca con from_balance).
+    raw = None
     for acc in (tx.get("accountData") or []):
         if acc.get("account") == wallet:
-            return int(acc.get("nativeBalanceChange", 0)) / LAMPORTS
-    total = 0.0
+            raw = int(acc.get("nativeBalanceChange", 0)) / LAMPORTS
+            break
+    from_balance = raw is not None
+    if raw is None:
+        raw = 0.0
+        for n in (tx.get("nativeTransfers") or []):
+            if n.get("fromUserAccount") == wallet:
+                raw -= int(n.get("amount", 0)) / LAMPORTS
+            if n.get("toUserAccount") == wallet:
+                raw += int(n.get("amount", 0)) / LAMPORTS
+
+    # 2) Comisión de red: solo si la paga esta billetera y solo si está
+    #    reflejada en raw (rama accountData).
+    fee = 0.0
+    if from_balance and tx.get("feePayer") == wallet:
+        try:
+            fee = int(tx.get("fee", 0)) / LAMPORTS
+        except (TypeError, ValueError):
+            fee = 0.0
+
+    # 3) Propinas de Jito enviadas por esta billetera (siempre en raw).
+    tip = 0.0
     for n in (tx.get("nativeTransfers") or []):
-        if n.get("fromUserAccount") == wallet:
-            total -= int(n.get("amount", 0)) / LAMPORTS
-        if n.get("toUserAccount") == wallet:
-            total += int(n.get("amount", 0)) / LAMPORTS
-    return total
+        if (n.get("fromUserAccount") == wallet
+                and n.get("toUserAccount") in JITO_TIP_ACCOUNTS):
+            tip += int(n.get("amount", 0)) / LAMPORTS
+
+    # fee y tip siempre restan SOL a la billetera; los devolvemos para
+    # quedarnos solo con el SOL que realmente pagó/recibió por el token.
+    return raw + fee + tip
 
 
 def profile_wallet(address: str, with_holdings: bool = True) -> dict:
