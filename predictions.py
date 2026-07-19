@@ -28,6 +28,38 @@ from influence import influence, graph
 WINDOW_MIN = 20          # ventana para que lleguen los seguidores
 EVAL_AFTER_MIN = 30      # a partir de aquí la predicción se evalúa sola
 DEFAULT_MIN_CONF = 85    # umbral de confianza para alertar
+ALPHA_META = 90          # Meta Score mínimo para 🟢 Alpha
+WATCH_META = 70          # Meta Score mínimo para 🟡 Watchlist
+
+
+MIN_LIQ_USD = 20000      # liquidez mínima; por debajo = 🔴 Ignorada
+MAX_RISK = 70            # riesgo (concentración/mint) máximo antes de Ignorar
+
+
+def _tier(conf: int, meta: int, umbral: int,
+          liq=None, risk=None) -> str:
+    """🟢 alpha / 🟡 watchlist / 🔴 ignored. Filtros duros primero."""
+    if liq is not None and (liq or 0) < MIN_LIQ_USD:
+        return "ignored"          # baja liquidez
+    if risk is not None and (risk or 0) >= MAX_RISK:
+        return "ignored"          # riesgo elevado (rug/concentración)
+    if meta >= ALPHA_META and conf >= umbral:
+        return "alpha"
+    if meta >= WATCH_META and conf >= 60:
+        return "watchlist"
+    return "ignored"
+
+
+_TIER_BADGE = {"alpha": "🟢 ALPHA ALERT", "watchlist": "🟡 WATCHLIST",
+               "ignored": "🔴 Ignorada"}
+
+
+def _should_push(tier: str, conn) -> bool:
+    if tier == "alpha":
+        return True
+    if tier == "watchlist":
+        return (get_setting(conn, "pred_send_watchlist", "0") or "0") == "1"
+    return False
 
 
 # ─────────────────────────── SCORING ────────────────────────────────
@@ -131,7 +163,9 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
     nivel = niveles.get(min(stage, 3), f"Nivel {stage}")
     alias = graph()["wallets"].get(pred_row["leader"], {}).get("alias",
                                                                pred_row["leader"][:6])
-    lines = [f"🔮 *SEÑAL PREDICTIVA — {nivel}*",
+    badge = _TIER_BADGE.get(pred_row["tier"] or "", "")
+    lines = [f"{badge}",
+             f"🔮 *SEÑAL PREDICTIVA — {nivel}*",
              f"Líder: *{alias}* · Token: `{sym}`",
              f"Confianza: *{conf}%* · Meta Score: *{meta}/100*"]
     if health.get("accuracy") is not None:
@@ -176,18 +210,25 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
         if wallet in pred_w and wallet != row["leader"]:
             arrived = set(json.loads(row["arrived"] or "[]"))
             if wallet not in arrived:
+                first = None
+                if not arrived:      # primer seguidor en llegar
+                    first = max(0, int(ts) - int(row["created_ts"] or ts))
                 arrived.add(wallet)
                 inf = influence(row["leader"]) or {}
                 health = _leader_health(conn, row["leader"])
                 conf = confidence_score(inf, pred, token_ctx.get("liq"),
                                         health, arrived=len(arrived))
                 stage = 1 + len(arrived)
+                tier = _tier(conf, row["meta_score"] or 0, umbral,
+                             token_ctx.get("liq"), _risk_pct(token_ctx))
                 conn.execute(
-                    "UPDATE predictions SET arrived=?, stage=?, confidence=? "
+                    "UPDATE predictions SET arrived=?, stage=?, confidence=?, "
+                    "tier=?, first_confirm_s=COALESCE(first_confirm_s,?) "
                     "WHERE id=?",
-                    (json.dumps(sorted(arrived)), stage, conf, row["id"]))
+                    (json.dumps(sorted(arrived)), stage, conf, tier,
+                     first, row["id"]))
                 conn.commit()
-                if conf >= umbral and stage > (row["alerted_stage"] or 0):
+                if _should_push(tier, conn) and stage > (row["alerted_stage"] or 0):
                     conn.execute(
                         "UPDATE predictions SET alerted_stage=? WHERE id=?",
                         (stage, row["id"]))
@@ -218,16 +259,18 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     meta = meta_score(inf, cluster, health, followers,
                       token_ctx.get("liq"), _risk_pct(token_ctx))
 
+    tier = _tier(conf, meta, umbral, token_ctx.get("liq"), _risk_pct(token_ctx))
     conn.execute(
         """INSERT OR IGNORE INTO predictions
            (leader, mint, created_ts, stage, confidence, meta_score,
-            predicted, arrived, alerted_stage, status)
-           VALUES (?,?,?,?,?,?,?,?,0,'abierta')""",
+            predicted, arrived, alerted_stage, status, tier, price0)
+           VALUES (?,?,?,?,?,?,?,?,0,'abierta',?,?)""",
         (wallet, mint, ts, 1, conf, meta,
-         json.dumps(followers), json.dumps([])))
+         json.dumps(followers), json.dumps([]), tier,
+         token_ctx.get("price")))
     conn.commit()
 
-    if conf >= umbral:
+    if _should_push(tier, conn):
         conn.execute(
             "UPDATE predictions SET alerted_stage=1 "
             "WHERE leader=? AND mint=? AND status='abierta'", (wallet, mint))
@@ -250,10 +293,19 @@ def evaluate_due(conn):
         pred_w = [p["wallet"] for p in pred]
         outcome = round(100 * sum(1 for w in pred_w if w in arrived) /
                         len(pred_w)) if pred_w else 0
+        chg = None
+        try:
+            if r["price0"]:
+                from token_check import analyze_token
+                now_px = analyze_token(r["mint"]).get("price")
+                if now_px:
+                    chg = round(100 * (now_px - r["price0"]) / r["price0"])
+        except Exception:
+            pass
         conn.execute(
             "UPDATE predictions SET status='evaluada', outcome_pct=?, "
-            "evaluated_ts=? WHERE id=?",
-            (outcome, int(time.time()), r["id"]))
+            "token_chg_pct=?, evaluated_ts=? WHERE id=?",
+            (outcome, chg, int(time.time()), r["id"]))
     if rows:
         conn.commit()
 
@@ -301,4 +353,75 @@ def predictions_text(limit: int = 10) -> str:
                    f"sobre {ev['n']} predicciones evaluadas")
     out.append("_El motor evalúa cada predicción sola y ajusta la salud de "
                "cada líder._")
+    return "\n".join(out)
+
+
+def metrics_text() -> str:
+    """Panel interno de rendimiento del motor predictivo (/metricas)."""
+    conn = get_conn()
+    try:
+        now = int(time.time())
+        d1, d7 = now - 86400, now - 7 * 86400
+        emit_1d = conn.execute(
+            "SELECT COUNT(*) c FROM predictions WHERE created_ts>=?",
+            (d1,)).fetchone()["c"]
+        emit_7d = conn.execute(
+            "SELECT COUNT(*) c FROM predictions WHERE created_ts>=?",
+            (d7,)).fetchone()["c"]
+        total = conn.execute(
+            "SELECT COUNT(*) c FROM predictions").fetchone()["c"]
+        n2 = conn.execute(
+            "SELECT COUNT(*) c FROM predictions WHERE stage>=2").fetchone()["c"]
+        n3 = conn.execute(
+            "SELECT COUNT(*) c FROM predictions WHERE stage>=3").fetchone()["c"]
+        ev = conn.execute(
+            "SELECT COUNT(*) n, AVG(outcome_pct) acc, AVG(first_confirm_s) t, "
+            "AVG(token_chg_pct) chg FROM predictions "
+            "WHERE status='evaluada'").fetchone()
+        fp = conn.execute(
+            "SELECT COUNT(*) c FROM predictions "
+            "WHERE status='evaluada' AND alerted_stage>0 AND outcome_pct=0"
+        ).fetchone()["c"]
+        alerted = conn.execute(
+            "SELECT COUNT(*) c FROM predictions WHERE alerted_stage>0"
+        ).fetchone()["c"]
+        tiers = {r["tier"]: r["c"] for r in conn.execute(
+            "SELECT tier, COUNT(*) c FROM predictions GROUP BY tier").fetchall()}
+        leaders = conn.execute(
+            """SELECT leader, COUNT(*) n, AVG(outcome_pct) acc
+               FROM predictions WHERE status='evaluada'
+               GROUP BY leader HAVING n>=1 ORDER BY acc DESC, n DESC LIMIT 5"""
+        ).fetchall()
+        gmap = graph()["wallets"]
+    finally:
+        conn.close()
+
+    if total == 0:
+        return ("📊 *Panel del motor predictivo*\n\nAún no hay predicciones "
+                "registradas. Se irá poblando cuando billeteras líderes "
+                "compren tokens. Vuelve en unos días para ver métricas reales.")
+
+    def pct(a, b):
+        return f"{round(100*a/b)}%" if b else "—"
+
+    out = ["📊 *Panel del motor predictivo*\n",
+           f"Emitidas: {emit_1d} hoy · {emit_7d} en 7d · {total} total",
+           f"Alcanzan Nivel 2: {pct(n2, total)} · Nivel 3: {pct(n3, total)}"]
+    if ev and ev["n"]:
+        out.append(f"Precisión final: *{round(ev['acc'] or 0)}%* "
+                   f"({ev['n']} evaluadas)")
+        if ev["t"] is not None:
+            out.append(f"Tiempo medio a confirmación: {round(ev['t'])}s")
+        if ev["chg"] is not None:
+            out.append(f"Rendimiento medio del token: {round(ev['chg']):+d}%")
+        out.append(f"Falsos positivos (alertó y 0 llegó): {fp}/{alerted}")
+    out.append(f"\nNiveles → 🟢 {tiers.get('alpha',0)} · "
+               f"🟡 {tiers.get('watchlist',0)} · 🔴 {tiers.get('ignored',0)}")
+    if leaders:
+        out.append("\n*Líderes más fiables:*")
+        for l in leaders:
+            alias = gmap.get(l["leader"], {}).get("alias", l["leader"][:6])
+            out.append(f"• {alias}: {round(l['acc'] or 0)}% ({l['n']} pred.)")
+    out.append("\n_Usa estos datos para recalibrar umbrales y pesos con "
+               "evidencia, no con intuición._")
     return "\n".join(out)

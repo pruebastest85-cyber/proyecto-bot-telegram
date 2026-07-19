@@ -876,6 +876,7 @@ async def _post_init(app: Application):
             BotCommand("prediccion", "Quién comprará tras una billetera"),
             BotCommand("lideres", "Líderes ocultos de la red"),
             BotCommand("predicciones", "Señales predictivas y su precisión"),
+            BotCommand("metricas", "Panel de rendimiento del motor"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -937,6 +938,13 @@ async def cmd_lideres(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_predicciones(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from predictions import predictions_text
     txt = await asyncio.to_thread(predictions_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_metricas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    from predictions import metrics_text
+    txt = await asyncio.to_thread(metrics_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -1034,6 +1042,7 @@ def main():
     app.add_handler(CommandHandler("prediccion", cmd_prediccion))
     app.add_handler(CommandHandler("lideres", cmd_lideres))
     app.add_handler(CommandHandler("predicciones", cmd_predicciones))
+    app.add_handler(CommandHandler("metricas", cmd_metricas))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))

@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS predictions (
     status        TEXT DEFAULT 'abierta',
     outcome_pct   REAL,
     token_chg_pct REAL,
+    tier          TEXT,
+    first_confirm_s INTEGER,
+    price0        REAL,
     evaluated_ts  INTEGER,
     UNIQUE(leader, mint)
 );
@@ -239,6 +242,9 @@ CREATE TABLE IF NOT EXISTS predictions (
     status        TEXT DEFAULT 'abierta',
     outcome_pct   DOUBLE PRECISION,
     token_chg_pct DOUBLE PRECISION,
+    tier          TEXT,
+    first_confirm_s INTEGER,
+    price0        DOUBLE PRECISION,
     evaluated_ts  BIGINT,
     UNIQUE(leader, mint)
 );
