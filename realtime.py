@@ -349,6 +349,15 @@ def process_transactions(txs: list[dict]):
              trade["signature"]))
         conn.commit()
 
+        # ── Motor predictivo: decide si emitir una señal PREDICTIVA ──
+        if es_compra:
+            try:
+                from predictions import on_buy as _pred_on_buy
+                _pred_on_buy(conn, trade["wallet"], trade["mint"],
+                             trade["ts"], t)
+            except Exception as e:
+                print(f"· Motor predictivo: {e}")
+
         # Track record real y patrón de MC de esta billetera
         try:
             from signal_tracker import wallet_track_record, format_track_record

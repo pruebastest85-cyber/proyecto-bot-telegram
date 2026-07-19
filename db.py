@@ -84,6 +84,24 @@ CREATE TABLE IF NOT EXISTS signals (
     side            TEXT DEFAULT 'compra'
 );
 
+CREATE TABLE IF NOT EXISTS predictions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    leader        TEXT NOT NULL,
+    mint          TEXT NOT NULL,
+    created_ts    INTEGER,
+    stage         INTEGER DEFAULT 1,
+    confidence    INTEGER,
+    meta_score    INTEGER,
+    predicted     TEXT,        -- JSON: seguidores esperados (wallet, prob, eta)
+    arrived       TEXT,        -- JSON: seguidores que sí compraron
+    alerted_stage INTEGER DEFAULT 0,
+    status        TEXT DEFAULT 'abierta',
+    outcome_pct   REAL,
+    token_chg_pct REAL,
+    evaluated_ts  INTEGER,
+    UNIQUE(leader, mint)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key             TEXT PRIMARY KEY,
     value           TEXT
@@ -205,6 +223,24 @@ CREATE TABLE IF NOT EXISTS signals (
     signal_score    DOUBLE PRECISION,
     verdict         TEXT,
     alerted         INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS predictions (
+    id            SERIAL PRIMARY KEY,
+    leader        TEXT NOT NULL,
+    mint          TEXT NOT NULL,
+    created_ts    BIGINT,
+    stage         INTEGER DEFAULT 1,
+    confidence    INTEGER,
+    meta_score    INTEGER,
+    predicted     TEXT,
+    arrived       TEXT,
+    alerted_stage INTEGER DEFAULT 0,
+    status        TEXT DEFAULT 'abierta',
+    outcome_pct   DOUBLE PRECISION,
+    token_chg_pct DOUBLE PRECISION,
+    evaluated_ts  BIGINT,
+    UNIQUE(leader, mint)
 );
 
 CREATE TABLE IF NOT EXISTS settings (

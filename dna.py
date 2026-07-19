@@ -137,6 +137,13 @@ def wallet_dna_text(address: str) -> str | None:
                 f"🧠 Rol en la red: *{inf.get('role') or '—'}* · "
                 f"Leader {inf['leader_score']} / Follower {inf['follower_score']} "
                 f"· 1ª el {inf['pct_first']}% de las veces")
+            try:
+                from predictions import leader_health_line
+                hl = leader_health_line(address)
+                if hl:
+                    lines.append(f"   {hl}")
+            except Exception:
+                pass
             if inf["followers"]:
                 top = ", ".join(
                     f"{f['alias']} ({f['prob']}%)" for f in inf["followers"][:3])
