@@ -877,6 +877,7 @@ async def _post_init(app: Application):
             BotCommand("lideres", "Líderes ocultos de la red"),
             BotCommand("predicciones", "Señales predictivas y su precisión"),
             BotCommand("metricas", "Panel de rendimiento del motor"),
+            BotCommand("backup", "Descargar copia de la base de datos"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -946,6 +947,23 @@ async def cmd_metricas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from predictions import metrics_text
     txt = await asyncio.to_thread(metrics_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("💾 Preparando copia de la base de datos…")
+    try:
+        from backup import make_backup
+        path, fname, caption = await asyncio.to_thread(make_backup)
+        with open(path, "rb") as fh:
+            await update.message.reply_document(document=fh, filename=fname,
+                                                caption=caption)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    except Exception as e:
+        await update.message.reply_text(f"No pude generar el backup: {e}")
 
 
 @solo_admin
@@ -1043,6 +1061,7 @@ def main():
     app.add_handler(CommandHandler("lideres", cmd_lideres))
     app.add_handler(CommandHandler("predicciones", cmd_predicciones))
     app.add_handler(CommandHandler("metricas", cmd_metricas))
+    app.add_handler(CommandHandler("backup", cmd_backup))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))
