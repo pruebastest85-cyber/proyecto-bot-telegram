@@ -7,7 +7,7 @@ Responde las preguntas clave:
   - ¿Cuál es su PnL realizado aproximado en SOL? (total y últimos 30 días)
   - ¿Parece bot? (frecuencia de transacciones)
 
-Método: descarga sus últimas ~1000 transacciones parseadas (Helius),
+Método: descarga sus últimas ~2000 transacciones parseadas (Helius),
 detecta compras (SOL sale + token entra) y ventas (token sale + SOL
 entra) y agrega por token. El SOL de cada swap se mide SIN comisiones
 de red ni propinas de Jito, para no sesgar el costo. El PnL realizado
@@ -47,7 +47,9 @@ JITO_TIP_ACCOUNTS = {
 }
 
 
-def _fetch_txs(address: str, pages: int = 10) -> list[dict]:
+def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
+    if pages is None:
+        pages = getattr(config, "PROFILE_MAX_PAGES", 10)
     url = config.HELIUS_PARSED_TX.format(address=address)
     all_txs, before = [], None
     for _ in range(pages):
@@ -365,7 +367,7 @@ def format_profile(p: dict) -> str:
     if len(traded) > 6:
         lines.append(f"…y {len(traded) - 6} más")
 
-    lines.append("\n_PnL realizado sobre las últimas ~1000 txs. "
+    lines.append("\n_PnL realizado sobre las últimas ~2000 txs. "
                  "«En cartera» valora las posiciones abiertas a precio actual "
                  "(DexScreener); «neto» = realizado + cartera._")
     lines.append(f"🔗 gmgn.ai/sol/address/{addr}")

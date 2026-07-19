@@ -2,10 +2,18 @@
 Configuración central del pipeline de descubrimiento de billeteras.
 Rellena HELIUS_API_KEY con tu clave gratuita de https://dev.helius.xyz
 
-v2: calibrada para acelerar la toma de datos SIN agotar la cuota
-gratuita de Helius (~500k créditos/mes ≈ 160 consultas de historial
-al día). El control clave es MAX_TOKENS_PER_CYCLE.
+v3: plan Helius de 10M créditos/mes. Se subió la profundidad de
+análisis (más historial por billetera, más tokens por ciclo) y TODOS
+los límites de consumo son configurables por variable de entorno, para
+poder ajustarlos desde Railway sin redeploy si el gasto de créditos
+sube demasiado. Vigila el consumo en el panel de Helius el primer día.
 """
+
+def _int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
 
 import os
 
@@ -28,10 +36,12 @@ MIN_VOLUME_24H_USD = 100_000      # volumen mínimo para descartar tokens muerto
 MIN_LIQUIDITY_USD = 20_000        # liquidez mínima para descartar rug pulls obvios
 MAX_TOKEN_AGE_DAYS = 14           # solo tokens recientes (memecoins nuevos)
 
-# ── Presupuesto de Helius (para no agotar la cuota del mes) ───────────────
-# Plan gratuito: ~1M créditos/mes ≈ 330 consultas de historial al día.
-MAX_TOKENS_PER_CYCLE = 18         # tokens analizados por ciclo; el resto en cola
-HISTORY_MAX_PAGES = 14            # páginas de historial por token (100 txs c/u)
+# ── Presupuesto de Helius (plan 10M créditos/mes; todo tuneable por env) ──
+# Si el consumo sube demasiado, baja estos valores desde Railway (variables
+# de entorno) — no hace falta redeploy de código.
+MAX_TOKENS_PER_CYCLE = _int("MAX_TOKENS_PER_CYCLE", 35)   # tokens por ciclo
+HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 20)         # páginas por token (100 txs c/u)
+PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 20)         # páginas al perfilar 1 billetera (~2000 txs)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
 EARLY_BUYER_WINDOW = 200          # nº de primeras transacciones a analizar por token
@@ -45,5 +55,6 @@ DB_PATH = os.getenv("DB_PATH", "wallets.db")
 
 # ── Rate limiting (respetar planes gratuitos) ─────────────────────────────
 GECKO_DELAY = 2.5                 # segundos entre requests a GeckoTerminal
-HELIUS_DELAY = 0.12               # plan Developer: 50 RPS; vamos holgados a ~8
+# El delay es por límite de RPS del plan, no por créditos. 0.1s ≈ 10 req/s.
+HELIUS_DELAY = float(os.getenv("HELIUS_DELAY", "0.1"))
 DEXSCREENER_DELAY = 0.3

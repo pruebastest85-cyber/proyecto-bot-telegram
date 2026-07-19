@@ -85,7 +85,7 @@ def format_ficha(address: str, s: dict, alias: str | None = None,
     if track_line:
         lines.append(track_line)
     lines.append("\n_ROI sobre PnL neto (realizado + cartera). "
-                 "Realizado calculado sobre las últimas ~1000 txs; "
+                 "Realizado calculado sobre las últimas ~2000 txs; "
                  "«en cartera» a precio actual._")
     return "\n".join(lines)
 

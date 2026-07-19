@@ -31,7 +31,7 @@ REEVAL_DAYS = 3           # caducidad del veredicto
 
 PROMPT = """Eres un analista experto en trading on-chain de Solana. Analiza esta billetera candidata y clasifícala.
 
-DATOS DEL PERFIL (últimas ~1000 transacciones):
+DATOS DEL PERFIL (últimas ~2000 transacciones):
 {perfil}
 
 TRACK RECORD REAL EN NUESTRO SISTEMA (resultado medido de sus señales pasadas; es el dato MÁS importante si existe):
