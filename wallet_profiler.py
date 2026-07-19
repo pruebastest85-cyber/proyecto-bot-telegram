@@ -138,6 +138,7 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
         "net_pnl_sol": 0.0,        # realizado + no realizado (mark-to-market)
         "held_tokens": 0,
         "priced_tokens": 0,
+        "metrics": {},        # métricas quant (ver wallet_metrics)
         "possible_bot": False,
     }
     if not txs:
@@ -256,6 +257,13 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
     result["net_pnl_sol"] = round(result["pnl_total_sol"], 2)
     result["tokens"] = dict(tokens)
 
+    # Métricas quant (Profit Factor, Sharpe, Expectancy, Drawdown, ROI…)
+    try:
+        from wallet_metrics import trade_metrics
+        result["metrics"] = trade_metrics(result["tokens"])
+    except Exception as e:
+        print(f"  · Métricas quant no disponibles: {e}")
+
     # ── PnL no realizado: valora los tokens que la billetera aún tiene ──
     # El realizado castiga a los que acumulan (compra contabilizada como
     # gasto, venta aún no ocurrida). Sumar el valor de mercado de la bolsa
@@ -335,6 +343,14 @@ def format_profile(p: dict) -> str:
                      f"{p.get('net_pnl_sol', p['pnl_total_sol']):+.2f} SOL")
     if p.get("win_rate_pct") is not None:
         lines.append(f"🎯 *Win rate (cerradas):* {p['win_rate_pct']}%")
+    try:
+        from wallet_metrics import format_metrics
+        ml = format_metrics(p.get("metrics") or {})
+        if ml:
+            lines.append("")
+            lines.extend(ml)
+    except Exception:
+        pass
     if p.get("hold_median_min") is not None:
         h = p["hold_median_min"]
         ret = f"{h:.0f} min" if h < 120 else f"{h / 60:.1f} h"

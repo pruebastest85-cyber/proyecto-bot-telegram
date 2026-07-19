@@ -48,6 +48,10 @@ Clasificaciones posibles:
 - "mev_bot": flips en <1 minuto de forma sistemática (flips_menos_1min_pct alto), micro-ganancias en serie. NO vale (imposible copiar a mano).
 - "market_maker": opera ambas direcciones del mismo token con posición neta ~0 (tokens_estilo_market_maker alto). NO vale (no direcciona precio).
 - "copiador": parece replicar a otros con retraso. NO vale.
+- "dev": billetera del equipo/creador del token (aparece de primerísimo y/o con mint authority). NO vale (no replicable).
+- "vc": fondo o billetera grande de inversión; compras grandes, horizonte largo, pocos tokens. Informativo; normalmente NO copiable a mano.
+- "influencer": mueve precio por audiencia, no por timing; entradas medianas seguidas de subida por volumen social. NO vale para copiar.
+- "wallet_espejo": billetera secundaria de otra (mismo cluster/fondeo, mismas rutas y tamaños). Marca la relación; sigue a la principal, no a esta.
 - "indeterminado": datos insuficientes.
 
 Huellas clave de NO-humano: activa las 24 horas del día (horas_del_dia_activas_de_24 ≥ 22), compras de tamaño idéntico repetido (compras_tamano_identico_pct ≥ 70), flips <1 min. Un humano duerme, varía sus montos y tarda minutos u horas en vender.
@@ -55,6 +59,10 @@ Huellas clave de NO-humano: activa las 24 horas del día (horas_del_dia_activas_
 Considera: track record real (si sus señales pasadas perdieron, NO vale aunque el perfil luzca bien), PnL NETO (= realizado + no realizado), win rate, retención mediana (si vende en <5 min es imposible copiarla con provecho), nº de tokens vs días, tamaños de compra, buy_rank en la evidencia.
 
 IMPORTANTE sobre el PnL: juzga por el PnL NETO, no solo el realizado. Una billetera puede tener pnl_realizado_sol negativo porque AÚN NO ha vendido, mientras acumula posiciones ganadoras (pnl_no_realizado_sol alto). NO la castigues por acumular: si pnl_neto_sol es claramente positivo, cuenta a su favor. El realizado negativo solo es mala señal si el neto también lo es.
+
+MÉTRICAS QUANT (si están presentes): profit_factor > 1.5, expectancy positiva, sharpe alto y max_drawdown contenido indican una operativa robusta y no un golpe de suerte. Un roi_max enorme con roi_median bajo y profit_factor ~1 es un "one-hit-wonder": NO es inteligente aunque el ROI promedio luzca bien.
+
+CAMBIO DE COMPORTAMIENTO: si el patrón reciente contradice al histórico (p.ej. antes aguantaba horas y ahora hace flips de segundos, o cambió radicalmente de tamaños), menciónalo explícitamente en "razon".
 
 Además, inventa un ALIAS: nombre corto en español (2-3 palabras, estilo apodo de trader) que refleje su estilo y rendimiento. Ejemplos: "Francotirador Paciente", "Ballena Sigilosa". Si su rendimiento es malo, que el alias lo insinúe.
 IMPORTANTE: el alias debe ser ÚNICO. Apodos ya usados por otras billeteras (elige uno DISTINTO a todos): {alias_evitar}
@@ -102,6 +110,7 @@ def _resumir_perfil(p: dict) -> str:
         "horas_del_dia_activas_de_24": p.get("active_hours_24"),
         "compras_tamano_identico_pct": p.get("uniform_buys_pct"),
         "tokens_estilo_market_maker": p.get("mm_tokens"),
+        "metricas_quant": p.get("metrics") or {},
         "mejores": top, "peores": bottom,
     }, ensure_ascii=False)
 

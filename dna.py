@@ -1,0 +1,113 @@
+"""
+Wallet DNA: la ficha única y completa de una billetera.
+
+Reúne en un solo perfil todo lo que el sistema sabe:
+  - Wallet Score y nivel de riesgo (wallet_score)
+  - Clasificación IA + alias (tabla wallets)
+  - Métricas quant: Profit Factor, Sharpe, Expectancy, Drawdown, ROI
+  - PnL realizado + en cartera + neto (wallet_profiler + unrealized_pnl)
+  - Retención mediana (proxy del horizonte de la operación)
+  - Track record real de sus señales (signal_tracker)
+  - Cluster de co-compra al que pertenece (clusters)
+
+Es lo que se muestra con /adn <address>.
+"""
+
+import time
+
+from db import get_conn
+from wallet_profiler import profile_wallet
+
+
+def wallet_dna_text(address: str) -> str | None:
+    p = profile_wallet(address)
+    if not p.get("tx_sampled"):
+        return None
+
+    from wallet_score import compute_score
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT alias, ai_class, ai_reason FROM wallets WHERE address=?",
+        (address,)).fetchone()
+    try:
+        from signal_tracker import wallet_track_record
+        track = wallet_track_record(conn, address)
+    except Exception:
+        track = None
+    conn.close()
+
+    s = compute_score(p, track)
+    m = p.get("metrics") or {}
+    alias = (row["alias"] if row and row["alias"] else None)
+    ai_class = (row["ai_class"] if row and row["ai_class"] else "indeterminado")
+
+    dias = ((time.time() - p["last_tx_ts"]) / 86400) if p.get("last_tx_ts") else None
+    activa = "🟢 activa" if (dias is not None and dias < 7) else \
+             ("🟡 poco activa" if (dias is not None and dias < 30) else "🔴 inactiva")
+
+    ret = p.get("hold_median_min")
+    if ret is None:
+        horizonte = "?"
+    elif ret < 60:
+        horizonte = f"{ret:.0f} min"
+    elif ret < 2880:
+        horizonte = f"{ret / 60:.1f} h"
+    else:
+        horizonte = f"{ret / 1440:.1f} días"
+
+    head = f"🧬 *WALLET DNA — {alias}*\n" if alias else "🧬 *WALLET DNA*\n"
+    lines = [head, f"`{address}`", "",
+             f"🧮 *Score: {s['score']}/100* · riesgo {s['riesgo']} · {activa}",
+             f"Tipo IA: *{ai_class.upper()}*"]
+
+    # Rentabilidad
+    if m.get("roi_avg") is not None:
+        lines.append(f"ROI prom/máx: {m['roi_avg']:+d}% / {m['roi_max']:+d}%")
+    if s.get("win_rate") is not None:
+        lines.append(f"Win Rate: {s['win_rate']}% · "
+                     f"{m.get('closed', s.get('trades', 0))} ops cerradas")
+    if m.get("profit_factor") is not None:
+        lines.append(f"Profit Factor: {m['profit_factor']} · "
+                     f"Expectancy: {m.get('expectancy_sol', 0):+.3f} SOL/op")
+    if m.get("sharpe") is not None or m.get("max_drawdown_sol") is not None:
+        seg = []
+        if m.get("sharpe") is not None:
+            seg.append(f"Sharpe {m['sharpe']}")
+        if m.get("max_drawdown_sol") is not None:
+            seg.append(f"Max DD -{m['max_drawdown_sol']:.2f} SOL")
+        lines.append(" · ".join(seg))
+
+    # PnL
+    lines.append(f"PnL realizado: {p['pnl_total_sol']:+.1f} SOL")
+    if p.get("held_tokens"):
+        lines.append(f"En cartera: {p.get('unrealized_sol', 0):+.1f} SOL · "
+                     f"Neto: {p.get('net_pnl_sol', p['pnl_total_sol']):+.1f} SOL")
+    lines.append(f"Horizonte (retención mediana): {horizonte}")
+
+    # Track record
+    if track and track.get("senales_medidas"):
+        try:
+            from signal_tracker import format_track_record
+            tl = format_track_record(track)
+            if tl:
+                lines.append(tl)
+        except Exception:
+            pass
+
+    # Cluster
+    try:
+        from clusters import cluster_for
+        c = cluster_for(address)
+        if c:
+            otros = [a for a in c["aliases"]
+                     if a not in (alias, address[:6])][:5]
+            lines.append(f"🕸 Cluster: {c['size']} billeteras, "
+                         f"{c['shared_tokens']} tokens en común"
+                         + (f" · con {', '.join(otros)}" if otros else ""))
+    except Exception:
+        pass
+
+    if row and row["ai_reason"]:
+        lines.append(f"\n_IA: {row['ai_reason']}_")
+    lines.append(f"🔗 gmgn.ai/sol/address/{address}")
+    return "\n".join(lines)

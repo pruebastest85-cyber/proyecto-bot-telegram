@@ -333,6 +333,12 @@ async def run_address_command(chat, cmd: str, arg: str):
         ficha = await asyncio.to_thread(_ficha_text, arg)
         await chat.send_message(ficha or "Sin transacciones para esa dirección.",
                                 parse_mode="Markdown")
+    elif cmd == "adn":
+        await chat.send_message("🧬 Componiendo el Wallet DNA… (~1 min)")
+        from dna import wallet_dna_text
+        text = await asyncio.to_thread(wallet_dna_text, arg)
+        await chat.send_message(text or "Sin transacciones para esa dirección.",
+                                parse_mode="Markdown")
     elif cmd == "ia":
         await chat.send_message("🧠 Perfilando y consultando a la IA… (~1 min)")
         text = await asyncio.to_thread(_ia_text, arg)
@@ -861,6 +867,8 @@ async def _post_init(app: Application):
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
+            BotCommand("adn", "Wallet DNA completo de una billetera"),
+            BotCommand("clusters", "Redes de co-compra detectadas"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -883,6 +891,22 @@ async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
     from rendimiento import backtest_text
     txt = await asyncio.to_thread(backtest_text, monto)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_adn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Uso: /adn <address>")
+        return
+    await run_address_command(update.message.chat, "adn", ctx.args[0])
+
+
+@solo_admin
+async def cmd_clusters(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🕸 Buscando clusters de co-compra…")
+    from clusters import clusters_text
+    txt = await asyncio.to_thread(clusters_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -975,6 +999,8 @@ def main():
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
+    app.add_handler(CommandHandler("adn", cmd_adn))
+    app.add_handler(CommandHandler("clusters", cmd_clusters))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))
