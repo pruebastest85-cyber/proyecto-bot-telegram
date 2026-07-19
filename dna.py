@@ -128,6 +128,27 @@ def wallet_dna_text(address: str) -> str | None:
     except Exception:
         pass
 
+    # ── Perfil social: rol en el grafo de influencia ──────────────────
+    try:
+        from influence import influence
+        inf = influence(address)
+        if inf and inf.get("leader_score") is not None:
+            lines.append(
+                f"🧠 Rol en la red: *{inf.get('role') or '—'}* · "
+                f"Leader {inf['leader_score']} / Follower {inf['follower_score']} "
+                f"· 1ª el {inf['pct_first']}% de las veces")
+            if inf["followers"]:
+                top = ", ".join(
+                    f"{f['alias']} ({f['prob']}%)" for f in inf["followers"][:3])
+                lines.append(f"   👥 {inf['followers_count']} seguidoras · "
+                             f"tras ella suelen entrar: {top}")
+            if inf["leaders"]:
+                jefe = inf["leaders"][0]
+                lines.append(f"   🎯 Ella suele ir detrás de *{jefe['alias']}* "
+                             f"(~{jefe['eta_s']}s)")
+    except Exception:
+        pass
+
     if row and row["ai_reason"]:
         lines.append(f"\n_IA: {row['ai_reason']}_")
     lines.append(f"🔗 gmgn.ai/sol/address/{address}")

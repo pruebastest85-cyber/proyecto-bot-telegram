@@ -339,6 +339,10 @@ async def run_address_command(chat, cmd: str, arg: str):
         text = await asyncio.to_thread(wallet_dna_text, arg)
         await chat.send_message(text or "Sin transacciones para esa dirección.",
                                 parse_mode="Markdown")
+    elif cmd == "prediccion":
+        from influence import predict_text
+        text = await asyncio.to_thread(predict_text, arg)
+        await chat.send_message(text, parse_mode="Markdown")
     elif cmd == "ia":
         await chat.send_message("🧠 Perfilando y consultando a la IA… (~1 min)")
         text = await asyncio.to_thread(_ia_text, arg)
@@ -869,6 +873,8 @@ async def _post_init(app: Application):
             BotCommand("ficha", "Ficha completa de una billetera"),
             BotCommand("adn", "Wallet DNA completo de una billetera"),
             BotCommand("clusters", "Redes de co-compra detectadas"),
+            BotCommand("prediccion", "Quién comprará tras una billetera"),
+            BotCommand("lideres", "Líderes ocultos de la red"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -907,6 +913,22 @@ async def cmd_clusters(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕸 Buscando clusters de co-compra…")
     from clusters import clusters_text
     txt = await asyncio.to_thread(clusters_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_prediccion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Uso: /prediccion <address>")
+        return
+    await run_address_command(update.message.chat, "prediccion", ctx.args[0])
+
+
+@solo_admin
+async def cmd_lideres(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🕵️ Buscando líderes ocultos…")
+    from influence import hidden_leaders_text
+    txt = await asyncio.to_thread(hidden_leaders_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -1001,6 +1023,8 @@ def main():
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
     app.add_handler(CommandHandler("clusters", cmd_clusters))
+    app.add_handler(CommandHandler("prediccion", cmd_prediccion))
+    app.add_handler(CommandHandler("lideres", cmd_lideres))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))
