@@ -25,9 +25,10 @@ EARLY_RANK = 30       # "temprano" = entre los primeros 30 compradores
 MIN_SHARED = 2        # nº mínimo de tokens ganadores compartidos por par
 
 
-def _early_buyers_by_token(conn) -> dict[str, list[str]]:
+def _early_data(conn):
+    """Devuelve (by_token: {mint:set(wallets)}, ranks: {(mint,wallet):rank})."""
     rows = conn.execute(
-        """SELECT a.mint, a.wallet
+        """SELECT a.mint, a.wallet, a.buy_rank
            FROM appearances a
            JOIN wallets w ON w.address = a.wallet
            WHERE (a.buy_rank IS NULL OR a.buy_rank <= ?)
@@ -35,16 +36,64 @@ def _early_buyers_by_token(conn) -> dict[str, list[str]]:
            ORDER BY a.mint""",
         (EARLY_RANK,)).fetchall()
     by_token = defaultdict(set)
+    ranks = {}
     for r in rows:
         by_token[r["mint"]].add(r["wallet"])
-    return {m: list(ws) for m, ws in by_token.items() if len(ws) >= 2}
+        if r["buy_rank"] is not None:
+            ranks[(r["mint"], r["wallet"])] = r["buy_rank"]
+    by_token = {m: ws for m, ws in by_token.items() if len(ws) >= 2}
+    return by_token, ranks
+
+
+def _leadership(members, shared_tokens, ranks):
+    """Ordena a los miembros por quién compra ANTES (líder → seguidores).
+
+    Para cada token compartido compara los buy_rank de los miembros
+    presentes: quien tiene menor rank compró primero. Acumula:
+      - lead_pct: % de comparaciones en que el miembro fue el más temprano,
+      - avg_rank: puesto medio de compra,
+      - follows: a quién sigue más a menudo (quién le precede).
+    """
+    leads = {m: 0 for m in members}
+    comps = {m: 0 for m in members}
+    rank_sum = {m: 0.0 for m in members}
+    appears = {m: 0 for m in members}
+    precede = {m: defaultdict(int) for m in members}
+    for t in shared_tokens:
+        present = [(m, ranks.get((t, m))) for m in members
+                   if ranks.get((t, m)) is not None]
+        for m, r in present:
+            rank_sum[m] += r
+            appears[m] += 1
+        for a, ra in present:
+            for b, rb in present:
+                if a == b:
+                    continue
+                comps[a] += 1
+                if ra < rb:
+                    leads[a] += 1
+                elif rb < ra:
+                    precede[a][b] += 1
+    order = []
+    for m in members:
+        lead_pct = round(100 * leads[m] / comps[m]) if comps[m] else None
+        avg_rank = round(rank_sum[m] / appears[m], 1) if appears[m] else None
+        follows_w = (max(precede[m].items(), key=lambda kv: kv[1])[0]
+                     if precede[m] else None)
+        order.append({"wallet": m, "lead_pct": lead_pct,
+                      "avg_rank": avg_rank, "appears": appears[m],
+                      "follows": follows_w})
+    # líder primero: mayor lead_pct, luego menor rank medio
+    order.sort(key=lambda o: (-(o["lead_pct"] or -1),
+                              o["avg_rank"] if o["avg_rank"] is not None else 1e9))
+    return order
 
 
 def find_clusters(min_shared: int = MIN_SHARED) -> list[dict]:
     """Devuelve clusters ordenados por fuerza (nº de miembros × tokens)."""
     conn = get_conn()
     try:
-        by_token = _early_buyers_by_token(conn)
+        by_token, ranks = _early_data(conn)
         # 1) co-apariciones por par + tokens compartidos
         pair_tokens = defaultdict(set)
         for mint, wallets in by_token.items():
@@ -85,15 +134,25 @@ def find_clusters(min_shared: int = MIN_SHARED) -> list[dict]:
             "SELECT address, alias FROM wallets WHERE alias IS NOT NULL"
         ).fetchall()}
 
+        def nm(w):
+            return alias.get(w) or w[:6]
+
         clusters = []
         for root, members in groups.items():
             toks = group_tokens[root]
+            order = _leadership(members, toks, ranks)
+            for o in order:
+                o["alias"] = nm(o["wallet"])
+                o["follows_alias"] = nm(o["follows"]) if o["follows"] else None
             clusters.append({
                 "members": sorted(members),
-                "aliases": [alias.get(m) or m[:6] for m in sorted(members)],
+                "aliases": [nm(m) for m in sorted(members)],
                 "size": len(members),
                 "shared_tokens": len(toks),
                 "strength": len(members) * len(toks),
+                "order": order,
+                "leader": order[0]["alias"] if order else None,
+                "leader_wallet": order[0]["wallet"] if order else None,
             })
         clusters.sort(key=lambda c: c["strength"], reverse=True)
         return clusters
@@ -109,14 +168,19 @@ def clusters_text(limit: int = 6) -> str:
                 "ciclos de descubrimiento y vuelve a intentar.")
     out = [f"🕸 *Clusters de co-compra* ({len(clusters)} detectados)\n"]
     for i, c in enumerate(clusters[:limit], 1):
-        nombres = ", ".join(c["aliases"][:6])
-        if c["size"] > 6:
-            nombres += f" +{c['size'] - 6}"
-        out.append(
-            f"*{i}. Cluster de {c['size']} billeteras* · "
-            f"{c['shared_tokens']} tokens en común\n{nombres}")
-    out.append("\n_Billeteras que entran temprano juntas en los mismos "
-               "ganadores. Cuando una compra, vigila a las demás._")
+        out.append(f"*{i}. Cluster de {c['size']} billeteras* · "
+                   f"{c['shared_tokens']} tokens en común")
+        if c.get("leader"):
+            out.append(f"   👑 Líder: *{c['leader']}* (compra primero)")
+        seguidores = [o for o in c.get("order", [])
+                      if o["wallet"] != c.get("leader_wallet")][:5]
+        for o in seguidores:
+            lp = f"{o['lead_pct']}% adelanta" if o["lead_pct"] is not None else ""
+            sig = f" · sigue a {o['follows_alias']}" if o.get("follows_alias") else ""
+            out.append(f"   • {o['alias']} (rank medio {o['avg_rank']}{('; ' + lp) if lp else ''}{sig})")
+        out.append("")
+    out.append("_Cuando el 👑 líder compra, los seguidores suelen entrar "
+               "detrás. Ésa es tu ventana._")
     return "\n".join(out)
 
 

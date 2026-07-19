@@ -104,6 +104,18 @@ def wallet_dna_text(address: str) -> str | None:
             lines.append(f"🕸 Cluster: {c['size']} billeteras, "
                          f"{c['shared_tokens']} tokens en común"
                          + (f" · con {', '.join(otros)}" if otros else ""))
+            # ¿lidera o sigue dentro del cluster?
+            me = next((o for o in c.get("order", [])
+                       if o["wallet"] == address), None)
+            if me is not None:
+                if c.get("leader_wallet") == address:
+                    lines.append("   👑 *Lidera el cluster* (compra primero; "
+                                 "vigila esta billetera para adelantarte)")
+                elif me.get("follows_alias"):
+                    lp = (f", ~{me['lead_pct']}% adelanta"
+                          if me.get("lead_pct") is not None else "")
+                    lines.append(f"   ↪️ Sigue a *{me['follows_alias']}* "
+                                 f"(rank medio {me['avg_rank']}{lp})")
     except Exception:
         pass
 
