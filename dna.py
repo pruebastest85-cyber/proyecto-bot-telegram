@@ -84,6 +84,15 @@ def wallet_dna_text(address: str) -> str | None:
                      f"Neto: {p.get('net_pnl_sol', p['pnl_total_sol']):+.1f} SOL")
     lines.append(f"Horizonte (retención mediana): {horizonte}")
 
+    # Calidad de salida (Birdeye, bajo demanda; solo si hay key)
+    try:
+        from birdeye import exit_quality, format_exit_quality
+        eq = format_exit_quality(exit_quality(p))
+        if eq:
+            lines.append(eq)
+    except Exception:
+        pass
+
     # Track record
     if track and track.get("senales_medidas"):
         try:

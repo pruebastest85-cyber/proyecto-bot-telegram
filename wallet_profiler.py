@@ -150,7 +150,8 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
     tokens = defaultdict(lambda: {"sol_out": 0.0, "sol_in": 0.0,
                                   "buys": 0, "sells": 0, "symbol": "",
                                   "first_buy_ts": None, "first_sell_ts": None,
-                                  "holding_sol": 0.0})
+                                  "holding_sol": 0.0,
+                                  "tok_in": 0.0, "tok_out": 0.0})
     timestamps = []
     buy_sizes = []
 
@@ -192,6 +193,10 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
             if t.get("toUserAccount") == address and delta < -0.001:
                 info["buys"] += 1
                 info["sol_out"] += abs(delta)
+                try:
+                    info["tok_in"] += float(t.get("tokenAmount") or 0)
+                except (TypeError, ValueError):
+                    pass
                 buy_sizes.append(round(abs(delta), 2))
                 if ts and (info["first_buy_ts"] is None or ts < info["first_buy_ts"]):
                     info["first_buy_ts"] = ts
@@ -202,6 +207,10 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
             if t.get("fromUserAccount") == address and delta > 0.001:
                 info["sells"] += 1
                 info["sol_in"] += delta
+                try:
+                    info["tok_out"] += float(t.get("tokenAmount") or 0)
+                except (TypeError, ValueError):
+                    pass
                 if ts and (info["first_sell_ts"] is None or ts < info["first_sell_ts"]):
                     info["first_sell_ts"] = ts
                 if reciente:
