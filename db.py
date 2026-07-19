@@ -424,6 +424,19 @@ def get_conn():
         conn.autocommit = True
         pg = _PgConn(conn)
         pg.executescript(PG_SCHEMA)
+        # Migraciones idempotentes para bases ya existentes (Postgres soporta
+        # ADD COLUMN IF NOT EXISTS).
+        for tbl, col, typ in [
+                ("predictions", "tier", "TEXT"),
+                ("predictions", "first_confirm_s", "INTEGER"),
+                ("predictions", "price0", "DOUBLE PRECISION"),
+                ("wallets", "pnl_unreal", "DOUBLE PRECISION"),
+                ("wallets", "pnl_net", "DOUBLE PRECISION")]:
+            try:
+                pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
+                           f"{col} {typ}")
+            except Exception:
+                pass
         _dedupe_aliases(pg)
         return pg
 
@@ -449,6 +462,19 @@ def get_conn():
                      ("alerted", "INTEGER DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
+    # Tabla predictions (motor predictivo): columnas añadidas después de
+    # su creación inicial.
+    for col, typ in [("stage", "INTEGER DEFAULT 1"), ("confidence", "INTEGER"),
+                     ("meta_score", "INTEGER"), ("predicted", "TEXT"),
+                     ("arrived", "TEXT"), ("alerted_stage", "INTEGER DEFAULT 0"),
+                     ("status", "TEXT DEFAULT 'abierta'"), ("outcome_pct", "REAL"),
+                     ("token_chg_pct", "REAL"), ("tier", "TEXT"),
+                     ("first_confirm_s", "INTEGER"), ("price0", "REAL"),
+                     ("evaluated_ts", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
     conn.commit()
