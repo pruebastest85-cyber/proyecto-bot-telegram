@@ -24,8 +24,13 @@ import requests
 import config
 
 LAMPORTS = 1_000_000_000
+WSOL = "So11111111111111111111111111111111111111112"
+# Mints que NO son "apuestas" de memecoin: se saltan como posición. WSOL
+# se trata aparte como efectivo (1 WSOL = 1 SOL).
 STABLE_MINTS = {
-    "So11111111111111111111111111111111111111112",  # WSOL
+    WSOL,
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
 }
 
 # Cuentas de propina de Jito (MEV bundles). La propina NO es precio del
@@ -148,13 +153,32 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
 
     for tx in txs:
         ts = tx.get("timestamp") or 0
-        timestamps.append(ts)
-        if now - ts <= 7 * 86400:
-            result["tx_7d"] += 1
+        timestamps.append(ts)   # incluye fallidas: cuenta para frecuencia/bot
         if tx.get("transactionError"):
             continue
+        if now - ts <= 7 * 86400:
+            result["tx_7d"] += 1
 
+        # Lado "efectivo" del swap en SOL (nativo, ya sin fee/propina).
         delta = _sol_delta(tx, address)
+        # C: si el SOL nativo casi no se movió pero la billetera movió WSOL
+        # (SOL pre-envuelto), usar ese WSOL como efectivo. Solo cuando el
+        # nativo es ~0, para NO duplicar el caso normal financiado con SOL.
+        if abs(delta) <= 0.001:
+            wsol = 0.0
+            for t in (tx.get("tokenTransfers") or []):
+                if t.get("mint") != WSOL:
+                    continue
+                try:
+                    amt = float(t.get("tokenAmount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if t.get("toUserAccount") == address:
+                    wsol += amt
+                elif t.get("fromUserAccount") == address:
+                    wsol -= amt
+            if abs(wsol) > 0.001:
+                delta = wsol
         reciente = (now - ts) <= 30 * 86400
         for t in (tx.get("tokenTransfers") or []):
             mint = t.get("mint")
