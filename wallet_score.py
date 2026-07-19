@@ -13,7 +13,10 @@ de sus señales registradas (percentiles 25-75).
 def compute_score(p: dict, track: dict | None = None) -> dict:
     """Calcula el Wallet Score a partir del perfil (y track record)."""
     invested = sum(i["sol_out"] for i in p["tokens"].values())
-    roi = (100 * p["pnl_total_sol"] / invested) if invested > 0.5 else 0.0
+    # PnL neto = realizado + valor de mercado de lo que aún tiene en cartera.
+    # Usarlo para el ROI evita penalizar a quien acumula sin vender todavía.
+    net = p.get("net_pnl_sol", p["pnl_total_sol"])
+    roi = (100 * net / invested) if invested > 0.5 else 0.0
     p_roi = max(0.0, min(25.0, 12.5 + roi / 20))
 
     wr = p.get("win_rate_pct")
@@ -58,6 +61,9 @@ def compute_score(p: dict, track: dict | None = None) -> dict:
             "trades": p.get("closed_positions", 0),
             "pnl_sol": round(p["pnl_total_sol"], 1),
             "pnl_30d": round(p.get("pnl_30d_sol", 0.0), 1),
+            "pnl_unreal": round(p.get("unrealized_sol", 0.0), 1),
+            "pnl_net": round(net, 1),
+            "held_tokens": p.get("held_tokens", 0),
             "riesgo": riesgo}
 
 
@@ -71,11 +77,16 @@ def format_ficha(address: str, s: dict, alias: str | None = None,
              f"ROI (muestra): {s['roi_pct']:+d}%",
              f"Win Rate: {wr}",
              f"Trades cerrados: {s['trades']}",
-             f"PnL: {s['pnl_sol']:+.1f} SOL (30d: {s['pnl_30d']:+.1f})",
-             f"Nivel de riesgo: {s['riesgo']}"]
+             f"PnL realizado: {s['pnl_sol']:+.1f} SOL (30d: {s['pnl_30d']:+.1f})"]
+    if s.get("held_tokens"):
+        lines.append(f"En cartera: {s.get('pnl_unreal', 0.0):+.1f} SOL")
+        lines.append(f"PnL neto: {s.get('pnl_net', s['pnl_sol']):+.1f} SOL")
+    lines += [f"Nivel de riesgo: {s['riesgo']}"]
     if track_line:
         lines.append(track_line)
-    lines.append("\n_ROI y PnL sobre las últimas ~300 txs._")
+    lines.append("\n_ROI sobre PnL neto (realizado + cartera). "
+                 "Realizado calculado sobre las últimas ~1000 txs; "
+                 "«en cartera» a precio actual._")
     return "\n".join(lines)
 
 

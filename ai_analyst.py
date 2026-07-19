@@ -41,7 +41,7 @@ EVIDENCIA (por qué está en nuestra base):
 {evidencia}
 
 Clasificaciones posibles:
-- "trader": opera con criterio, PnL positivo, ritmo humano. VALE seguirla.
+- "trader": opera con criterio, PnL NETO positivo, ritmo humano. VALE seguirla.
 - "sniper": entra muy temprano en lanzamientos con método consistente y gana. VALE seguirla.
 - "insider": compra de primerísimo en tokens que luego explotan; probable dev/equipo. NO vale (no replicable).
 - "bot": frecuencia inhumana, spray a decenas de tokens. NO vale.
@@ -52,7 +52,9 @@ Clasificaciones posibles:
 
 Huellas clave de NO-humano: activa las 24 horas del día (horas_del_dia_activas_de_24 ≥ 22), compras de tamaño idéntico repetido (compras_tamano_identico_pct ≥ 70), flips <1 min. Un humano duerme, varía sus montos y tarda minutos u horas en vender.
 
-Considera: track record real (si sus señales pasadas perdieron, NO vale aunque el perfil luzca bien), PnL realizado, win rate, retención mediana (si vende en <5 min es imposible copiarla con provecho), nº de tokens vs días, tamaños de compra, buy_rank en la evidencia.
+Considera: track record real (si sus señales pasadas perdieron, NO vale aunque el perfil luzca bien), PnL NETO (= realizado + no realizado), win rate, retención mediana (si vende en <5 min es imposible copiarla con provecho), nº de tokens vs días, tamaños de compra, buy_rank en la evidencia.
+
+IMPORTANTE sobre el PnL: juzga por el PnL NETO, no solo el realizado. Una billetera puede tener pnl_realizado_sol negativo porque AÚN NO ha vendido, mientras acumula posiciones ganadoras (pnl_no_realizado_sol alto). NO la castigues por acumular: si pnl_neto_sol es claramente positivo, cuenta a su favor. El realizado negativo solo es mala señal si el neto también lo es.
 
 Además, inventa un ALIAS: nombre corto en español (2-3 palabras, estilo apodo de trader) que refleje su estilo y rendimiento. Ejemplos: "Francotirador Paciente", "Ballena Sigilosa". Si su rendimiento es malo, que el alias lo insinúe.
 IMPORTANTE: el alias debe ser ÚNICO. Apodos ya usados por otras billeteras (elige uno DISTINTO a todos): {alias_evitar}
@@ -65,6 +67,7 @@ def _ensure_columns(conn):
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
                      ("ai_reason", "TEXT"), ("alias", "TEXT"),
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
+                     ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
                      ("pnl_updated", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
@@ -87,7 +90,10 @@ def _resumir_perfil(p: dict) -> str:
         "ultima_tx_hace_dias": round(days_ago, 1) if days_ago is not None else None,
         "txs_ultimos_7d": p["tx_7d"],
         "tokens_operados": len(p["tokens"]),
-        "pnl_total_sol": round(p["pnl_total_sol"], 2),
+        "pnl_realizado_sol": round(p["pnl_total_sol"], 2),
+        "pnl_no_realizado_sol": round(p.get("unrealized_sol", 0.0), 2),
+        "pnl_neto_sol": round(p.get("net_pnl_sol", p["pnl_total_sol"]), 2),
+        "tokens_en_cartera": p.get("held_tokens", 0),
         "pnl_30d_sol": round(p.get("pnl_30d_sol", 0.0), 2),
         "win_rate_pct": p.get("win_rate_pct"),
         "retencion_mediana_min": p.get("hold_median_min"),
@@ -218,11 +224,13 @@ def evaluate_tracked(conn) -> int:
             conn.execute(
                 """UPDATE wallets SET is_bot=1, is_tracked=0, ai_class='bot',
                    ai_follow=0, ai_reason=?, alias=COALESCE(alias,'Bot Descartado'),
-                   pnl_30d=?, pnl_total=?, pnl_updated=?
+                   pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?, pnl_updated=?
                    WHERE address=?""",
                 (f"Descarte automático: {razon_bot}",
                  round(profile.get("pnl_30d_sol", 0.0), 2),
                  round(profile.get("pnl_total_sol", 0.0), 2),
+                 round(profile.get("unrealized_sol", 0.0), 2),
+                 round(profile.get("net_pnl_sol", profile.get("pnl_total_sol", 0.0)), 2),
                  now_iso(), addr))
             conn.commit()
             evaluated += 1
@@ -255,7 +263,8 @@ def evaluate_tracked(conn) -> int:
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
                alias=COALESCE(?, alias),
-               pnl_30d=?, pnl_total=?, pnl_updated=?, wallet_score=?,
+               pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?,
+               pnl_updated=?, wallet_score=?,
                is_tracked=?, is_bot=CASE WHEN ?='bot' THEN 1 ELSE is_bot END
                WHERE address=?""",
             (verdict["clasificacion"], seguir,
@@ -263,6 +272,8 @@ def evaluate_tracked(conn) -> int:
              alias,
              round(profile.get("pnl_30d_sol", 0.0), 2),
              round(profile.get("pnl_total_sol", 0.0), 2),
+             round(profile.get("unrealized_sol", 0.0), 2),
+             round(profile.get("net_pnl_sol", profile.get("pnl_total_sol", 0.0)), 2),
              now_iso(), wscore,
              seguir, verdict["clasificacion"], addr),
         )

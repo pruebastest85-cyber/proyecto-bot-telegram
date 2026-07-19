@@ -168,6 +168,8 @@ CREATE TABLE IF NOT EXISTS wallets (
     alias            TEXT,
     pnl_30d          DOUBLE PRECISION,
     pnl_total        DOUBLE PRECISION,
+    pnl_unreal       DOUBLE PRECISION,
+    pnl_net          DOUBLE PRECISION,
     pnl_updated      TEXT,
     wallet_score     DOUBLE PRECISION
 );
@@ -390,6 +392,7 @@ def get_conn():
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
                      ("ai_reason", "TEXT"), ("alias", "TEXT"),
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
+                     ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
                      ("pnl_updated", "TEXT"), ("wallet_score", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")

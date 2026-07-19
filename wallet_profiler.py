@@ -69,7 +69,7 @@ def _sol_delta(tx: dict, wallet: str) -> float:
     return total
 
 
-def profile_wallet(address: str) -> dict:
+def profile_wallet(address: str, with_holdings: bool = True) -> dict:
     txs = _fetch_txs(address)
     now = time.time()
     result = {
@@ -80,6 +80,10 @@ def profile_wallet(address: str) -> dict:
         "tokens": {},        # mint -> métricas
         "pnl_total_sol": 0.0,
         "pnl_30d_sol": 0.0,
+        "unrealized_sol": 0.0,     # valor en SOL de tokens aún en cartera
+        "net_pnl_sol": 0.0,        # realizado + no realizado (mark-to-market)
+        "held_tokens": 0,
+        "priced_tokens": 0,
         "possible_bot": False,
     }
     if not txs:
@@ -88,7 +92,8 @@ def profile_wallet(address: str) -> dict:
     result["last_tx_ts"] = txs[0].get("timestamp")
     tokens = defaultdict(lambda: {"sol_out": 0.0, "sol_in": 0.0,
                                   "buys": 0, "sells": 0, "symbol": "",
-                                  "first_buy_ts": None, "first_sell_ts": None})
+                                  "first_buy_ts": None, "first_sell_ts": None,
+                                  "holding_sol": 0.0})
     timestamps = []
     buy_sizes = []
 
@@ -175,7 +180,28 @@ def profile_wallet(address: str) -> dict:
              and abs(i["pnl_sol"]) <= 0.05 * (i["sol_in"] + i["sol_out"]))
     result["mm_tokens"] = mm
 
+    result["net_pnl_sol"] = round(result["pnl_total_sol"], 2)
     result["tokens"] = dict(tokens)
+
+    # ── PnL no realizado: valora los tokens que la billetera aún tiene ──
+    # El realizado castiga a los que acumulan (compra contabilizada como
+    # gasto, venta aún no ocurrida). Sumar el valor de mercado de la bolsa
+    # abierta da el PnL NETO real (mark-to-market).
+    if with_holdings:
+        try:
+            from unrealized_pnl import holdings_value
+            hv = holdings_value(address)
+            result["unrealized_sol"] = hv["unrealized_sol"]
+            result["net_pnl_sol"] = round(
+                result["pnl_total_sol"] + hv["unrealized_sol"], 2)
+            result["held_tokens"] = hv["held_tokens"]
+            result["priced_tokens"] = hv["priced_tokens"]
+            for mint, val in hv["holdings"].items():
+                if mint in result["tokens"]:
+                    result["tokens"][mint]["holding_sol"] = val
+        except Exception as e:
+            print(f"  · PnL no realizado no disponible: {e}")
+
     return result
 
 
@@ -228,6 +254,12 @@ def format_profile(p: dict) -> str:
         lines.append(f"✅ Con ventas: {closed} · ganadores: {wins}")
     lines.append(f"💰 *PnL realizado (muestra):* {p['pnl_total_sol']:+.2f} SOL")
     lines.append(f"📅 *PnL últimos 30 días:* {p['pnl_30d_sol']:+.2f} SOL")
+    if p.get("held_tokens"):
+        cob = f"{p.get('priced_tokens', 0)}/{p['held_tokens']} con precio"
+        lines.append(f"🎒 *En cartera (sin vender):* "
+                     f"{p.get('unrealized_sol', 0.0):+.2f} SOL ({cob})")
+        lines.append(f"🧾 *PnL neto (realizado + cartera):* "
+                     f"{p.get('net_pnl_sol', p['pnl_total_sol']):+.2f} SOL")
     if p.get("win_rate_pct") is not None:
         lines.append(f"🎯 *Win rate (cerradas):* {p['win_rate_pct']}%")
     if p.get("hold_median_min") is not None:
@@ -244,7 +276,8 @@ def format_profile(p: dict) -> str:
     if len(traded) > 6:
         lines.append(f"…y {len(traded) - 6} más")
 
-    lines.append("\n_PnL realizado sobre las últimas ~1000 txs; "
-                 "no incluye posiciones aún abiertas._")
+    lines.append("\n_PnL realizado sobre las últimas ~1000 txs. "
+                 "«En cartera» valora las posiciones abiertas a precio actual "
+                 "(DexScreener); «neto» = realizado + cartera._")
     lines.append(f"🔗 gmgn.ai/sol/address/{addr}")
     return "\n".join(lines)
