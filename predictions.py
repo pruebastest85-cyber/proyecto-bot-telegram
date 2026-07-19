@@ -260,7 +260,7 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                       token_ctx.get("liq"), _risk_pct(token_ctx))
 
     tier = _tier(conf, meta, umbral, token_ctx.get("liq"), _risk_pct(token_ctx))
-    conn.execute(
+    cur = conn.execute(
         """INSERT OR IGNORE INTO predictions
            (leader, mint, created_ts, stage, confidence, meta_score,
             predicted, arrived, alerted_stage, status, tier, price0)
@@ -269,6 +269,10 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
          json.dumps(followers), json.dumps([]), tier,
          token_ctx.get("price")))
     conn.commit()
+    # Si ya existía una predicción para (leader, mint) — p.ej. una vieja ya
+    # evaluada — el INSERT no crea nada; no re-alertamos sobre datos rancios.
+    if not cur.rowcount:
+        return
 
     if _should_push(tier, conn):
         conn.execute(
@@ -293,21 +297,48 @@ def evaluate_due(conn):
         pred_w = [p["wallet"] for p in pred]
         outcome = round(100 * sum(1 for w in pred_w if w in arrived) /
                         len(pred_w)) if pred_w else 0
-        chg = None
-        try:
-            if r["price0"]:
-                from token_check import analyze_token
-                now_px = analyze_token(r["mint"]).get("price")
-                if now_px:
-                    chg = round(100 * (now_px - r["price0"]) / r["price0"])
-        except Exception:
-            pass
         conn.execute(
             "UPDATE predictions SET status='evaluada', outcome_pct=?, "
-            "token_chg_pct=?, evaluated_ts=? WHERE id=?",
-            (outcome, chg, int(time.time()), r["id"]))
+            "evaluated_ts=? WHERE id=?",
+            (outcome, int(time.time()), r["id"]))
     if rows:
         conn.commit()
+
+
+def fill_token_performance(conn, limit: int = 5):
+    """
+    Rellena token_chg_pct (rendimiento del token desde la predicción) de las
+    predicciones ya evaluadas que aún no lo tienen. Hace llamadas de red, por
+    eso SOLO se ejecuta desde el job periódico, nunca desde el webhook.
+    """
+    rows = conn.execute(
+        "SELECT id, mint, price0 FROM predictions WHERE status='evaluada' "
+        "AND token_chg_pct IS NULL AND price0 IS NOT NULL "
+        "ORDER BY evaluated_ts DESC LIMIT ?", (limit,)).fetchall()
+    for r in rows:
+        try:
+            from token_check import analyze_token
+            now_px = analyze_token(r["mint"]).get("price")
+            if now_px and r["price0"]:
+                chg = round(100 * (now_px - r["price0"]) / r["price0"])
+                conn.execute(
+                    "UPDATE predictions SET token_chg_pct=? WHERE id=?",
+                    (chg, r["id"]))
+        except Exception:
+            pass
+    if rows:
+        conn.commit()
+
+
+def run_maintenance():
+    """Punto de entrada del job periódico: evalúa vencidas y rellena el
+    rendimiento de los tokens (fuera del camino del webhook)."""
+    conn = get_conn()
+    try:
+        evaluate_due(conn)
+        fill_token_performance(conn)
+    finally:
+        conn.close()
 
 
 # ─────────────────────────── VISTAS ─────────────────────────────────

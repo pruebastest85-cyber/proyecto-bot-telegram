@@ -398,6 +398,16 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· track_outcomes falló: {e}")
 
 
+async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Evalúa predicciones vencidas y rellena rendimiento del token.
+    Fuera del webhook: aquí sí puede hacer llamadas de red sin bloquear."""
+    try:
+        from predictions import run_maintenance
+        await asyncio.to_thread(run_maintenance)
+    except Exception as e:
+        print(f"· predictions_job falló: {e}")
+
+
 async def paper_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: revisa TP/SL/tiempo de las posiciones simuladas."""
     try:
@@ -1092,6 +1102,13 @@ def main():
         interval=900,
         first=300,
         name="paper_trading",
+    )
+    # Motor predictivo: evalúa predicciones vencidas cada 10 min
+    app.job_queue.run_repeating(
+        predictions_job,
+        interval=600,
+        first=360,
+        name="predictions_eval",
     )
     # Backup diario de la base + watchdog del webhook + aprendizaje semanal
     app.job_queue.run_repeating(backup_job, interval=86400, first=7200,
