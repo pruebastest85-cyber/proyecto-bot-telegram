@@ -58,7 +58,9 @@ Huellas clave de NO-humano: activa las 24 horas del día (horas_del_dia_activas_
 
 Considera: track record real (si sus señales pasadas perdieron, NO vale aunque el perfil luzca bien), PnL NETO (= realizado + no realizado), win rate, retención mediana (si vende en <5 min es imposible copiarla con provecho), nº de tokens vs días, tamaños de compra, buy_rank en la evidencia.
 
-IMPORTANTE sobre el PnL: juzga por el PnL NETO, no solo el realizado. Una billetera puede tener pnl_realizado_sol negativo porque AÚN NO ha vendido, mientras acumula posiciones ganadoras (pnl_no_realizado_sol alto). NO la castigues por acumular: si pnl_neto_sol es claramente positivo, cuenta a su favor. El realizado negativo solo es mala señal si el neto también lo es.
+CRITERIO Nº1 — GANANCIAS ABSOLUTAS: el objetivo del sistema son billeteras SÚPER RENTABLES, que ganan MUCHO dinero. El factor más importante es el pnl_neto_sol ABSOLUTO en SOL. Una billetera con +80 SOL netos vale mucho más que una con ROI% altísimo pero solo +1 SOL de ganancia absoluta (calderilla). Prioriza las ganancias absolutas grandes. Comprar temprano (buy_rank bajo) es un PLUS que refuerza, no el criterio principal: una early buyer que apenas gana NO vale; una que gana mucho SÍ, entre temprano o no.
+
+IMPORTANTE sobre el PnL: juzga por el PnL NETO, no solo el realizado. Una billetera puede tener pnl_realizado_sol negativo porque AÚN NO ha vendido, mientras acumula posiciones ganadoras (pnl_no_realizado_sol alto). NO la castigues por acumular: si pnl_neto_sol es claramente positivo, cuenta a su favor. El realizado negativo solo es mala señal si el neto también lo es. Si el pnl_neto_sol es negativo o insignificante, la billetera NO vale aunque haya comprado muy temprano.
 
 MÉTRICAS QUANT (si están presentes): profit_factor > 1.5, expectancy positiva, sharpe alto y max_drawdown contenido indican una operativa robusta y no un golpe de suerte. Un roi_max enorme con roi_median bajo y profit_factor ~1 es un "one-hit-wonder": NO es inteligente aunque el ROI promedio luzca bien.
 

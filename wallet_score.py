@@ -9,46 +9,60 @@ Patrón: rango de Market Cap donde la billetera suele entrar, calculado
 de sus señales registradas (percentiles 25-75).
 """
 
+import math
+
 
 def compute_score(p: dict, track: dict | None = None) -> dict:
     """Calcula el Wallet Score a partir del perfil (y track record)."""
     invested = sum(i["sol_out"] for i in p["tokens"].values())
     # PnL neto = realizado + valor de mercado de lo que aún tiene en cartera.
-    # Usarlo para el ROI evita penalizar a quien acumula sin vender todavía.
     net = p.get("net_pnl_sol", p["pnl_total_sol"])
+
+    # ── PnL ABSOLUTO en SOL (0-30): el factor MÁS importante ──
+    # El objetivo son billeteras que ganan MUCHO dinero, no solo alto ROI%.
+    # Escala logarítmica: +200 SOL ≈ tope; premia fuerte a los grandes
+    # ganadores sin que un ballena infinito domine. Negativo = 0.
+    if net > 0:
+        p_pnl = min(30.0, 30.0 * math.log10(1 + net) / math.log10(201))
+    else:
+        p_pnl = 0.0
+
+    # ROI% (0-20): eficiencia del capital (secundario al PnL absoluto)
     roi = (100 * net / invested) if invested > 0.5 else 0.0
-    p_roi = max(0.0, min(25.0, 12.5 + roi / 20))
+    p_roi = max(0.0, min(20.0, 10.0 + roi / 25))
 
     wr = p.get("win_rate_pct")
-    p_wr = wr / 4 if wr is not None else 8.0
+    p_wr = min(20.0, wr / 5) if wr is not None else 6.0
 
     if track and track.get("tasa_acierto_24h_pct") is not None:
-        p_tr = track["tasa_acierto_24h_pct"] / 5
+        p_tr = min(15.0, track["tasa_acierto_24h_pct"] * 0.15)
     elif track and track.get("tasa_acierto_1h_pct") is not None:
-        p_tr = track["tasa_acierto_1h_pct"] / 6
+        p_tr = min(15.0, track["tasa_acierto_1h_pct"] * 0.12)
     else:
-        p_tr = 8.0  # neutro: sin señales medidas aún
+        p_tr = 7.0  # neutro: sin señales medidas aún
 
     h = p.get("hold_median_min")
     if h is None:
-        p_hold = 7.0
+        p_hold = 4.0
     elif h < 2:
-        p_hold = 2.0     # vende en segundos: no copiable
+        p_hold = 1.0     # vende en segundos: no copiable
     elif h < 10:
-        p_hold = 8.0
+        p_hold = 4.0
     elif h <= 2880:
-        p_hold = 15.0    # sweet spot: 10 min a 48 h
+        p_hold = 8.0     # sweet spot: 10 min a 48 h
     else:
-        p_hold = 10.0
+        p_hold = 5.0
 
     ganancias = [i["pnl_sol"] for i in p["tokens"].values() if i["pnl_sol"] > 0]
     if ganancias:
         conc = max(ganancias) / sum(ganancias)
-        p_cons = max(0.0, min(15.0, 15 * (1 - conc) + 3))
+        p_cons = max(0.0, min(7.0, 7 * (1 - conc) + 1.5))
     else:
-        conc, p_cons = 1.0, 5.0
+        conc, p_cons = 1.0, 2.5
 
-    score = int(round(min(100.0, p_roi + p_wr + p_tr + p_hold + p_cons)))
+    # Total 100: PnL abs 30 · ROI 20 · win 20 · track 15 · hold 8 · consist 7
+    score = int(round(min(
+        100.0, p_pnl + p_roi + p_wr + p_tr + p_hold + p_cons)))
 
     if (wr or 0) >= 65 and conc < 0.5 and (h or 0) >= 10:
         riesgo = "Bajo"

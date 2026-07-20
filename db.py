@@ -697,6 +697,7 @@ def top_wallets(conn, limit=20):
            ORDER BY is_tracked DESC,
                     CASE WHEN wallet_score IS NULL THEN 1 ELSE 0 END,
                     wallet_score DESC,
+                    COALESCE(pnl_total, -1e9) DESC,
                     score DESC
            LIMIT ?""",
         (limit,),
