@@ -181,6 +181,13 @@ def wallet_dna_text(address: str) -> str | None:
             lines.append(f"💡 _{exp}_")
     except Exception:
         pass
+    try:
+        from similarity import format_similar
+        sim = format_similar(address)
+        if sim:
+            lines.append(sim)
+    except Exception:
+        pass
 
     if row and row["ai_reason"]:
         lines.append(f"\n_IA: {row['ai_reason']}_")
