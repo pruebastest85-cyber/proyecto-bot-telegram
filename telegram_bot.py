@@ -889,6 +889,7 @@ async def _post_init(app: Application):
             BotCommand("metricas", "Panel de rendimiento del motor"),
             BotCommand("backup", "Descargar copia de la base de datos"),
             BotCommand("elite", "Clasificación Elite/Seguimiento/Observación"),
+            BotCommand("alpha", "Quién descubre gemas antes que el mercado"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -963,6 +964,14 @@ async def cmd_metricas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @solo_admin
 async def cmd_elite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = await asyncio.to_thread(_elite_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_alpha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔭 Midiendo quién descubre antes…")
+    from alpha import alpha_text
+    txt = await asyncio.to_thread(alpha_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -1111,6 +1120,7 @@ def main():
     app.add_handler(CommandHandler("metricas", cmd_metricas))
     app.add_handler(CommandHandler("backup", cmd_backup))
     app.add_handler(CommandHandler("elite", cmd_elite))
+    app.add_handler(CommandHandler("alpha", cmd_alpha))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))

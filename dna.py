@@ -164,6 +164,24 @@ def wallet_dna_text(address: str) -> str | None:
     except Exception:
         pass
 
+    # ── Alpha Discovery + Originality: ¿descubre o copia? ──
+    inf_for_alpha = None
+    try:
+        from influence import influence as _inf2
+        inf_for_alpha = _inf2(address)
+    except Exception:
+        pass
+    try:
+        from alpha import format_alpha, smart_explanation
+        al = format_alpha(address, inf_for_alpha)
+        if al:
+            lines.append(al)
+        exp = smart_explanation(address, inf_for_alpha)
+        if exp:
+            lines.append(f"💡 _{exp}_")
+    except Exception:
+        pass
+
     if row and row["ai_reason"]:
         lines.append(f"\n_IA: {row['ai_reason']}_")
     lines.append(f"🔗 gmgn.ai/sol/address/{address}")
