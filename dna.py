@@ -59,10 +59,14 @@ def wallet_dna_text(address: str) -> str | None:
     lines = [head, f"`{address}`", ""]
     # Clasificación en cascada (Elite/Seguimiento/Observación/Descartada)
     try:
-        from grading import grade_wallet, format_grade
+        from grading import grade_wallet, format_grade, format_elite_gap
         from influence import influence as _inf_fn
-        g = grade_wallet(p, _inf_fn(address), ai_class)
+        _ginf = _inf_fn(address)
+        g = grade_wallet(p, _ginf, ai_class)
         lines.append(format_grade(g))
+        gap = format_elite_gap(p, _ginf, g["tier"])
+        if gap:
+            lines.append(gap)
     except Exception:
         pass
     lines += [f"🧮 *Score: {s['score']}/100* · riesgo {s['riesgo']} · {activa}",
@@ -186,6 +190,13 @@ def wallet_dna_text(address: str) -> str | None:
         sim = format_similar(address)
         if sim:
             lines.append(sim)
+    except Exception:
+        pass
+    try:
+        from entity_resolution import format_entity
+        ent = format_entity(address)
+        if ent:
+            lines.append(ent)
     except Exception:
         pass
 

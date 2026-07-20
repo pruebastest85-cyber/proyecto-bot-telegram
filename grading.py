@@ -148,3 +148,51 @@ def format_grade(g: dict) -> str:
     head = f"{g['emoji']} *{g['tier']}* · Consistency {g['consistency']}/100"
     top = " · ".join(g["reasons"][:4])
     return f"{head}\n   {top}"
+
+
+def elite_gap(p, inf=None) -> list[str]:
+    """
+    Explicación CONTRAFACTUAL: qué le falta a la wallet para ser Elite.
+    Lista concreta y accionable, no un simple "no cumple".
+    """
+    m = p.get("metrics") or {}
+    closed = m.get("closed") or p.get("closed_positions", 0)
+    net = p.get("net_pnl_sol", p.get("pnl_total_sol", 0.0))
+    wr = p.get("win_rate_pct")
+    pf = m.get("profit_factor")
+    dd = m.get("max_drawdown_pct")
+    conc = _conc(p)
+    cons = consistency_score(p)
+    leads = bool(inf and ((inf.get("leader_score") or 0) >= LEADER_MIN
+                          or inf.get("followers_count", 0) >= 2))
+
+    faltan = []
+    if closed < MIN_TRADES:
+        faltan.append(f"{MIN_TRADES - closed} operaciones cerradas más")
+    if net < ELITE_NET:
+        faltan.append(f"+{ELITE_NET - net:.0f} SOL de PnL neto "
+                      f"(ahora {net:+.0f})")
+    if wr is not None and wr < WR_MIN:
+        faltan.append(f"win rate ≥{WR_MIN}% (ahora {wr}%)")
+    if pf is not None and pf < PF_MIN:
+        faltan.append(f"Profit Factor ≥{PF_MIN} (ahora {pf})")
+    if dd is not None and dd >= MAXDD:
+        faltan.append(f"bajar drawdown <{MAXDD}% (ahora {dd}%)")
+    if conc >= CONC_MAX:
+        faltan.append(f"diversificar: {round(conc*100)}% del beneficio en "
+                      f"1 token (máx {round(CONC_MAX*100)}%)")
+    if cons < CONS_ELITE:
+        faltan.append(f"subir consistency a ≥{CONS_ELITE} (ahora {cons})")
+    if not leads:
+        faltan.append("liderar en un cluster (hoy no lidera)")
+    return faltan
+
+
+def format_elite_gap(p, inf=None, tier=None) -> str | None:
+    """Contrafactual para el DNA: solo si NO es Elite."""
+    if tier == "Elite":
+        return None
+    faltan = elite_gap(p, inf)
+    if not faltan:
+        return None
+    return "🎯 _Para Elite le falta: " + "; ".join(faltan[:4]) + "._"

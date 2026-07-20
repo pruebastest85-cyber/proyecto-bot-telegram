@@ -352,6 +352,12 @@ async def run_address_command(chat, cmd: str, arg: str):
         from token_dna import token_dna_text
         text = await asyncio.to_thread(token_dna_text, arg)
         await chat.send_message(text, parse_mode="Markdown")
+    elif cmd == "entidad":
+        from entity_resolution import format_entity
+        text = await asyncio.to_thread(format_entity, arg)
+        await chat.send_message(text or "No detecto que esa wallet forme "
+                                "parte de una entidad multi-wallet.",
+                                parse_mode="Markdown")
     elif cmd == "ia":
         await chat.send_message("🧠 Perfilando y consultando a la IA… (~1 min)")
         text = await asyncio.to_thread(_ia_text, arg)
@@ -912,6 +918,7 @@ async def _post_init(app: Application):
             BotCommand("estrellas", "Estrellas emergentes (clones de Elite)"),
             BotCommand("token", "Token DNA de un mint"),
             BotCommand("hipotesis", "Hipótesis autónomas del sistema"),
+            BotCommand("entidad", "Wallets del mismo operador (evidencia)"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -1026,6 +1033,16 @@ async def cmd_hipotesis(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧪 Generando hipótesis del sistema…")
     from hypotheses import hypotheses_text
     txt = await asyncio.to_thread(hypotheses_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_entidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ctx.args:
+        await run_address_command(update.message.chat, "entidad", ctx.args[0])
+        return
+    from entity_resolution import entities_text
+    txt = await asyncio.to_thread(entities_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -1179,6 +1196,8 @@ def main():
     app.add_handler(CommandHandler("token", cmd_token))
     app.add_handler(CommandHandler("estrellas", cmd_estrellas))
     app.add_handler(CommandHandler("hipotesis", cmd_hipotesis))
+    app.add_handler(CommandHandler("entidad", cmd_entidad))
+    app.add_handler(CommandHandler("entidades", cmd_entidad))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))
