@@ -431,7 +431,9 @@ def get_conn():
                 ("predictions", "first_confirm_s", "INTEGER"),
                 ("predictions", "price0", "DOUBLE PRECISION"),
                 ("wallets", "pnl_unreal", "DOUBLE PRECISION"),
-                ("wallets", "pnl_net", "DOUBLE PRECISION")]:
+                ("wallets", "pnl_net", "DOUBLE PRECISION"),
+                ("wallets", "grade", "TEXT"),
+                ("wallets", "consistency", "DOUBLE PRECISION")]:
             try:
                 pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                            f"{col} {typ}")
@@ -448,6 +450,7 @@ def get_conn():
                      ("ai_reason", "TEXT"), ("alias", "TEXT"),
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
                      ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
+                     ("grade", "TEXT"), ("consistency", "REAL"),
                      ("pnl_updated", "TEXT"), ("wallet_score", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")

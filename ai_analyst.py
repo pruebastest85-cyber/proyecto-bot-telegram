@@ -235,6 +235,7 @@ def evaluate_tracked(conn) -> int:
             conn.execute(
                 """UPDATE wallets SET is_bot=1, is_tracked=0, ai_class='bot',
                    ai_follow=0, ai_reason=?, alias=COALESCE(alias,'Bot Descartado'),
+                   grade='Descartada',
                    pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?, pnl_updated=?
                    WHERE address=?""",
                 (f"Descarte automático: {razon_bot}",
@@ -264,6 +265,16 @@ def evaluate_tracked(conn) -> int:
         except Exception:
             wscore = None
 
+        # Grading en cascada: Consistency Score + nivel (Elite/…/Descartada)
+        try:
+            from grading import grade_wallet
+            from influence import influence as _influence
+            _grade = grade_wallet(profile, _influence(addr),
+                                  verdict.get("clasificacion"))
+        except Exception as _e:
+            print(f"  · Grading no disponible: {_e}")
+            _grade = None
+
         alias = (verdict.get("alias") or "").strip() or None
         if alias and owner.get(alias, addr) != addr:
             alias = f"{alias} ({addr[:4]})"   # red de seguridad anti-duplicado
@@ -275,6 +286,7 @@ def evaluate_tracked(conn) -> int:
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
                alias=COALESCE(?, alias),
                pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?,
+               grade=?, consistency=?,
                pnl_updated=?, wallet_score=?,
                is_tracked=?, is_bot=CASE WHEN ?='bot' THEN 1 ELSE is_bot END
                WHERE address=?""",
@@ -285,6 +297,7 @@ def evaluate_tracked(conn) -> int:
              round(profile.get("pnl_total_sol", 0.0), 2),
              round(profile.get("unrealized_sol", 0.0), 2),
              round(profile.get("net_pnl_sol", profile.get("pnl_total_sol", 0.0)), 2),
+             (_grade or {}).get("tier"), (_grade or {}).get("consistency"),
              now_iso(), wscore,
              seguir, verdict["clasificacion"], addr),
         )

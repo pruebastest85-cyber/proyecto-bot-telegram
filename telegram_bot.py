@@ -888,6 +888,7 @@ async def _post_init(app: Application):
             BotCommand("predicciones", "Señales predictivas y su precisión"),
             BotCommand("metricas", "Panel de rendimiento del motor"),
             BotCommand("backup", "Descargar copia de la base de datos"),
+            BotCommand("elite", "Clasificación Elite/Seguimiento/Observación"),
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
@@ -957,6 +958,43 @@ async def cmd_metricas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from predictions import metrics_text
     txt = await asyncio.to_thread(metrics_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_elite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    txt = await asyncio.to_thread(_elite_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+def _elite_text() -> str:
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT address, alias, grade, consistency, pnl_total, wallet_score
+           FROM wallets
+           WHERE grade IN ('Elite','Seguimiento','Observación') AND is_bot=0
+           ORDER BY CASE grade WHEN 'Elite' THEN 0 WHEN 'Seguimiento' THEN 1
+                    ELSE 2 END,
+                    COALESCE(wallet_score,0) DESC,
+                    COALESCE(pnl_total,-1e9) DESC
+           LIMIT 40""").fetchall()
+    conn.close()
+    if not rows:
+        return ("Aún no hay billeteras clasificadas. Se irán graduando cuando "
+                "la IA re-evalúe cada billetera (cada ~3 días o con /analizar).")
+    emo = {"Elite": "⭐", "Seguimiento": "🟢", "Observación": "🟡"}
+    out, actual = ["🏆 *Clasificación de billeteras*\n"], None
+    for r in rows:
+        if r["grade"] != actual:
+            actual = r["grade"]
+            out.append(f"\n{emo.get(actual,'')} *{actual}*")
+        nombre = (r["alias"] or r["address"][:8]).replace("*", "")
+        cons = f" · C{round(r['consistency'])}" if r["consistency"] is not None else ""
+        pnl = f" · {r['pnl_total']:+.0f} SOL" if r["pnl_total"] is not None else ""
+        sc = f" · score {round(r['wallet_score'])}" if r["wallet_score"] is not None else ""
+        out.append(f"• {nombre}{sc}{pnl}{cons}")
+    out.append("\n_C = Consistency Score. Elite = rentable, consistente y "
+               "líder. Usa /adn <address> para el detalle._")
+    return "\n".join(out)
 
 
 @solo_admin
@@ -1072,6 +1110,7 @@ def main():
     app.add_handler(CommandHandler("predicciones", cmd_predicciones))
     app.add_handler(CommandHandler("metricas", cmd_metricas))
     app.add_handler(CommandHandler("backup", cmd_backup))
+    app.add_handler(CommandHandler("elite", cmd_elite))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("app", cmd_app))

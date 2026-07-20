@@ -56,9 +56,17 @@ def wallet_dna_text(address: str) -> str | None:
         horizonte = f"{ret / 1440:.1f} días"
 
     head = f"🧬 *WALLET DNA — {alias}*\n" if alias else "🧬 *WALLET DNA*\n"
-    lines = [head, f"`{address}`", "",
-             f"🧮 *Score: {s['score']}/100* · riesgo {s['riesgo']} · {activa}",
-             f"Tipo IA: *{ai_class.upper()}*"]
+    lines = [head, f"`{address}`", ""]
+    # Clasificación en cascada (Elite/Seguimiento/Observación/Descartada)
+    try:
+        from grading import grade_wallet, format_grade
+        from influence import influence as _inf_fn
+        g = grade_wallet(p, _inf_fn(address), ai_class)
+        lines.append(format_grade(g))
+    except Exception:
+        pass
+    lines += [f"🧮 *Score: {s['score']}/100* · riesgo {s['riesgo']} · {activa}",
+              f"Tipo IA: *{ai_class.upper()}*"]
 
     # Rentabilidad
     if m.get("roi_avg") is not None:
