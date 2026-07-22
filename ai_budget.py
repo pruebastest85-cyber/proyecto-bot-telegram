@@ -16,9 +16,12 @@ Así el gasto de IA nunca se dispara aunque haya millones de eventos.
 El contador se guarda por día en `settings`.
 """
 
+import threading
 import time
 
 from db import get_setting, set_setting
+
+_LOCK = threading.Lock()
 
 
 def _today() -> str:
@@ -51,8 +54,9 @@ def can_call(conn) -> bool:
 
 def record_call(conn, n: int = 1) -> None:
     try:
-        key = "ai_calls_" + _today()
-        set_setting(conn, key, used_today(conn) + n)
+        with _LOCK:      # sin lock, dos hilos podian perder conteos
+            key = "ai_calls_" + _today()
+            set_setting(conn, key, used_today(conn) + n)
     except Exception:
         pass
 
