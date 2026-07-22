@@ -43,9 +43,13 @@ def restore_wallet(address: str) -> str:
     if not row:
         conn.close()
         return "No existe esa dirección en la base."
+    # ai_follow=1: sin esto, recompute_scores retiraba la ⭐ restaurada en
+    # el siguiente ciclo antes de que la IA la reevaluara. ai_class=NULL
+    # fuerza la reevaluacion igualmente.
     conn.execute(
         """UPDATE wallets SET is_bot=0, is_tracked=1,
-           ai_class=NULL, ai_follow=NULL, ai_reason=NULL
+           ai_class=NULL, ai_follow=1,
+           ai_reason='Restaurada manualmente por el admin'
            WHERE address=?""", (address,))
     conn.commit()
     conn.close()
