@@ -86,7 +86,7 @@ def resumen_text() -> str:
             dec = conn.execute(
                 """SELECT leader, AVG(outcome_pct) a, COUNT(*) n
                    FROM predictions WHERE status='evaluada' AND evaluated_ts>=?
-                   GROUP BY leader HAVING n>=3 AND a<50
+                   GROUP BY leader HAVING COUNT(*)>=3 AND AVG(outcome_pct)<50
                    ORDER BY a ASC LIMIT 4""", (since,)).fetchall()
             gmap = {}
             if dec:
