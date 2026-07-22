@@ -27,7 +27,7 @@ _NOUN = [
     "Mangosta", "Orca", "Grifo", "Fénix", "Dragón", "Kraken", "Basilisco",
     "Golondrina", "Nutria", "Comadreja", "Coyote", "Chacal", "Serpiente",
     "Víbora", "Milano", "Gavilán", "Búfalo", "Bisonte", "Alce", "Armiño",
-    "Marta", "Tejón", "Gato", "Águila",
+    "Marta", "Tejón", "Gato", "Faisán",
 ]
 _EXTRA = [
     "Alfa", "Beta", "Gamma", "Delta", "Épsilon", "Zeta", "Omega", "Sigma",
