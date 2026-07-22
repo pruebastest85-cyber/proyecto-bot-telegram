@@ -16,7 +16,7 @@ import time
 import requests
 
 import config
-from wallet_profiler import JITO_TIP_ACCOUNTS
+from wallet_profiler import JITO_TIP_ACCOUNTS, _api_rec
 from db import (get_conn, pending_tokens, mark_analyzed,
                 upsert_wallet_appearance, recompute_scores, top_wallets,
                 wallet_evidence)
@@ -39,6 +39,7 @@ def fetch_parsed_txs(address: str, before: str | None = None,
             time.sleep(15)
             r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()
+        _api_rec("helius")
         data = r.json()
         return data if isinstance(data, list) else []
     except requests.RequestException as e:
@@ -126,21 +127,30 @@ def analyze_token(conn, token) -> int:
         mark_analyzed(conn, mint)
         return 0
 
+    t0 = txs[0].get("timestamp") or 0    # 1ª tx del token (para el delay)
     buys = extract_buys(txs, mint)
     print(f"  · {len(txs)} txs tempranas → {len(buys)} compras detectadas")
 
+    end_rank = int(getattr(config, "BUYER_END_RANK", 600))
+    min_obs = float(getattr(config, "MIN_OBS_BUY_SOL", 0.3))
     registered = 0
     for rank, buy in enumerate(buys):
-        if not (config.MIN_BUY_SOL <= buy["sol"] <= config.MAX_BUY_SOL):
+        if rank + 1 > end_rank:
+            break              # fuera de la ventana de observación
+        # OBSERVAR es barato: alimenta clusters/grafo/afinidad con devs.
+        # El corte fino (candidata a perfil) se aplica al elegir a quién
+        # perfilar (BUYER_START_RANK, MIN_BUY_DELAY_SEC, MIN_BUY_SOL).
+        if not (min_obs <= buy["sol"] <= config.MAX_BUY_SOL):
             continue
         ts = buy["time"]
+        delay = int(ts - t0) if (ts and t0 and ts >= t0) else None
         buy_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else ""
         sig = (buy["signature"] or "")[:16]
         reason = (f"Compró {buy['sol']:.2f} SOL de {symbol} como comprador "
                   f"#{rank + 1} antes de subida de "
                   f"+{token['price_change_24h']:.0f}% en 24h (tx {sig}…)")
         upsert_wallet_appearance(conn, buy["wallet"], mint, buy["sol"],
-                                 buy_time, rank + 1, reason)
+                                 buy_time, rank + 1, reason, delay)
         registered += 1
 
     mark_analyzed(conn, mint)
