@@ -202,15 +202,20 @@ def evaluate_tracked(conn) -> int:
     try:
         import config as _cfg
         _lim = int(getattr(_cfg, "MAX_EVAL_PER_CYCLE", 20))
+        _min = int(getattr(_cfg, "MIN_WINNING_TOKENS", 1))
     except Exception:
-        _lim = 20
+        _lim, _min = 20, 1
+    # Candidatas a perfilar: las mejores por score (temprano + capital) que
+    # aún no tienen veredicto o cuyo veredicto caducó. NO requiere ser ⭐:
+    # la IA decidirá si merecen la estrella según su PnL. Así se perfilan en
+    # silencio y solo las aprobadas empiezan a alertar.
     rows = conn.execute(
         """SELECT address FROM wallets
-           WHERE is_tracked=1 AND (ai_class IS NULL OR alias IS NULL
-                 OR pnl_updated IS NULL OR pnl_updated < ?)
+           WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= ?
+             AND (ai_class IS NULL OR pnl_updated IS NULL OR pnl_updated < ?)
            ORDER BY score DESC
            LIMIT ?""",
-        (cutoff, _lim)).fetchall()
+        (_min, cutoff, _lim)).fetchall()
     if not rows:
         return 0
 

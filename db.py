@@ -691,16 +691,13 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
                          FROM appearances WHERE wallet = address), 0)
            WHERE is_bot = 0"""
     )
+    # La ⭐ (y por tanto las ALERTAS en tiempo real) son SOLO para las
+    # billeteras que la IA CONFIRMÓ rentables (ai_follow=1). Las candidatas
+    # se perfilan en silencio y NO alertan hasta estar aprobadas — así el
+    # feed no se llena de decenas de wallets sin verificar comprando/vendiendo.
     conn.execute(
-        """UPDATE wallets SET is_tracked = 1
-           WHERE address IN (
-             SELECT address FROM wallets
-             WHERE winning_tokens_count >= ? AND is_bot = 0
-               AND (ai_follow IS NULL OR ai_follow = 1)
-             ORDER BY score DESC
-             LIMIT ?)""",
-        (min_winning_tokens, max_tracked),
-    )
+        "UPDATE wallets SET is_tracked = 0 "
+        "WHERE is_tracked = 1 AND COALESCE(ai_follow, 0) <> 1")
     conn.commit()
 
 
