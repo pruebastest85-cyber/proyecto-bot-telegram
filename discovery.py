@@ -76,6 +76,19 @@ def pool_to_candidate(pool: dict) -> dict | None:
     if liquidity < config.MIN_LIQUIDITY_USD:
         return None
 
+    # Solo tokens RECIENTES (estrategia memecoin): MAX_TOKEN_AGE_DAYS
+    # existia en config pero nunca se aplicaba.
+    created = a.get("pool_created_at")
+    if created:
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - dt).days > \
+                    config.MAX_TOKEN_AGE_DAYS:
+                return None
+        except (ValueError, TypeError):
+            pass
+
     # El mint del token base viene en relationships.base_token.data.id
     # con formato "solana_<mint>"
     rel = pool.get("relationships", {}).get("base_token", {}).get("data", {})
@@ -112,14 +125,15 @@ def run_discovery() -> int:
         if not cand or cand["mint"] in vistos:
             continue
         vistos.add(cand["mint"])
-        save_winning_token(conn, cand)
+        if not save_winning_token(conn, cand):
+            continue           # ya existia: actualizado, no cuenta como nuevo
         saved += 1
         print(f"  ✓ Ganador: {cand['symbol']:<12} "
               f"+{cand['price_change_24h']:.0f}% 24h | "
               f"vol ${cand['volume_24h_usd']:,.0f} | "
               f"liq ${cand['liquidity_usd']:,.0f}")
     conn.close()
-    print(f"→ {saved} tokens ganadores guardados/actualizados")
+    print(f"→ {saved} tokens ganadores NUEVOS guardados")
     return saved
 
 
