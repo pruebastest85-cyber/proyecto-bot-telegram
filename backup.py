@@ -20,7 +20,8 @@ import db as _db
 from config import DB_PATH
 
 TABLES = ["wallets", "winning_tokens", "appearances", "signals",
-          "settings", "predictions"]
+          "settings", "predictions", "positions", "paper_trades",
+          "chat_history"]
 
 
 def make_backup() -> tuple[str, str, str]:
