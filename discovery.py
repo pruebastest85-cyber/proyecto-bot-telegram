@@ -76,6 +76,14 @@ def pool_to_candidate(pool: dict) -> dict | None:
     if liquidity < config.MIN_LIQUIDITY_USD:
         return None
 
+    # Solo proyectos que llegaron LEJOS: MC/FDV mínimo (MIN_MC_USD).
+    try:
+        mc = float(a.get("market_cap_usd") or a.get("fdv_usd") or 0)
+    except (TypeError, ValueError):
+        mc = 0.0
+    if mc and mc < getattr(config, "MIN_MC_USD", 0):
+        return None
+
     # Solo tokens RECIENTES (estrategia memecoin): MAX_TOKEN_AGE_DAYS
     # existia en config pero nunca se aplicaba.
     created = a.get("pool_created_at")
