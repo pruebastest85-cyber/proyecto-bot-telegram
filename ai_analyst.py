@@ -127,7 +127,16 @@ def _call_claude(prompt: str, model: str) -> dict | None:
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
         text = text.replace("```json", "").replace("```", "").strip()
-        v = json.loads(text)
+        try:
+            v = json.loads(text)
+        except json.JSONDecodeError:
+            # No tirar una llamada pagada por formato imperfecto: extraer
+            # el primer bloque {...} del texto.
+            import re as _re
+            m = _re.search(r"\{.*\}", text, flags=_re.S)
+            if not m:
+                raise
+            v = json.loads(m.group(0))
         if v.get("clasificacion") and isinstance(v.get("seguir"), bool):
             return v
     except Exception as e:
