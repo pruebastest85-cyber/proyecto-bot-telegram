@@ -16,6 +16,7 @@ import time
 import requests
 
 import config
+from wallet_profiler import JITO_TIP_ACCOUNTS
 from db import (get_conn, pending_tokens, mark_analyzed,
                 upsert_wallet_appearance, recompute_scores, top_wallets,
                 wallet_evidence)
@@ -92,6 +93,8 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
         sol_out = 0.0
         for n in (tx.get("nativeTransfers") or []):
             if n.get("fromUserAccount") == buyer:
+                if n.get("toUserAccount") in JITO_TIP_ACCOUNTS:
+                    continue   # propina MEV: no es precio del token
                 sol_out += int(n.get("amount", 0)) / LAMPORTS
 
         if sol_out <= 0:
