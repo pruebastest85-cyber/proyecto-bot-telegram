@@ -19,6 +19,13 @@ import requests
 import config
 from db import get_conn, get_setting, set_setting
 
+try:
+    from api_usage import record as _api_rec
+except Exception:          # nunca romper el flujo por el contador
+    def _api_rec(*a, **k):
+        pass
+
+
 HOUR = 3600
 DAY = 86400
 
@@ -31,6 +38,7 @@ def _price(mint: str) -> float | None:
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
                          timeout=15)
+        _api_rec("dexscreener")
         pairs = (r.json() or {}).get("pairs") or []
         # Par de MAYOR liquidez: pairs[0] puede ser un pool minusculo con
         # precio distorsionado.
