@@ -186,17 +186,20 @@ def chat(user_text: str):
                 _save_turn(user_text, respuesta)
                 return respuesta, None
 
-            tc = tool_calls[0]
-            if tc["name"] in MODIFYING:
+            mod = next((t for t in tool_calls if t["name"] in MODIFYING),
+                       None)
+            if mod:
                 _save_turn(user_text,
-                           text or f"Propuse ejecutar {tc['name']}")
-                return text, {"tool": tc["name"],
-                              "args": tc.get("input", {})}
-            resultado = _exec_read(tc["name"], tc.get("input", {}))
+                           text or f"Propuse ejecutar {mod['name']}")
+                return text, {"tool": mod["name"],
+                              "args": mod.get("input", {})}
+            # Responder TODOS los tool_use: si falta el tool_result de
+            # alguno, la API devuelve 400 y el chat entero falla.
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": tc["id"],
-                 "content": resultado}]})
+                {"type": "tool_result", "tool_use_id": t["id"],
+                 "content": _exec_read(t["name"], t.get("input", {}))}
+                for t in tool_calls]})
         respuesta = "Necesité demasiados pasos; intenta ser más específico."
         _save_turn(user_text, respuesta)
         return respuesta, None
