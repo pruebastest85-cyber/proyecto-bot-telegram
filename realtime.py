@@ -380,27 +380,13 @@ def process_transactions(txs: list[dict]):
         score_sig, desglose = compute_signal_score(
             t, _wget(w, "wallet_score"), track, consensus, patron_ok)
 
-        # Aprendizajes del informe semanal (si existen)
-        aprendizajes = get_setting(conn, "learnings", None)
-
-        # Señal importante → modelo potente
-        importante = consensus >= 2 or trade["sol"] >= 5 or score_sig >= 75
-        verdict = _ai_signal_verdict({
-            "accion": trade["side"],
-            "token": ai_payload(t),
-            "monto_sol": round(trade["sol"], 2),
-            "billetera_clase": _wget(w, "ai_class"),
-            "track_record_billetera": track,
-            "patron_mc_billetera": patron,
-            "consenso_billeteras": consensus,
-            "score_senal": score_sig,
-            "aprendizajes_del_sistema": (aprendizajes or "")[:600] or None,
-        }, smart=importante) or {}
-
-        # Guardar score y veredicto para el aprendizaje futuro
+        # Guardar el score (barato, sin IA). El veredicto de IA se calcula
+        # MÁS ABAJO, solo si la señal supera TODOS los filtros — así no se
+        # gastan créditos de IA en señales que se van a silenciar.
+        verdict = {}
         conn.execute(
-            "UPDATE signals SET signal_score=?, verdict=? WHERE signature=?",
-            (score_sig, verdict.get("veredicto"), trade["signature"]))
+            "UPDATE signals SET signal_score=? WHERE signature=?",
+            (score_sig, trade["signature"]))
         conn.commit()
 
         # Liga de ascenso: candidatas sin ⭐ se miden en silencio
@@ -452,6 +438,26 @@ def process_transactions(txs: list[dict]):
             print(f"🔇 Señal {t['symbol']} ({_side}) silenciada: "
                   f"máximo por {motivo} alcanzado")
             continue
+
+        # ── Veredicto de IA: SOLO para señales que SÍ se alertan ──
+        # (pasaron ⭐ + umbral + topes). Aquí es donde se gasta la IA, ya
+        # filtrado, para no quemar créditos en el ruido.
+        aprendizajes = get_setting(conn, "learnings", None)
+        importante = consensus >= 2 or trade["sol"] >= 5 or score_sig >= 75
+        verdict = _ai_signal_verdict({
+            "accion": trade["side"],
+            "token": ai_payload(t),
+            "monto_sol": round(trade["sol"], 2),
+            "billetera_clase": _wget(w, "ai_class"),
+            "track_record_billetera": track,
+            "patron_mc_billetera": patron,
+            "consenso_billeteras": consensus,
+            "score_senal": score_sig,
+            "aprendizajes_del_sistema": (aprendizajes or "")[:600] or None,
+        }, smart=importante) or {}
+        conn.execute("UPDATE signals SET verdict=? WHERE signature=?",
+                     (verdict.get("veredicto"), trade["signature"]))
+        conn.commit()
 
         # Convicción: ¿recibió SOL fresco justo antes de comprar?
         if es_compra:

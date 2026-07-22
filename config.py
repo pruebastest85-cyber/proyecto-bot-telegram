@@ -55,7 +55,7 @@ MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 1)
 # descubrimiento). Protege el webhook de Helius y el coste de evaluación.
 MAX_TRACKED_CANDIDATES = _int("MAX_TRACKED_CANDIDATES", 60)
 # Tope de billeteras que la IA perfila+evalúa por ciclo (coste Helius+IA).
-MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 20)
+MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 8)
 # Presupuesto de atención: máximo de ⭐ en seguimiento activo. Si se supera,
 # las de menor Priority Score descienden. Mantiene el sistema ordenado.
 MAX_ELITE = _int("MAX_ELITE", 500)

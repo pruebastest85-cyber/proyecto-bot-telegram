@@ -269,7 +269,28 @@ def evaluate_tracked(conn) -> int:
         verdict = ai_verdict(profile, [e["reason"] for e in ev], track,
                              avoid_aliases=avoid)
         if not verdict:
-            continue
+            # Sin IA (sin ANTHROPIC_API_KEY o sin créditos): RESPALDO por
+            # grading — la rentabilidad decide, sin gastar IA. El bot sigue
+            # confirmando billeteras aunque la API esté caída.
+            try:
+                from grading import grade_wallet
+                from influence import influence as _inf
+                gg = grade_wallet(profile, _inf(addr))
+                follow = gg["tier"] in ("Elite", "Seguimiento")
+                verdict = {
+                    "clasificacion": "trader" if follow else "indeterminado",
+                    "seguir": follow,
+                    "confianza": 60,
+                    "alias": None,
+                    "razon": f"[sin IA] {gg['tier']}: "
+                             + "; ".join(gg["reasons"][:2]),
+                    "modelo": "grading",
+                }
+                print(f"  ⚙️ Sin IA → grading: {gg['tier']} "
+                      f"({'seguir' if follow else 'descartar'})")
+            except Exception as _e:
+                print(f"  · Respaldo grading falló: {_e}")
+                continue
 
         try:
             from wallet_score import compute_score

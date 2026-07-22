@@ -19,7 +19,8 @@ from db import get_conn, get_setting, set_setting
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
+# Haiku por defecto (mucho más barato); tuneable con HYPOTHESES_MODEL.
+MODEL = os.getenv("HYPOTHESES_MODEL", "claude-haiku-4-5-20251001")
 
 
 def _gather_state() -> dict:
