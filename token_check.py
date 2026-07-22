@@ -11,6 +11,12 @@ import requests
 
 import config
 
+try:
+    from api_usage import record as _api_rec
+except Exception:          # nunca romper el flujo por el contador
+    def _api_rec(*a, **k):
+        pass
+
 RUG_SUMMARY = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 RUG_FULL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
@@ -33,6 +39,7 @@ def analyze_token(mint: str) -> dict:
          "freeze_auth": None, "top10_pct": None, "lp_locked_pct": None}
 
     d = _get(config.DEXSCREENER_TOKEN.format(address=mint))
+    _api_rec("dexscreener")
     pairs = (d or {}).get("pairs") or []
     if pairs:
         # Par de MAYOR liquidez: precio mas fiable que pairs[0]
