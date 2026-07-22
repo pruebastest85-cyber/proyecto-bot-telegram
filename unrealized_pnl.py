@@ -21,6 +21,12 @@ import requests
 
 import config
 
+try:
+    from api_usage import record as _api_rec
+except Exception:          # nunca romper el flujo por el contador
+    def _api_rec(*a, **k):
+        pass
+
 WSOL = "So11111111111111111111111111111111111111112"
 # USDC/USDT: los ignoramos como "cartera de trading" (son caja, no apuesta)
 STABLES = {
@@ -40,6 +46,7 @@ def _sol_usd() -> float | None:
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=WSOL),
                          timeout=15)
+        _api_rec("dexscreener")
         pairs = (r.json() or {}).get("pairs") or []
         usd = sorted(float(p["priceUsd"]) for p in pairs if p.get("priceUsd"))
         if usd:
@@ -62,6 +69,7 @@ def get_token_balances(address: str) -> dict[str, float]:
                       "params": [address, {"programId": program},
                                  {"encoding": "jsonParsed"}]})
             time.sleep(config.HELIUS_DELAY)
+            _api_rec("helius")
             accts = (r.json().get("result") or {}).get("value") or []
         except (requests.RequestException, ValueError, KeyError, TypeError):
             accts = []
@@ -77,9 +85,9 @@ def get_token_balances(address: str) -> dict[str, float]:
     return balances
 
 
-def get_prices_sol(mints: list[str]) -> dict[str, float]:
-    """{mint: precio en SOL} vía DexScreener (lotes de 30 mints)."""
-    prices: dict[str, float] = {}
+def get_prices_sol(mints: list[str]) -> dict[str, tuple]:
+    """{mint: (precio en SOL, liquidez USD)} vía DexScreener (lotes de 30)."""
+    prices: dict[str, tuple] = {}
     sol_usd = _sol_usd()
     if not sol_usd:
         return prices
@@ -90,6 +98,7 @@ def get_prices_sol(mints: list[str]) -> dict[str, float]:
                 config.DEXSCREENER_TOKEN.format(address=",".join(chunk)),
                 timeout=20)
             time.sleep(config.DEXSCREENER_DELAY)
+            _api_rec("dexscreener")
             pairs = (r.json() or {}).get("pairs") or []
         except (requests.RequestException, ValueError, TypeError):
             pairs = []
@@ -107,8 +116,8 @@ def get_prices_sol(mints: list[str]) -> dict[str, float]:
                 continue
             if mint not in best or liq > best[mint][1]:
                 best[mint] = (px, liq)
-        for mint, (px_usd, _liq) in best.items():
-            prices[mint] = px_usd / sol_usd
+        for mint, (px_usd, liq) in best.items():
+            prices[mint] = (px_usd / sol_usd, liq)
     return prices
 
 
@@ -128,11 +137,22 @@ def holdings_value(address: str, skip_mints=None) -> dict:
     if not balances:
         return out
     prices = get_prices_sol(list(balances))
+    cap_frac = float(getattr(config, "LIQ_CAP_FRACTION", 0.10))
+    sol_px = _SOL_CACHE.get("px")
     for mint, amt in balances.items():
-        px = prices.get(mint)
-        if px is None:
+        info = prices.get(mint)
+        if info is None:
             continue
+        px, liq_usd = info
         val = amt * px
+        # Ganancia REALIZABLE: la posición no puede valer más que una
+        # fracción de la liquidez del pool — evita "wallets milagrosas"
+        # con PnL teórico enorme que jamás podría venderse.
+        if liq_usd and sol_px and cap_frac > 0:
+            try:
+                val = min(val, cap_frac * float(liq_usd) / float(sol_px))
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
         if val <= 0:
             continue
         out["holdings"][mint] = round(val, 3)
