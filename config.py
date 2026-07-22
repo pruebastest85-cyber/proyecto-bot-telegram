@@ -15,6 +15,13 @@ def _int(name, default):
     except (TypeError, ValueError):
         return default
 
+
+def _float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
 import os
 
 # ── Claves API ────────────────────────────────────────────────────────────
@@ -31,10 +38,13 @@ GECKO_TRENDING = "https://api.geckoterminal.com/api/v2/networks/solana/trending_
 GECKO_NEW_POOLS = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
 
 # ── Criterios para considerar un token "ganador" ─────────────────────────
-MIN_PRICE_CHANGE_24H = 150.0      # % mínimo de subida en 24h
-MIN_VOLUME_24H_USD = 100_000      # volumen mínimo para descartar tokens muertos
-MIN_LIQUIDITY_USD = 20_000        # liquidez mínima para descartar rug pulls obvios
-MAX_TOKEN_AGE_DAYS = 14           # solo tokens recientes (memecoins nuevos)
+MIN_PRICE_CHANGE_24H = _float("MIN_PRICE_CHANGE_24H", 150.0)  # % subida 24h
+MIN_VOLUME_24H_USD = _int("MIN_VOLUME_24H_USD", 250_000)   # volumen mínimo
+MIN_LIQUIDITY_USD = _int("MIN_LIQUIDITY_USD", 50_000)      # liquidez mínima
+# Solo "ganadores" que llegaron LEJOS: MC/FDV mínimo. Un pump de 8k→30k no
+# aporta billeteras copiables; uno que migró y llegó a cientos de miles sí.
+MIN_MC_USD = _int("MIN_MC_USD", 500_000)
+MAX_TOKEN_AGE_DAYS = _int("MAX_TOKEN_AGE_DAYS", 14)
 
 # ── Presupuesto de Helius (plan 10M créditos/mes; todo tuneable por env) ──
 # Si el consumo sube demasiado, baja estos valores desde Railway (variables
@@ -44,9 +54,30 @@ HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 20)         # páginas por token (
 PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 20)         # páginas al perfilar 1 billetera (~2000 txs)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
-EARLY_BUYER_WINDOW = 200          # nº de primeras transacciones a analizar por token
-MIN_BUY_SOL = 0.5                 # ignorar compras de prueba menores a esto
-MAX_BUY_SOL = 500                 # ignorar market makers / billeteras enormes
+# Ventana de OBSERVACIÓN: txs a leer por token. Grande para llegar más
+# allá de la zona de snipers (no cuesta Helius extra: ya se paginaba igual).
+EARLY_BUYER_WINDOW = _int("EARLY_BUYER_WINDOW", 1500)
+# ── Embudo v4: observar ≠ perfilar ────────────────────────────────────
+# OBSERVAR (barato, alimenta grafo/clusters/afinidad con devs): compras
+# desde MIN_OBS_BUY_SOL hasta el rank BUYER_END_RANK.
+# PERFILAR (caro, Helius+IA): solo candidatas FUERA de la zona de snipers
+# (rank ≥ BUYER_START_RANK y ≥ MIN_BUY_DELAY_SEC tras la 1ª tx del token)
+# con compras ≥ MIN_BUY_SOL. Los snipers/devs quedan en el grafo pero no
+# gastan créditos de perfil.
+MIN_OBS_BUY_SOL = _float("MIN_OBS_BUY_SOL", 0.3)
+BUYER_START_RANK = _int("BUYER_START_RANK", 30)
+BUYER_END_RANK = _int("BUYER_END_RANK", 600)
+MIN_BUY_DELAY_SEC = _int("MIN_BUY_DELAY_SEC", 60)
+MIN_BUY_SOL = _float("MIN_BUY_SOL", 1.0)   # compra mínima para ser candidata
+MAX_BUY_SOL = _float("MAX_BUY_SOL", 300)   # ignorar ballenas/market makers
+# Pesos del score de descubrimiento (pre-filtro; el PnL decide al final):
+# capital real comprometido, reincidencia en ganadores, y algo de rank.
+W_CAPITAL = _int("W_CAPITAL", 40)
+W_REPEAT = _int("W_REPEAT", 45)
+W_RANK = _int("W_RANK", 15)
+# Ganancia REALIZABLE: el valor de una posición en cartera se topa a esta
+# fracción de la liquidez del pool (no podrías vender más sin hundirlo).
+LIQ_CAP_FRACTION = _float("LIQ_CAP_FRACTION", 0.10)
 # Nº mínimo de tokens ganadores para ser CANDIDATA a ⭐. Antes 2 (muy
 # exigente: casi nadie coincide en 2 memecoins). Ahora 1 + la rentabilidad
 # decide (la IA/grading filtran). Tuneable por env.
