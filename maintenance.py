@@ -106,6 +106,9 @@ def weekly_learning():
         conn.close()
         print(f"· Aprendizaje IA falló: {e}")
         return
+    if not hallazgos:
+        conn.close()
+        return
     if hallazgos:
         set_setting(conn, "learnings", hallazgos[:2000])
         conn.close()
