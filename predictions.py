@@ -101,7 +101,13 @@ def confidence_score(inf: dict, followers: list, liq, health: dict,
     f_lead = (inf.get("leader_score") or 0) / 100
     f_liq = 1.0 if (liq or 0) >= 20000 else max(0.0, (liq or 0) / 20000)
     f_health = health.get("factor", 0.6)
-    f_stage = min(1.0, arrived / max(1, len(followers)))       # etapas
+    if arrived > 0:
+        f_stage = min(1.0, arrived / max(1, len(followers)))   # etapas
+    else:
+        # Etapa 1 (sin confirmaciones aun): valor neutro. Con 0, el maximo
+        # teorico era 85 y el umbral por defecto (85) hacia practicamente
+        # imposible alertar en la etapa inicial.
+        f_stage = 0.5
     score = (25 * f_hist + 20 * f_stab + 15 * f_lead +
              10 * f_liq + 15 * f_health + 15 * f_stage)
     return round(min(100.0, score))
@@ -421,7 +427,8 @@ def metrics_text() -> str:
         leaders = conn.execute(
             """SELECT leader, COUNT(*) n, AVG(outcome_pct) acc
                FROM predictions WHERE status='evaluada'
-               GROUP BY leader HAVING n>=1 ORDER BY acc DESC, n DESC LIMIT 5"""
+               GROUP BY leader HAVING COUNT(*)>=1
+               ORDER BY acc DESC, n DESC LIMIT 5"""
         ).fetchall()
         gmap = graph()["wallets"]
     finally:
