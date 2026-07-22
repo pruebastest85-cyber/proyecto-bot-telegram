@@ -469,7 +469,11 @@ async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_ID:
         return
     try:
-        txt = await asyncio.to_thread(_resumen_diario_text)
+        try:
+            from digest import resumen_text
+            txt = await asyncio.to_thread(resumen_text)
+        except Exception:
+            txt = await asyncio.to_thread(_resumen_diario_text)
         await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
                                    parse_mode="Markdown")
     except Exception as e:
@@ -892,6 +896,7 @@ async def _post_init(app: Application):
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Abrir el menú principal"),
+            BotCommand("resumen", "Resumen del día (todo en una vista)"),
             BotCommand("menu", "Abrir el menú principal"),
             BotCommand("top", "Top de billeteras"),
             BotCommand("senales", "Últimas señales"),
@@ -1010,6 +1015,14 @@ async def cmd_atencion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎯 Calculando Score de Atención…")
     from attention import attention_text
     txt = await asyncio.to_thread(attention_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_resumen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📋 Componiendo el resumen…")
+    from digest import resumen_text
+    txt = await asyncio.to_thread(resumen_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -1202,6 +1215,7 @@ def main():
     app.add_handler(CommandHandler("elite", cmd_elite))
     app.add_handler(CommandHandler("alpha", cmd_alpha))
     app.add_handler(CommandHandler("atencion", cmd_atencion))
+    app.add_handler(CommandHandler("resumen", cmd_resumen))
     app.add_handler(CommandHandler("similar", cmd_similar))
     app.add_handler(CommandHandler("token", cmd_token))
     app.add_handler(CommandHandler("estrellas", cmd_estrellas))
