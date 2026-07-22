@@ -35,7 +35,13 @@ def analyze_token(mint: str) -> dict:
     d = _get(config.DEXSCREENER_TOKEN.format(address=mint))
     pairs = (d or {}).get("pairs") or []
     if pairs:
-        p = pairs[0]
+        # Par de MAYOR liquidez: precio mas fiable que pairs[0]
+        def _liq(x):
+            try:
+                return float(((x.get("liquidity") or {}).get("usd")) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        p = max(pairs, key=_liq)
         try:
             t["price"] = float(p.get("priceUsd") or 0) or None
         except (TypeError, ValueError):
