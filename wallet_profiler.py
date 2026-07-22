@@ -23,6 +23,12 @@ import requests
 
 import config
 
+try:
+    from api_usage import record as _api_rec
+except Exception:          # nunca romper el flujo por el contador
+    def _api_rec(*a, **k):
+        pass
+
 LAMPORTS = 1_000_000_000
 WSOL = "So11111111111111111111111111111111111111112"
 # Mints que NO son "apuestas" de memecoin: se saltan como posición. WSOL
@@ -63,6 +69,7 @@ def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
                 time.sleep(15)
                 r = requests.get(url, params=params, timeout=30)
             r.raise_for_status()
+            _api_rec("helius")
             batch = r.json()
         except requests.RequestException as e:
             print(f"  · Error Helius en perfil: {e}")
