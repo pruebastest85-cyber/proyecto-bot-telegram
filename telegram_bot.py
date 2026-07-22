@@ -228,6 +228,8 @@ def _senales_text() -> str:
             simbolo = s["symbol"] or (s["mint"][:10] + "…")
         except (KeyError, IndexError):
             simbolo = s["mint"][:10] + "…"
+        simbolo = (str(simbolo).replace("*", "").replace("_", " ")
+                   .replace("`", "").replace("[", ""))
         res = ""
         try:
             partes = []
@@ -312,6 +314,7 @@ def _ia_text(address: str) -> str:
 def app_keyboard():
     """Teclado con el botón de la Mini App, o None si falta PUBLIC_URL."""
     public_url = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    public_url = public_url.removeprefix("https://").removeprefix("http://")
     if not public_url:
         return None
     return InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -631,8 +634,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             or data.startswith("adel:"):
         addr = data.split(":", 1)[1]
         if data.startswith("adel:"):
-            ok = await asyncio.to_thread(discard_wallet, addr)
-            await q.answer("❌ Descartada" if ok else "No encontrada")
+            msg = await asyncio.to_thread(discard_wallet, addr)
+            await q.answer((msg or "Hecho")[:190])
             return
         await q.answer("⏳ Consultando…")
         if data.startswith("ficha:"):
