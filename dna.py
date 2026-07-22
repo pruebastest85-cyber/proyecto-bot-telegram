@@ -69,6 +69,13 @@ def wallet_dna_text(address: str) -> str | None:
             lines.append(gap)
     except Exception:
         pass
+    try:
+        from reliability import format_reliability
+        rel = format_reliability(p)
+        if rel:
+            lines.append(rel)
+    except Exception:
+        pass
     lines += [f"🧮 *Score: {s['score']}/100* · riesgo {s['riesgo']} · {activa}",
               f"Tipo IA: *{ai_class.upper()}*"]
 
