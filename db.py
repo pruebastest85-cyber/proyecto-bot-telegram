@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS appearances (
     buy_rank        INTEGER,
     est_pnl_sol     REAL,
     reason          TEXT,
+    delay_s         INTEGER,
     UNIQUE(wallet, mint),
     FOREIGN KEY(wallet) REFERENCES wallets(address),
     FOREIGN KEY(mint) REFERENCES winning_tokens(mint)
@@ -204,6 +205,7 @@ CREATE TABLE IF NOT EXISTS appearances (
     buy_rank        INTEGER,
     est_pnl_sol     DOUBLE PRECISION,
     reason          TEXT,
+    delay_s         INTEGER,
     UNIQUE(wallet, mint)
 );
 
@@ -425,7 +427,8 @@ def get_conn():
                 ("wallets", "pnl_unreal", "DOUBLE PRECISION"),
                 ("wallets", "pnl_net", "DOUBLE PRECISION"),
                 ("wallets", "grade", "TEXT"),
-                ("wallets", "consistency", "DOUBLE PRECISION")]:
+                ("wallets", "consistency", "DOUBLE PRECISION"),
+                ("appearances", "delay_s", "INTEGER")]:
             try:
                 pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                            f"{col} {typ}")
@@ -464,6 +467,11 @@ def get_conn():
                      ("alerted", "INTEGER DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
+    for col, typ in [("delay_s", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE appearances ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
     # Tabla predictions (motor predictivo): columnas añadidas después de
@@ -666,7 +674,8 @@ def mark_analyzed(conn, mint: str):
 # ── Billeteras y apariciones ─────────────────────────────────────────────
 
 def upsert_wallet_appearance(conn, wallet: str, mint: str, buy_sol: float,
-                             buy_time: str, buy_rank: int, reason: str):
+                             buy_time: str, buy_rank: int, reason: str,
+                             delay_s: int | None = None):
     conn.execute(
         """INSERT OR IGNORE INTO wallets (address, first_seen, last_updated)
            VALUES (?,?,?)""",
@@ -674,9 +683,9 @@ def upsert_wallet_appearance(conn, wallet: str, mint: str, buy_sol: float,
     )
     cur = conn.execute(
         """INSERT OR IGNORE INTO appearances
-           (wallet, mint, buy_sol, buy_time, buy_rank, reason)
-           VALUES (?,?,?,?,?,?)""",
-        (wallet, mint, buy_sol, buy_time, buy_rank, reason),
+           (wallet, mint, buy_sol, buy_time, buy_rank, reason, delay_s)
+           VALUES (?,?,?,?,?,?,?)""",
+        (wallet, mint, buy_sol, buy_time, buy_rank, reason, delay_s),
     )
     if cur.rowcount:  # solo si la aparición es nueva
         conn.execute(
@@ -700,18 +709,22 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     el coste; la rentabilidad la decide después la IA/grading.
     """
     # Score de descubrimiento = SOLO un pre-filtro para elegir a quién
-    # perfilar (el ROI real se mide después, al perfilar). Combina:
-    #   · nº de tokens ganadores (peso fuerte)
-    #   · qué tan temprano compra (buy_rank)
-    #   · CUÁNTO capital metió (buy_sol, tope +20): favorece dinero real
-    #     sobre clickers de polvo. La rentabilidad la decide luego la IA.
+    # perfilar (el PnL real decide después). Embudo v4: el capital y la
+    # reincidencia en ganadores DOMINAN; el rank temprano ayuda pero ya no
+    # manda (antes favorecía snipers/MEV del bloque 0). Pesos tuneables
+    # por env: W_CAPITAL / W_REPEAT / W_RANK.
+    import config as _cfg
+    wc = float(getattr(_cfg, "W_CAPITAL", 40)) / 100.0
+    wr = float(getattr(_cfg, "W_REPEAT", 45)) / 100.0
+    wk = float(getattr(_cfg, "W_RANK", 15)) / 100.0
     conn.execute(
-        """UPDATE wallets SET score =
-             winning_tokens_count * 10.0
-             + COALESCE((SELECT AVG(100.0 / (buy_rank + 1))
+        f"""UPDATE wallets SET score =
+             {wr} * (CASE WHEN winning_tokens_count * 25.0 > 100.0
+                          THEN 100.0 ELSE winning_tokens_count * 25.0 END)
+             + {wc} * COALESCE((SELECT CASE WHEN AVG(buy_sol) >= 10 THEN 100.0
+                                     ELSE AVG(buy_sol) * 10.0 END
                          FROM appearances WHERE wallet = address), 0)
-             + COALESCE((SELECT CASE WHEN AVG(buy_sol) >= 10 THEN 20.0
-                                     ELSE AVG(buy_sol) * 2.0 END
+             + {wk} * COALESCE((SELECT AVG(100.0 / (buy_rank + 1))
                          FROM appearances WHERE wallet = address), 0)
            WHERE is_bot = 0"""
     )
