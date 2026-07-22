@@ -434,8 +434,15 @@ def get_conn():
         _dedupe_aliases(pg)
         return pg
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
+    try:
+        # WAL + busy_timeout: evita "database is locked" con los hilos del
+        # webhook y los jobs periodicos escribiendo a la vez.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except sqlite3.OperationalError:
+        pass
     conn.executescript(SCHEMA)
     # Migraciones (ignorar si la columna ya existe)
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
@@ -607,8 +614,12 @@ def wallet_positions_summary(conn, wallet: str):
 
 # ── Tokens ganadores ──────────────────────────────────────────────────────
 
-def save_winning_token(conn, token: dict):
-    conn.execute(
+def save_winning_token(conn, token: dict) -> bool:
+    """Guarda un token ganador. Devuelve True si es NUEVO. Si ya existia y
+    su deteccion es vieja (>7 dias), lo re-abre para analisis: un token que
+    vuelve a explotar trae compradores tempranos nuevos que antes se
+    perdian (quedaba analyzed=1 para siempre)."""
+    cur = conn.execute(
         """INSERT OR IGNORE INTO winning_tokens
            (mint, symbol, name, price_change_24h, volume_24h_usd,
             liquidity_usd, pair_address, detected_at)
@@ -617,7 +628,28 @@ def save_winning_token(conn, token: dict):
          token.get("price_change_24h"), token.get("volume_24h_usd"),
          token.get("liquidity_usd"), token.get("pair_address"), now_iso()),
     )
+    nuevo = bool(cur.rowcount)
+    if not nuevo:
+        conn.execute(
+            "UPDATE winning_tokens SET price_change_24h=?, "
+            "volume_24h_usd=?, liquidity_usd=? WHERE mint=?",
+            (token.get("price_change_24h"), token.get("volume_24h_usd"),
+             token.get("liquidity_usd"), token["mint"]))
+        row = conn.execute(
+            "SELECT detected_at FROM winning_tokens WHERE mint=?",
+            (token["mint"],)).fetchone()
+        try:
+            det = datetime.fromisoformat(row["detected_at"])                 if row and row["detected_at"] else None
+            if det is not None and det.tzinfo is None:
+                det = det.replace(tzinfo=timezone.utc)
+            if det and (datetime.now(timezone.utc) - det).days >= 7:
+                conn.execute(
+                    "UPDATE winning_tokens SET analyzed=0, detected_at=? "
+                    "WHERE mint=?", (now_iso(), token["mint"]))
+        except (ValueError, TypeError):
+            pass
     conn.commit()
+    return nuevo
 
 
 def pending_tokens(conn):
