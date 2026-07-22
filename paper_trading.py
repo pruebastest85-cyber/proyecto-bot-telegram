@@ -118,12 +118,22 @@ def _close(conn, row, price: float, reason: str, icon: str):
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: {pnl:+.3f} SOL")
 
 
-def close_on_wallet_sell(conn, trade: dict, token: dict):
-    """La billetera que originó la señal vendió → cerramos con ella."""
+def close_on_wallet_sell(conn, trade: dict, token: dict,
+                         pos: dict | None = None):
+    """La billetera que origino la señal vendio → cerramos con ella.
+    Solo si es LA MISMA wallet que abrio la señal y la venta es
+    significativa (≥50% de su posicion o cierre total); antes cualquier
+    venta parcial de cualquier ⭐ cerraba la simulada y sesgaba el PnL."""
     row = conn.execute(
         "SELECT * FROM paper_trades WHERE mint=? AND status='abierta'",
         (trade["mint"],)).fetchone()
     if not row:
+        return
+    if row["wallet"] and trade.get("wallet") \
+            and row["wallet"] != trade["wallet"]:
+        return
+    if pos and pos.get("known") and not pos.get("fully_sold") \
+            and (pos.get("pct_sold") or 100) < 50:
         return
     price = token.get("price")
     if not price or price <= 0:
