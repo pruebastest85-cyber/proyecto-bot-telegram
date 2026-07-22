@@ -47,7 +47,15 @@ PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 20)         # páginas al perfilar
 EARLY_BUYER_WINDOW = 200          # nº de primeras transacciones a analizar por token
 MIN_BUY_SOL = 0.5                 # ignorar compras de prueba menores a esto
 MAX_BUY_SOL = 500                 # ignorar market makers / billeteras enormes
-MIN_WINNING_TOKENS = 2            # billetera debe aparecer en ≥2 tokens ganadores
+# Nº mínimo de tokens ganadores para ser CANDIDATA a ⭐. Antes 2 (muy
+# exigente: casi nadie coincide en 2 memecoins). Ahora 1 + la rentabilidad
+# decide (la IA/grading filtran). Tuneable por env.
+MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 1)
+# Tope de billeteras marcadas ⭐ por ciclo (las mejores por score de
+# descubrimiento). Protege el webhook de Helius y el coste de evaluación.
+MAX_TRACKED_CANDIDATES = _int("MAX_TRACKED_CANDIDATES", 60)
+# Tope de billeteras que la IA perfila+evalúa por ciclo (coste Helius+IA).
+MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 20)
 BOT_TX_PER_HOUR_LIMIT = 60        # más de esto por hora = probable bot
 
 # ── Base de datos ─────────────────────────────────────────────────────────

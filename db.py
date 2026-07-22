@@ -667,13 +667,13 @@ def upsert_wallet_appearance(conn, wallet: str, mint: str, buy_sol: float,
     conn.commit()
 
 
-def recompute_scores(conn, min_winning_tokens: int):
+def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     """
-    Puntaje simple para la fase 1:
-      apariciones en tokens ganadores (peso fuerte)
-      + qué tan temprano compra en promedio (peso medio)
-    Las billeteras que superan el umbral pasan a is_tracked = 1.
-    Las marcadas como bot (incluye descartes manuales) quedan fuera.
+    Puntaje de descubrimiento: apariciones en tokens ganadores + qué tan
+    temprano compra (buy_rank). Luego marca ⭐ solo a las MEJORES por score
+    entre las candidatas AÚN NO rechazadas por la IA (así no re-evalúa en
+    bucle a las ya descartadas). El tope max_tracked protege el webhook y
+    el coste; la rentabilidad la decide después la IA/grading.
     """
     conn.execute(
         """UPDATE wallets SET score =
@@ -683,8 +683,14 @@ def recompute_scores(conn, min_winning_tokens: int):
            WHERE is_bot = 0"""
     )
     conn.execute(
-        "UPDATE wallets SET is_tracked = 1 WHERE winning_tokens_count >= ? AND is_bot = 0",
-        (min_winning_tokens,),
+        """UPDATE wallets SET is_tracked = 1
+           WHERE address IN (
+             SELECT address FROM wallets
+             WHERE winning_tokens_count >= ? AND is_bot = 0
+               AND (ai_follow IS NULL OR ai_follow = 1)
+             ORDER BY score DESC
+             LIMIT ?)""",
+        (min_winning_tokens, max_tracked),
     )
     conn.commit()
 

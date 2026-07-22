@@ -160,7 +160,8 @@ def run_analysis():
     for token in tokens:
         analyze_token(conn, token)
 
-    recompute_scores(conn, config.MIN_WINNING_TOKENS)
+    recompute_scores(conn, config.MIN_WINNING_TOKENS,
+                     getattr(config, "MAX_TRACKED_CANDIDATES", 60))
 
     # Filtro IA: clasifica candidatas nuevas y descarta bots/insiders
     try:

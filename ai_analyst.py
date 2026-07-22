@@ -199,11 +199,18 @@ def evaluate_tracked(conn) -> int:
     _ensure_columns(conn)
     cutoff = (datetime.now(timezone.utc)
               - timedelta(days=REEVAL_DAYS)).isoformat(timespec="seconds")
+    try:
+        import config as _cfg
+        _lim = int(getattr(_cfg, "MAX_EVAL_PER_CYCLE", 20))
+    except Exception:
+        _lim = 20
     rows = conn.execute(
         """SELECT address FROM wallets
            WHERE is_tracked=1 AND (ai_class IS NULL OR alias IS NULL
-                 OR pnl_updated IS NULL OR pnl_updated < ?)""",
-        (cutoff,)).fetchall()
+                 OR pnl_updated IS NULL OR pnl_updated < ?)
+           ORDER BY score DESC
+           LIMIT ?""",
+        (cutoff, _lim)).fetchall()
     if not rows:
         return 0
 
