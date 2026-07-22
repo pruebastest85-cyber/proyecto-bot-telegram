@@ -23,8 +23,10 @@ from config import DB_PATH
 import db
 
 TABLES = ["winning_tokens", "wallets", "appearances", "signals",
-          "settings", "chat_history"]
-SERIAL_TABLES = [("appearances", "id"), ("chat_history", "id")]
+          "settings", "chat_history", "positions", "paper_trades",
+          "predictions"]
+SERIAL_TABLES = [("appearances", "id"), ("chat_history", "id"),
+                 ("paper_trades", "id"), ("predictions", "id")]
 
 TAG = "MIGRACION_DIAG"
 
