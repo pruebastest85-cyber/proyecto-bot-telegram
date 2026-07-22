@@ -392,20 +392,12 @@ def _dedupe_aliases(conn):
                 """SELECT address FROM wallets WHERE alias = ?
                    ORDER BY COALESCE(first_seen, ''), address""",
                 (d["alias"],)).fetchall()
+            from aliases import make_alias
             for r in rows[1:]:
-                w = conn.execute(
-                    "SELECT is_tracked FROM wallets WHERE address = ?",
-                    (r["address"],)).fetchone()
-                if w and w["is_tracked"]:
-                    # ⭐ activa: se borra el apodo y la IA le inventará
-                    # uno nuevo y único en el próximo ciclo
-                    conn.execute(
-                        "UPDATE wallets SET alias = NULL WHERE address = ?",
-                        (r["address"],))
-                else:
-                    conn.execute(
-                        "UPDATE wallets SET alias = ? WHERE address = ?",
-                        (f"{d['alias']} ({r['address'][:4]})", r["address"]))
+                # Renombrar cada repetido con un alias determinista y único
+                conn.execute(
+                    "UPDATE wallets SET alias = ? WHERE address = ?",
+                    (make_alias(r["address"]), r["address"]))
             if rows[1:]:
                 print(f"· Alias duplicado: {d['alias']} → "
                       f"{len(rows) - 1} se renombrarán")

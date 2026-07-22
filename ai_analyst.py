@@ -66,11 +66,8 @@ MÉTRICAS QUANT (si están presentes): profit_factor > 1.5, expectancy positiva,
 
 CAMBIO DE COMPORTAMIENTO: si el patrón reciente contradice al histórico (p.ej. antes aguantaba horas y ahora hace flips de segundos, o cambió radicalmente de tamaños), menciónalo explícitamente en "razon".
 
-Además, inventa un ALIAS: nombre corto en español (2-3 palabras, estilo apodo de trader) que refleje su estilo y rendimiento. Ejemplos: "Francotirador Paciente", "Ballena Sigilosa". Si su rendimiento es malo, que el alias lo insinúe.
-IMPORTANTE: el alias debe ser ÚNICO. Apodos ya usados por otras billeteras (elige uno DISTINTO a todos): {alias_evitar}
-
 Responde SOLO con JSON válido, sin markdown ni texto extra:
-{{"clasificacion": "...", "seguir": true/false, "confianza": 0-100, "alias": "...", "razon": "máximo 2 frases en español"}}"""
+{{"clasificacion": "...", "seguir": true/false, "confianza": 0-100, "razon": "máximo 2 frases en español"}}"""
 
 
 def _ensure_columns(conn):
@@ -320,11 +317,10 @@ def evaluate_tracked(conn) -> int:
             print(f"  · Grading no disponible: {_e}")
             _grade = None
 
-        alias = (verdict.get("alias") or "").strip() or None
-        if alias and owner.get(alias, addr) != addr:
-            alias = f"{alias} ({addr[:4]})"   # red de seguridad anti-duplicado
-        if alias:
-            owner[alias] = addr
+        # Alias DETERMINISTA y único desde la dirección (código, no IA):
+        # ni se repite ni gasta tokens; es estable en el tiempo.
+        from aliases import make_alias
+        alias = make_alias(addr)
 
         seguir = 1 if verdict["seguir"] else 0
         conn.execute(
