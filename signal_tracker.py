@@ -32,9 +32,20 @@ def _price(mint: str) -> float | None:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
                          timeout=15)
         pairs = (r.json() or {}).get("pairs") or []
-        if pairs:
-            p = pairs[0].get("priceUsd")
-            return float(p) if p else None
+        # Par de MAYOR liquidez: pairs[0] puede ser un pool minusculo con
+        # precio distorsionado.
+        best_px, best_liq = None, -1.0
+        for p in pairs:
+            try:
+                px = float(p.get("priceUsd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0:
+                continue
+            liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
+            if liq > best_liq:
+                best_liq, best_px = liq, px
+        return best_px
     except (requests.RequestException, ValueError, TypeError):
         pass
     return None
@@ -73,7 +84,7 @@ def _alert_milestone(conn, s, pct: float, price: float):
     alias = (w["alias"] if w and w["alias"] else f"{s['wallet'][:8]}…")
     hace = (time.time() - s["ts"]) / 3600
     simbolo = s["symbol"] or s["mint"][:8]
-    subida = (mult - 1) * 100
+    subida = pct if pct > 0 else (mult - 1) * 100
     caption = (
         f"🚀 *{simbolo}* hizo *x{mult}*  (+{subida:.0f}%)\n"
         f"💵 ${base:.6g}  →  *${price:.6g}*\n"
@@ -181,35 +192,63 @@ def track_outcomes() -> int:
     """
     now = time.time()
     conn = get_conn()
-    rows = conn.execute(
+    # 1) Señales PENDIENTES de medicion, solo dentro de su ventana valida:
+    #    la "1h" se mide entre 1h y 3h; la "24h" entre 24h y 30h. Antes una
+    #    medicion atrasada (backlog, caida) se guardaba con la etiqueta
+    #    equivocada y contaminaba track record, umbral automatico y rachas.
+    pend = conn.execute(
         """SELECT signature, wallet, mint, ts, price_usd, price_1h,
                   price_24h, alerted_pct, symbol
            FROM signals
            WHERE side='compra' AND price_usd IS NOT NULL AND price_usd > 0
-             AND (price_1h IS NULL OR price_24h IS NULL OR ts >= ?)
-           ORDER BY ts DESC LIMIT 30""",
+             AND ((price_1h IS NULL AND ts <= ? AND ts >= ?)
+               OR (price_24h IS NULL AND ts <= ? AND ts >= ?))
+           ORDER BY ts ASC LIMIT 30""",
+        (int(now - HOUR), int(now - 3 * HOUR),
+         int(now - DAY), int(now - 30 * HOUR))).fetchall()
+    # 2) Señales recientes (<48h) para las alertas de multiplos (x2, x3…);
+    #    query aparte para que no compitan por el cupo con las mediciones.
+    recent = conn.execute(
+        """SELECT signature, wallet, mint, ts, price_usd, price_1h,
+                  price_24h, alerted_pct, symbol
+           FROM signals
+           WHERE side='compra' AND price_usd IS NOT NULL AND price_usd > 0
+             AND ts >= ? ORDER BY ts DESC LIMIT 30""",
         (int(now - WATCH_HOURS * HOUR),)).fetchall()
+
+    prices: dict = {}          # cache: 1 consulta de precio por mint
+
+    def _px(mint):
+        if mint not in prices:
+            prices[mint] = _price(mint)
+            time.sleep(config.DEXSCREENER_DELAY)
+        return prices[mint]
+
     updated = 0
-    for s in rows:
+    for s in pend:
         base = s["price_usd"]
-        p = _price(s["mint"])
-        time.sleep(config.DEXSCREENER_DELAY)
+        p = _px(s["mint"])
         if not p:
             continue
         pct = (p / base - 1) * 100
-        if s["price_1h"] is None and now - s["ts"] >= HOUR:
+        age = now - s["ts"]
+        if s["price_1h"] is None and HOUR <= age <= 3 * HOUR:
             conn.execute(
                 "UPDATE signals SET price_1h=?, chg_1h=? WHERE signature=?",
                 (p, pct, s["signature"]))
             updated += 1
-        if s["price_24h"] is None and now - s["ts"] >= DAY:
+        if s["price_24h"] is None and DAY <= age <= 30 * HOUR:
             conn.execute(
                 "UPDATE signals SET price_24h=?, chg_24h=? WHERE signature=?",
                 (p, pct, s["signature"]))
             updated += 1
-        # Alertas de múltiplos solo para señales recientes
-        if now - s["ts"] <= WATCH_HOURS * HOUR:
-            _alert_milestone(conn, s, pct, p)
+    for s in recent:
+        base = s["price_usd"]
+        p = _px(s["mint"])
+        if not p:
+            continue
+        pct = (p / base - 1) * 100
+        _alert_milestone(conn, s, pct, p)
     conn.commit()
     _check_streaks(conn)
     _auto_threshold(conn)
