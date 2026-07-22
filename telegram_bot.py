@@ -194,6 +194,14 @@ def _status_text() -> str:
         "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
     from db import get_setting
     umbral = get_setting(conn, "min_signal_score", "0")
+    prof = int(float(get_setting(conn, "funnel_profiled", "0") or 0))
+    prom = int(float(get_setting(conn, "funnel_promoted", "0") or 0))
+    try:
+        from api_usage import usage_line, flush as _api_flush
+        _api_flush()
+        apis = usage_line(conn)
+    except Exception:
+        apis = ""
     conn.close()
     return (
         f"📊 *Estado del sistema*\n\n"
@@ -202,7 +210,10 @@ def _status_text() -> str:
         f"Tokens ganadores: {tokens} ({pend} pendientes)\n"
         f"Billeteras registradas: {wallets}\n"
         f"Billeteras rastreadas ⭐: {tracked}\n"
-        f"Descartadas/bots ❌: {descartadas}")
+        f"Descartadas/bots ❌: {descartadas}"
+        + (f"\n📈 Embudo: {prom}/{prof} perfiladas → ⭐ "
+           f"({100 * prom / prof:.0f}%)" if prof else "")
+        + (f"\n{apis}" if apis else ""))
 
 
 def _senales_text() -> str:
