@@ -699,6 +699,14 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
         "UPDATE wallets SET is_tracked = 0 "
         "WHERE is_tracked = 1 AND COALESCE(ai_follow, 0) <> 1")
     conn.commit()
+    # Presupuesto de atención: si hay más ⭐ que el tope, las de menor
+    # Priority Score descienden (el sistema no crece sin control).
+    try:
+        import config as _cfg
+        from attention import enforce_budget
+        enforce_budget(conn, int(getattr(_cfg, "MAX_ELITE", 500)))
+    except Exception as _e:
+        print(f"· Presupuesto de atención omitido: {_e}")
 
 
 def top_wallets(conn, limit=20):

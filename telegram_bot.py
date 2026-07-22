@@ -914,6 +914,7 @@ async def _post_init(app: Application):
             BotCommand("backup", "Descargar copia de la base de datos"),
             BotCommand("elite", "Clasificación Elite/Seguimiento/Observación"),
             BotCommand("alpha", "Quién descubre gemas antes que el mercado"),
+            BotCommand("atencion", "Score de Atención (quién aporta info nueva)"),
             BotCommand("similar", "Billeteras parecidas a una dada"),
             BotCommand("estrellas", "Estrellas emergentes (clones de Elite)"),
             BotCommand("token", "Token DNA de un mint"),
@@ -1001,6 +1002,14 @@ async def cmd_alpha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔭 Midiendo quién descubre antes…")
     from alpha import alpha_text
     txt = await asyncio.to_thread(alpha_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
+async def cmd_atencion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎯 Calculando Score de Atención…")
+    from attention import attention_text
+    txt = await asyncio.to_thread(attention_text)
     await update.message.reply_text(txt, parse_mode="Markdown")
 
 
@@ -1192,6 +1201,7 @@ def main():
     app.add_handler(CommandHandler("backup", cmd_backup))
     app.add_handler(CommandHandler("elite", cmd_elite))
     app.add_handler(CommandHandler("alpha", cmd_alpha))
+    app.add_handler(CommandHandler("atencion", cmd_atencion))
     app.add_handler(CommandHandler("similar", cmd_similar))
     app.add_handler(CommandHandler("token", cmd_token))
     app.add_handler(CommandHandler("estrellas", cmd_estrellas))

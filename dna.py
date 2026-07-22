@@ -199,6 +199,13 @@ def wallet_dna_text(address: str) -> str | None:
             lines.append(ent)
     except Exception:
         pass
+    try:
+        from attention import format_attention
+        att = format_attention(address, s.get("score") if isinstance(s, dict) else None)
+        if att:
+            lines.append(att)
+    except Exception:
+        pass
 
     if row and row["ai_reason"]:
         lines.append(f"\n_IA: {row['ai_reason']}_")
