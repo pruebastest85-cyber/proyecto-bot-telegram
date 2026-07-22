@@ -675,10 +675,19 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     bucle a las ya descartadas). El tope max_tracked protege el webhook y
     el coste; la rentabilidad la decide después la IA/grading.
     """
+    # Score de descubrimiento = SOLO un pre-filtro para elegir a quién
+    # perfilar (el ROI real se mide después, al perfilar). Combina:
+    #   · nº de tokens ganadores (peso fuerte)
+    #   · qué tan temprano compra (buy_rank)
+    #   · CUÁNTO capital metió (buy_sol, tope +20): favorece dinero real
+    #     sobre clickers de polvo. La rentabilidad la decide luego la IA.
     conn.execute(
         """UPDATE wallets SET score =
              winning_tokens_count * 10.0
              + COALESCE((SELECT AVG(100.0 / (buy_rank + 1))
+                         FROM appearances WHERE wallet = address), 0)
+             + COALESCE((SELECT CASE WHEN AVG(buy_sol) >= 10 THEN 20.0
+                                     ELSE AVG(buy_sol) * 2.0 END
                          FROM appearances WHERE wallet = address), 0)
            WHERE is_bot = 0"""
     )
