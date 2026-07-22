@@ -197,6 +197,16 @@ def _hard_bot_reason(p: dict) -> str | None:
     return None
 
 
+def _bump(conn, key: str, n: int = 1):
+    """Contador persistente del embudo (métrica: ⭐ por cada 100 perfiladas)."""
+    try:
+        from db import get_setting, set_setting
+        set_setting(conn, key,
+                    int(float(get_setting(conn, key, "0") or 0)) + n)
+    except Exception:
+        pass
+
+
 def evaluate_tracked(conn) -> int:
     """
     Perfila y clasifica las billeteras ⭐ sin veredicto, sin alias, o con
@@ -216,13 +226,29 @@ def evaluate_tracked(conn) -> int:
     # aún no tienen veredicto o cuyo veredicto caducó. NO requiere ser ⭐:
     # la IA decidirá si merecen la estrella según su PnL. Así se perfilan en
     # silencio y solo las aprobadas empiezan a alertar.
+    # Anti-sniper (embudo v4): solo se PERFILAN wallets con al menos una
+    # compra FUERA de la zona de snipers (rank ≥ START, delay ≥ MIN_DELAY,
+    # tamaño ≥ MIN_BUY_SOL). Los snipers/devs siguen en el grafo
+    # (appearances) para clusters y afinidad, pero no gastan perfil.
+    try:
+        _r0 = int(getattr(_cfg, "BUYER_START_RANK", 30))
+        _r1 = int(getattr(_cfg, "BUYER_END_RANK", 600))
+        _d0 = int(getattr(_cfg, "MIN_BUY_DELAY_SEC", 60))
+        _s0 = float(getattr(_cfg, "MIN_BUY_SOL", 1.0))
+    except Exception:
+        _r0, _r1, _d0, _s0 = 30, 600, 60, 1.0
     rows = conn.execute(
-        """SELECT address FROM wallets
+        """SELECT address FROM wallets w
            WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= ?
              AND (ai_class IS NULL OR pnl_updated IS NULL OR pnl_updated < ?)
+             AND EXISTS (SELECT 1 FROM appearances a
+                         WHERE a.wallet = w.address
+                           AND a.buy_rank >= ? AND a.buy_rank <= ?
+                           AND COALESCE(a.delay_s, 999999) >= ?
+                           AND COALESCE(a.buy_sol, 0) >= ?)
            ORDER BY score DESC
            LIMIT ?""",
-        (_min, cutoff, _lim)).fetchall()
+        (_min, cutoff, _r0, _r1, _d0, _s0, _lim)).fetchall()
     if not rows:
         return 0
 
@@ -265,6 +291,7 @@ def evaluate_tracked(conn) -> int:
                  now_iso(), addr))
             conn.commit()
             evaluated += 1
+            _bump(conn, "funnel_profiled")
             print(f"  🤖 Descartada sin IA: {razon_bot}")
             continue
 
@@ -353,6 +380,9 @@ def evaluate_tracked(conn) -> int:
         )
         conn.commit()
         evaluated += 1
+        _bump(conn, "funnel_profiled")
+        if seguir:
+            _bump(conn, "funnel_promoted")
         icono = "✅" if seguir else "❌"
         print(f"  {icono} {verdict['clasificacion']} "
               f"«{alias or 'sin alias'}» "
