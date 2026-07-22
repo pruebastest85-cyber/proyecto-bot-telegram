@@ -409,40 +409,49 @@ def process_transactions(txs: list[dict]):
                   f"{trade['sol']:.2f} SOL — registrada sin alertar")
             continue
 
-        # Filtro: señales de compra bajo el umbral no alertan (sí se miden)
+        # Filtro: señales (COMPRA y VENTA) bajo el umbral no alertan (sí se miden)
         umbral = float(get_setting(conn, "min_signal_score", "0") or 0)
-        if es_compra and score_sig < umbral:
-            print(f"🔇 Señal {t['symbol']} silenciada: "
+        if score_sig < umbral:
+            print(f"🔇 Señal {t['symbol']} ({trade['side']}) silenciada: "
                   f"score {score_sig} < umbral {umbral:.0f}")
             continue
 
         # Máximo por señal: cap de alertas por billetera y por token en
         # la última hora (configurable en settings). Las señales tapadas
         # se siguen midiendo (track record), solo no alertan.
-        if es_compra:
-            try:
-                max_w = int(float(get_setting(
-                    conn, "max_alertas_wallet", "3") or 3))
-                max_t = int(float(get_setting(
-                    conn, "max_alertas_token", "2") or 2))
-            except (TypeError, ValueError):
-                max_w, max_t = 3, 2
-            hace_1h = trade["ts"] - 3600
-            n_w = conn.execute(
-                "SELECT COUNT(*) c FROM signals WHERE wallet=? AND ts>=? "
-                "AND side='compra' AND alerted=1 AND signature<>?",
-                (trade["wallet"], hace_1h,
-                 trade["signature"])).fetchone()["c"]
-            n_t = conn.execute(
-                "SELECT COUNT(*) c FROM signals WHERE mint=? AND ts>=? "
-                "AND side='compra' AND alerted=1 AND signature<>?",
-                (trade["mint"], hace_1h, trade["signature"])).fetchone()["c"]
-            if n_w >= max_w or n_t >= max_t:
-                motivo = (f"billetera ({n_w}/{max_w} en 1h)"
-                          if n_w >= max_w else f"token ({n_t}/{max_t} en 1h)")
-                print(f"🔇 Señal {t['symbol']} silenciada: "
-                      f"máximo por {motivo} alcanzado")
-                continue
+        # Topes anti-spam: por billetera, por token y GLOBAL por hora.
+        # Se aplican a COMPRAS y VENTAS (antes solo a compras → las ventas
+        # inundaban el chat). Todo configurable en settings.
+        try:
+            max_w = int(float(get_setting(conn, "max_alertas_wallet", "3") or 3))
+            max_t = int(float(get_setting(conn, "max_alertas_token", "2") or 2))
+            max_h = int(float(get_setting(conn, "max_alertas_hora", "12") or 12))
+        except (TypeError, ValueError):
+            max_w, max_t, max_h = 3, 2, 12
+        hace_1h = trade["ts"] - 3600
+        _side = trade["side"]
+        n_w = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE wallet=? AND ts>=? "
+            "AND side=? AND alerted=1 AND signature<>?",
+            (trade["wallet"], hace_1h, _side, trade["signature"])).fetchone()["c"]
+        n_t = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE mint=? AND ts>=? "
+            "AND side=? AND alerted=1 AND signature<>?",
+            (trade["mint"], hace_1h, _side, trade["signature"])).fetchone()["c"]
+        n_h = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE ts>=? AND alerted=1 "
+            "AND signature<>?",
+            (hace_1h, trade["signature"])).fetchone()["c"]
+        if n_w >= max_w or n_t >= max_t or n_h >= max_h:
+            if n_h >= max_h:
+                motivo = f"global ({n_h}/{max_h} en 1h)"
+            elif n_w >= max_w:
+                motivo = f"billetera ({n_w}/{max_w} en 1h)"
+            else:
+                motivo = f"token ({n_t}/{max_t} en 1h)"
+            print(f"🔇 Señal {t['symbol']} ({_side}) silenciada: "
+                  f"máximo por {motivo} alcanzado")
+            continue
 
         # Convicción: ¿recibió SOL fresco justo antes de comprar?
         if es_compra:
