@@ -45,6 +45,11 @@ def _get(path: str, params: dict):
             headers={"X-API-KEY": API_KEY, "x-chain": "solana",
                      "accept": "application/json"})
         _last_call[0] = time.time()
+        try:
+            from api_usage import record as _api_rec
+            _api_rec("birdeye")
+        except Exception:
+            pass
         if r.status_code == 200:
             return r.json()
     except requests.RequestException as e:
