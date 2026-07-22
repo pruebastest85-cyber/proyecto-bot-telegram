@@ -184,38 +184,49 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
             if abs(wsol) > 0.001:
                 delta = wsol
         reciente = (now - ts) <= 30 * 86400
+        # Agregar transfers por mint ANTES de clasificar: las rutas partidas
+        # (Jupiter) generan varios transfers del mismo mint y antes solo se
+        # contaba el primero (tokens subcontados → % vendido y calidad de
+        # salida distorsionados).
+        mint_in: dict[str, float] = {}
+        mint_out: dict[str, float] = {}
         for t in (tx.get("tokenTransfers") or []):
             mint = t.get("mint")
             if not mint or mint in STABLE_MINTS:
                 continue
+            try:
+                amt = float(t.get("tokenAmount") or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            if t.get("toUserAccount") == address:
+                mint_in[mint] = mint_in.get(mint, 0.0) + amt
+            elif t.get("fromUserAccount") == address:
+                mint_out[mint] = mint_out.get(mint, 0.0) + amt
+        # Compra: recibio token y su SOL bajo (una tx cuenta una vez)
+        if delta < -0.001 and mint_in:
+            mint = next(iter(mint_in))
             info = tokens[mint]
-            # Compra: recibió token y su SOL bajó
-            if t.get("toUserAccount") == address and delta < -0.001:
-                info["buys"] += 1
-                info["sol_out"] += abs(delta)
-                try:
-                    info["tok_in"] += float(t.get("tokenAmount") or 0)
-                except (TypeError, ValueError):
-                    pass
-                buy_sizes.append(round(abs(delta), 2))
-                if ts and (info["first_buy_ts"] is None or ts < info["first_buy_ts"]):
-                    info["first_buy_ts"] = ts
-                if reciente:
-                    result["pnl_30d_sol"] += delta
-                break  # una tx cuenta una vez
-            # Venta: envió token y su SOL subió
-            if t.get("fromUserAccount") == address and delta > 0.001:
-                info["sells"] += 1
-                info["sol_in"] += delta
-                try:
-                    info["tok_out"] += float(t.get("tokenAmount") or 0)
-                except (TypeError, ValueError):
-                    pass
-                if ts and (info["first_sell_ts"] is None or ts < info["first_sell_ts"]):
-                    info["first_sell_ts"] = ts
-                if reciente:
-                    result["pnl_30d_sol"] += delta
-                break
+            info["buys"] += 1
+            info["sol_out"] += abs(delta)
+            info["tok_in"] += mint_in[mint]
+            buy_sizes.append(round(abs(delta), 2))
+            if ts and (info["first_buy_ts"] is None
+                       or ts < info["first_buy_ts"]):
+                info["first_buy_ts"] = ts
+            if reciente:
+                result["pnl_30d_sol"] += delta
+        # Venta: envio token y su SOL subio
+        elif delta > 0.001 and mint_out:
+            mint = next(iter(mint_out))
+            info = tokens[mint]
+            info["sells"] += 1
+            info["sol_in"] += delta
+            info["tok_out"] += mint_out[mint]
+            if ts and (info["first_sell_ts"] is None
+                       or ts < info["first_sell_ts"]):
+                info["first_sell_ts"] = ts
+            if reciente:
+                result["pnl_30d_sol"] += delta
 
     # ¿Bot? Más de BOT_TX_PER_HOUR_LIMIT txs/hora sostenidas en la muestra
     if len(timestamps) >= 20:
