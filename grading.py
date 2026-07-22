@@ -15,18 +15,28 @@ influence). Todos los umbrales son constantes tuneables.
 
 import time
 
-# ── Umbrales (tuneables) ──────────────────────────────────────────────
-MIN_TRADES = 20          # operaciones cerradas mínimas (Nivel 1)
-MIN_TOKENS = 3           # tokens distintos mínimos
-MAX_INACTIVE_DAYS = 45   # inactividad máxima
-WR_MIN = 60              # win rate mínimo (Nivel 2)
-PF_MIN = 1.8             # profit factor mínimo
-MAXDD = 35               # max drawdown máximo (%)
-CONC_MAX = 0.40          # concentración máxima del beneficio en 1 token
-LEADER_MIN = 60          # leader score para "lidera" (Nivel 6)
-CONS_ELITE = 75          # consistency mínima para Elite
-CONS_SEG = 58            # consistency mínima para Seguimiento
-ELITE_NET = 20.0         # PnL neto (SOL) mínimo para Elite
+# ── Umbrales (tuneables por VARIABLE DE ENTORNO, sin redeploy) ────────
+import os as _os
+
+
+def _env(name, default):
+    try:
+        return float(_os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+MIN_TRADES = int(_env("MIN_CLOSED_TRADES", 20))    # ops cerradas mínimas
+MIN_TOKENS = int(_env("MIN_TOKENS", 3))            # tokens distintos mínimos
+MAX_INACTIVE_DAYS = int(_env("MAX_INACTIVE_DAYS", 45))
+WR_MIN = _env("MIN_WIN_RATE", 60)                  # win rate mínimo (Nivel 2)
+PF_MIN = _env("MIN_PROFIT_FACTOR", 1.8)            # profit factor mínimo
+MAXDD = _env("MAX_DRAWDOWN_PCT", 35)               # max drawdown máximo (%)
+CONC_MAX = _env("MAX_SINGLE_TOKEN_CONCENTRATION", 0.40)  # conc. máx 1 token
+LEADER_MIN = _env("LEADER_MIN", 60)                # leader score "lidera"
+CONS_ELITE = _env("CONS_ELITE", 75)                # consistency para Elite
+CONS_SEG = _env("MIN_CONSISTENCY_SCORE", 58)       # consistency Seguimiento
+ELITE_NET = _env("MIN_REALIZED_PNL_ELITE_SOL", 20.0)  # PnL neto min Elite
 
 
 def _conc(p) -> float:
