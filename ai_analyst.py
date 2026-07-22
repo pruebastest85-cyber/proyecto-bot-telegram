@@ -161,7 +161,8 @@ def ai_verdict(profile: dict, evidence_lines: list[str],
         conf = float(v.get("confianza", 0))
     except (TypeError, ValueError):
         conf = 0
-    if conf < CONF_ESCALATE:
+    _escalate = os.getenv("AI_ESCALATE", "0") == "1"
+    if _escalate and conf < CONF_ESCALATE:
         print(f"  · Confianza {conf:.0f}% < {CONF_ESCALATE}: "
               f"escalando a {MODEL_SMART}")
         v2 = _call_claude(prompt, MODEL_SMART)
@@ -266,8 +267,19 @@ def evaluate_tracked(conn) -> int:
             (addr,)).fetchall()
         track = wallet_track_record(conn, addr) if wallet_track_record else None
         avoid = sorted(a for a, o in owner.items() if o != addr)
-        verdict = ai_verdict(profile, [e["reason"] for e in ev], track,
-                             avoid_aliases=avoid)
+        # Presupuesto de IA: si se agotó, verdict=None → respaldo grading.
+        try:
+            from ai_budget import can_call, record_call
+            if can_call(conn):
+                verdict = ai_verdict(profile, [e["reason"] for e in ev],
+                                     track, avoid_aliases=avoid)
+                record_call(conn)
+            else:
+                verdict = None
+                print("  💤 Presupuesto de IA agotado → clasificación por grading")
+        except Exception:
+            verdict = ai_verdict(profile, [e["reason"] for e in ev], track,
+                                 avoid_aliases=avoid)
         if not verdict:
             # Sin IA (sin ANTHROPIC_API_KEY o sin créditos): RESPALDO por
             # grading — la rentabilidad decide, sin gastar IA. El bot sigue

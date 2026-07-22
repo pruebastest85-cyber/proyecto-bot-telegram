@@ -444,17 +444,30 @@ def process_transactions(txs: list[dict]):
         # filtrado, para no quemar créditos en el ruido.
         aprendizajes = get_setting(conn, "learnings", None)
         importante = consensus >= 2 or trade["sol"] >= 5 or score_sig >= 75
-        verdict = _ai_signal_verdict({
-            "accion": trade["side"],
-            "token": ai_payload(t),
-            "monto_sol": round(trade["sol"], 2),
-            "billetera_clase": _wget(w, "ai_class"),
-            "track_record_billetera": track,
-            "patron_mc_billetera": patron,
-            "consenso_billeteras": consensus,
-            "score_senal": score_sig,
-            "aprendizajes_del_sistema": (aprendizajes or "")[:600] or None,
-        }, smart=importante) or {}
+        try:
+            from ai_budget import can_call, record_call
+            _hay_ia = can_call(conn)
+        except Exception:
+            _hay_ia = True
+        if _hay_ia:
+            verdict = _ai_signal_verdict({
+                "accion": trade["side"],
+                "token": ai_payload(t),
+                "monto_sol": round(trade["sol"], 2),
+                "billetera_clase": _wget(w, "ai_class"),
+                "track_record_billetera": track,
+                "patron_mc_billetera": patron,
+                "consenso_billeteras": consensus,
+                "score_senal": score_sig,
+                "aprendizajes_del_sistema": (aprendizajes or "")[:600] or None,
+            }, smart=importante) or {}
+            try:
+                from ai_budget import record_call as _rc
+                _rc(conn)
+            except Exception:
+                pass
+        else:
+            verdict = {}
         conn.execute("UPDATE signals SET verdict=? WHERE signature=?",
                      (verdict.get("veredicto"), trade["signature"]))
         conn.commit()

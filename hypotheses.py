@@ -89,6 +89,17 @@ def generate_hypotheses() -> str | None:
     if not any(state.get(k) for k in
                ("clusters", "descubridores_alfa", "estrellas_emergentes")):
         return None
+    try:
+        from ai_budget import can_call, record_call
+        _c = get_conn()
+        try:
+            if not can_call(_c):
+                print("· Hipótesis pospuestas: presupuesto de IA agotado")
+                return None
+        finally:
+            _c.close()
+    except Exception:
+        pass
     prompt = PROMPT.format(estado=json.dumps(state, ensure_ascii=False,
                                              indent=1)[:4000])
     try:
@@ -103,6 +114,15 @@ def generate_hypotheses() -> str | None:
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
         text = text.strip()
+        try:
+            from ai_budget import record_call
+            _c = get_conn()
+            try:
+                record_call(_c)
+            finally:
+                _c.close()
+        except Exception:
+            pass
     except Exception as e:
         print(f"· Motor de hipótesis falló: {e}")
         return None

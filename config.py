@@ -59,6 +59,13 @@ MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 8)
 # Presupuesto de atención: máximo de ⭐ en seguimiento activo. Si se supera,
 # las de menor Priority Score descienden. Mantiene el sistema ordenado.
 MAX_ELITE = _int("MAX_ELITE", 500)
+# Presupuesto DIARIO de llamadas a la IA. Al agotarse, la clasificación cae
+# al respaldo por grading (sin IA) y se reanuda al día siguiente. Evita que
+# el coste de IA se dispare. Súbelo/bájalo desde Railway.
+AI_DAILY_BUDGET = _int("AI_DAILY_BUDGET", 300)
+# Escalado a modelo potente (Sonnet) cuando Haiku duda. Off por defecto para
+# ahorrar: Haiku basta para clasificar. Pon AI_ESCALATE=1 para activarlo.
+AI_ESCALATE = os.getenv("AI_ESCALATE", "0") == "1"
 BOT_TX_PER_HOUR_LIMIT = 60        # más de esto por hora = probable bot
 
 # ── Base de datos ─────────────────────────────────────────────────────────
