@@ -36,6 +36,7 @@ from signal_score import compute_signal_score
 LAMPORTS = 1_000_000_000
 LAST_HOOK_TS = None   # última vez que Helius nos mandó algo (watchdog)
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+PUBLIC_URL = PUBLIC_URL.removeprefix("https://").removeprefix("http://")
 PORT = int(os.getenv("PORT", "8080"))
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
@@ -70,10 +71,20 @@ def tg_send(text: str, buttons: list | None = None):
             [{"text": tx, "callback_data": cb} for tx, cb in fila]
             for fila in buttons]}
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json=payload,
             timeout=15)
+        if not r.ok:
+            # Markdown roto (simbolos con *_`[ ) u otro 400: reintentar en
+            # texto plano para NO perder la alerta en silencio.
+            payload.pop("parse_mode", None)
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json=payload, timeout=15)
+            if not r.ok:
+                print(f"· Alerta TG rechazada ({r.status_code}): "
+                      f"{r.text[:200]}")
     except requests.RequestException as e:
         print(f"· No se pudo enviar alerta TG: {e}")
 
@@ -83,12 +94,21 @@ def tg_send_photo(photo_bytes: bytes, caption: str = ""):
     if not (BOT_TOKEN and ADMIN_ID):
         return
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
             data={"chat_id": int(ADMIN_ID), "caption": caption[:1000],
                   "parse_mode": "Markdown"},
             files={"photo": ("card.jpg", photo_bytes, "image/jpeg")},
             timeout=25)
+        if not r.ok:
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                data={"chat_id": int(ADMIN_ID), "caption": caption[:1000]},
+                files={"photo": ("card.jpg", photo_bytes, "image/jpeg")},
+                timeout=25)
+            if not r.ok:
+                print(f"· Foto TG rechazada ({r.status_code}): "
+                      f"{r.text[:200]}")
     except requests.RequestException as e:
         print(f"· No se pudo enviar foto TG: {e}")
 
@@ -108,10 +128,13 @@ def watch_addresses() -> list[str]:
     conn = get_conn()
     stars = [r["address"] for r in conn.execute(
         "SELECT address FROM wallets WHERE is_tracked=1").fetchall()]
+    hace_6h = int(time.time()) - 6 * 3600
     cands = [r["address"] for r in conn.execute(
-        """SELECT address FROM wallets
+        """SELECT address FROM wallets w
            WHERE is_tracked=0 AND is_bot=0 AND winning_tokens_count >= 2
-           ORDER BY score DESC LIMIT 40""").fetchall()]
+             AND (SELECT COUNT(*) FROM signals s
+                  WHERE s.wallet = w.address AND s.ts >= ?) <= 30
+           ORDER BY score DESC LIMIT 40""", (hace_6h,)).fetchall()]
     conn.close()
     return stars + [c for c in cands if c not in stars]
 
@@ -155,6 +178,20 @@ MODEL_FAST = "claude-haiku-4-5-20251001"
 MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
 
 
+def _extract_json(text: str) -> dict:
+    """Parsea el JSON de la IA aunque venga envuelto en texto/markdown.
+    Evita tirar a la basura llamadas pagadas por un formato imperfecto."""
+    t = text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        import re as _re
+        m = _re.search(r"\{.*\}", t, flags=_re.S)
+        if m:
+            return json.loads(m.group(0))
+        raise
+
+
 def _ai_signal_verdict(payload: dict, smart: bool = False) -> dict | None:
     """Veredicto IA de la señal. smart=True usa el modelo potente
     (señales importantes: consenso o montos grandes)."""
@@ -178,11 +215,12 @@ def _ai_signal_verdict(payload: dict, smart: bool = False) -> dict | None:
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json={"model": modelo, "max_tokens": 200,
-                  "messages": [{"role": "user", "content": prompt}]},
+                  "messages": [{"role": "user", "content": prompt},
+                               {"role": "assistant", "content": "{"}]},
             timeout=45)
         r.raise_for_status()
-        text = "".join(b.get("text", "") for b in r.json()["content"])
-        return json.loads(text.replace("```json", "").replace("```", "").strip())
+        text = "{" + "".join(b.get("text", "") for b in r.json()["content"])
+        return _extract_json(text)
     except Exception as e:
         print(f"· IA señal falló ({modelo}): {e}")
         if smart:  # respaldo: reintentar con el modelo rápido
@@ -212,7 +250,8 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
             delta = _wallet_sol_delta(tx, buyer)
             if delta < 0 and abs(delta) >= MIN_SIGNAL_SOL:
                 return {"wallet": buyer, "mint": mint, "sol": abs(delta),
-                        "side": "compra", "tokens": _tok_amount(t),
+                        "side": "compra",
+                        "tokens": _tok_total(tx, mint, buyer, "in"),
                         "signature": tx.get("signature", ""),
                         "ts": tx.get("timestamp") or int(time.time())}
 
@@ -221,7 +260,8 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
             delta = _wallet_sol_delta(tx, seller)
             if delta > 0 and delta >= MIN_SIGNAL_SOL:
                 return {"wallet": seller, "mint": mint, "sol": delta,
-                        "side": "venta", "tokens": _tok_amount(t),
+                        "side": "venta",
+                        "tokens": _tok_total(tx, mint, seller, "out"),
                         "signature": tx.get("signature", ""),
                         "ts": tx.get("timestamp") or int(time.time())}
     return None
@@ -251,6 +291,21 @@ def _tok_amount(transfer: dict) -> float:
         return abs(float(v)) if v is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
+
+
+def _tok_total(tx: dict, mint: str, wallet: str, direction: str) -> float:
+    """Suma TODOS los transfers del mint para la wallet en la tx: las rutas
+    partidas de Jupiter generan varios transfers del mismo mint y antes solo
+    se contaba el primero (tokens subcontados en positions)."""
+    tot = 0.0
+    for t in (tx.get("tokenTransfers") or []):
+        if t.get("mint") != mint:
+            continue
+        if direction == "in" and t.get("toUserAccount") == wallet:
+            tot += _tok_amount(t)
+        elif direction == "out" and t.get("fromUserAccount") == wallet:
+            tot += _tok_amount(t)
+    return tot
 
 
 def _fmt_amount(x) -> str:
@@ -294,7 +349,7 @@ def _sol_price() -> float | None:
 
 
 def _money(sol, su) -> str:
-    """Muestra el importe en DÓLARES si conocemos el precio de SOL; si no, en SOL."""
+    """Importe en DÓLARES si conocemos el precio de SOL; si no, en SOL."""
     try:
         if su and su > 0:
             return _usd(float(sol) * su)
@@ -374,14 +429,15 @@ def process_transactions(txs: list[dict]):
 
         since = trade["ts"] - CONSENSUS_WINDOW_MIN * 60
         consensus = conn.execute(
-            "SELECT COUNT(DISTINCT wallet) c FROM signals "
-            "WHERE mint=? AND ts>=? AND side=?",
+            "SELECT COUNT(DISTINCT s.wallet) c FROM signals s "
+            "JOIN wallets w ON w.address = s.wallet AND w.is_tracked = 1 "
+            "WHERE s.mint=? AND s.ts>=? AND s.side=?",
             (trade["mint"], since, trade["side"])).fetchone()["c"]
 
         t = analyze_token(trade["mint"])
         w = conn.execute(
-            "SELECT ai_class, score, alias, pnl_30d, pnl_total "
-            "FROM wallets WHERE address=?",
+            "SELECT ai_class, score, alias, pnl_30d, pnl_total, "
+            "wallet_score FROM wallets WHERE address=?",
             (trade["wallet"],)).fetchone()
 
         # Guardar precio, símbolo, MC y liquidez del momento
@@ -626,7 +682,7 @@ def process_transactions(txs: list[dict]):
             if es_compra:
                 paper_trading.open_trade(conn, trade, t, score_sig)
             else:
-                paper_trading.close_on_wallet_sell(conn, trade, t)
+                paper_trading.close_on_wallet_sell(conn, trade, t, pos)
         except Exception as e:
             print(f"· Paper trading falló: {e}")
     conn.close()
