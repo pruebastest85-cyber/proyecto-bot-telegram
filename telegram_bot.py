@@ -48,6 +48,17 @@ AWAITING: dict[int, str] = {}
 _MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
+def _token_keyboard(url, mint):
+    """Botones bajo la ficha de token: DexScreener + 👍/👎 para aprender."""
+    filas = []
+    if url:
+        filas.append([InlineKeyboardButton("📈 Ver en DexScreener", url=url)])
+    filas.append([
+        InlineKeyboardButton("👍 Buena", callback_data=f"tk:up:{mint}"),
+        InlineKeyboardButton("👎 Mala", callback_data=f"tk:dn:{mint}")])
+    return InlineKeyboardMarkup(filas)
+
+
 # ─────────────────────────── HUB / MENÚ ────────────────────────────
 
 def hub_text() -> str:
@@ -370,10 +381,7 @@ async def run_address_command(chat, cmd: str, arg: str):
         from token_report import token_report
         rep = await asyncio.to_thread(token_report, arg)
         if rep.get("found"):
-            kb = None
-            if rep.get("url"):
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "📈 Ver en DexScreener", url=rep["url"])]])
+            kb = _token_keyboard(rep.get("url"), arg)
             await chat.send_message(rep["text"], parse_mode="Markdown",
                                     reply_markup=kb,
                                     disable_web_page_preview=True)
@@ -431,6 +439,12 @@ async def learning_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(weekly_learning)
     except Exception as e:
         print(f"· learning_job falló: {e}")
+    # Aprendizaje de qué tokens valen la pena (independiente del de señales)
+    try:
+        from token_learning import analyze_submitted
+        await asyncio.to_thread(analyze_submitted)
+    except Exception as e:
+        print(f"· aprendizaje de tokens falló: {e}")
 
 
 async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -653,6 +667,19 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not data.startswith("h:ask:"):
             AWAITING.pop(q.from_user.id, None)
         await handle_hub(q, ctx)
+        return
+
+    # Feedback 👍/👎 sobre un token enviado (aprendizaje)
+    if data.startswith("tk:up:") or data.startswith("tk:dn:"):
+        good = data.startswith("tk:up:")
+        mint = data.split(":", 2)[2]
+        try:
+            from token_learning import set_feedback
+            await asyncio.to_thread(set_feedback, mint, good)
+        except Exception:
+            pass
+        await q.answer("👍 ¡Gracias! Lo tendré en cuenta."
+                       if good else "👎 Anotado, aprenderé de esto.")
         return
 
     # Botones bajo las alertas de señal
@@ -930,10 +957,7 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         from token_report import token_report
         rep = await asyncio.to_thread(token_report, texto)
         if rep.get("found"):
-            kb = None
-            if rep.get("url"):
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "📈 Ver en DexScreener", url=rep["url"])]])
+            kb = _token_keyboard(rep.get("url"), texto)
             await update.message.reply_text(
                 rep["text"], parse_mode="Markdown", reply_markup=kb,
                 disable_web_page_preview=True)

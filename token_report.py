@@ -133,6 +133,13 @@ def token_report(mint: str) -> dict:
     }
     lines += _ai_block(t, smart_ctx, mint)
 
+    # Registrar la foto del token para el aprendizaje (qué tokens valen la pena)
+    try:
+        from token_learning import record_submission
+        record_submission(mint, t, risk, len(smart), len(elite))
+    except Exception:
+        pass
+
     seg = ["mint " + ("⚠️" if t.get("mint_auth") else "✅"),
            "freeze " + ("⚠️" if t.get("freeze_auth") else "✅")]
     if t.get("lp_locked_pct") is not None:

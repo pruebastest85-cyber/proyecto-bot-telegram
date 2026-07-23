@@ -39,6 +39,9 @@ FICHA DEL TOKEN (DexScreener + RugCheck):
 CONTEXTO DE NUESTRA RED (billeteras rentables que YA hemos verificado y que compraron este token; es una señal fuerte si es alta):
 {smart}
 
+APRENDIZAJES ACUMULADOS (patrones de tokens que el usuario marcó buenos/malos; úsalos como criterio si aplican):
+{aprendizajes}
+
 Cómo pensar el riesgo:
 - Autoridad de mint activa (mint_auth no nula) = el dev puede imprimir más = MUY arriesgado.
 - Autoridad de freeze activa = puede congelar ventas = arriesgado.
@@ -131,9 +134,15 @@ def token_verdict(t: dict, smart_ctx: dict, mint: str) -> dict | None:
     except Exception:
         pass  # si el módulo de presupuesto falla, no bloquea el veredicto
 
+    try:
+        from token_learning import learnings_text
+        aprendizajes = learnings_text() or "(aún sin aprendizajes acumulados)"
+    except Exception:
+        aprendizajes = "(aún sin aprendizajes acumulados)"
     prompt = PROMPT.format(
         ficha=json.dumps(ai_payload(t), ensure_ascii=False),
-        smart=json.dumps(smart_ctx, ensure_ascii=False))
+        smart=json.dumps(smart_ctx, ensure_ascii=False),
+        aprendizajes=aprendizajes)
     v = _call(prompt)
     if not v:
         return None
