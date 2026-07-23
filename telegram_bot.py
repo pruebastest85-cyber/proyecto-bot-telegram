@@ -13,6 +13,7 @@ Variables de entorno:
 
 import asyncio
 import os
+import re
 import threading
 import time as _t
 
@@ -42,6 +43,9 @@ PENDING_ACTIONS: dict[int, dict] = {}
 # Usuarios a los que el hub les pidió un dato (address o pregunta).
 # user_id -> nombre del comando ("perfil", "ficha", "preguntar"…)
 AWAITING: dict[int, str] = {}
+
+# Un contrato/mint de Solana pegado directo (base58, 32-44 chars)
+_MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 # ─────────────────────────── HUB / MENÚ ────────────────────────────
@@ -363,9 +367,20 @@ async def run_address_command(chat, cmd: str, arg: str):
         await chat.send_message(text, parse_mode="Markdown")
     elif cmd == "token":
         await chat.send_message("🧬 Analizando el token…")
-        from token_dna import token_dna_text
-        text = await asyncio.to_thread(token_dna_text, arg)
-        await chat.send_message(text, parse_mode="Markdown")
+        from token_report import token_report
+        rep = await asyncio.to_thread(token_report, arg)
+        if rep.get("found"):
+            kb = None
+            if rep.get("url"):
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "📈 Ver en DexScreener", url=rep["url"])]])
+            await chat.send_message(rep["text"], parse_mode="Markdown",
+                                    reply_markup=kb,
+                                    disable_web_page_preview=True)
+        else:
+            await chat.send_message(
+                "No encontré datos de token para esa dirección. "
+                "Si es una billetera usa /ficha <address>.")
     elif cmd == "entidad":
         from entity_resolution import format_entity
         text = await asyncio.to_thread(format_entity, arg)
@@ -886,6 +901,22 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if cmd:
         await run_address_command(update.message.chat, cmd, texto)
         return
+
+    # ¿Es un contrato/mint pegado directo? → ficha de token
+    if _MINT_RE.match(texto):
+        await update.message.chat.send_action("typing")
+        from token_report import token_report
+        rep = await asyncio.to_thread(token_report, texto)
+        if rep.get("found"):
+            kb = None
+            if rep.get("url"):
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "📈 Ver en DexScreener", url=rep["url"])]])
+            await update.message.reply_text(
+                rep["text"], parse_mode="Markdown", reply_markup=kb,
+                disable_web_page_preview=True)
+            return
+        # no es un token tradeable (¿billetera?) → sigue el flujo normal
 
     await update.message.chat.send_action("typing")
     from ai_agent import chat, describe_action

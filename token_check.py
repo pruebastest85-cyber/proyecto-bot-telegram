@@ -32,7 +32,8 @@ def _get(url: str, timeout: int = 15):
 
 
 def analyze_token(mint: str) -> dict:
-    t = {"symbol": "?", "price": None, "liq": None, "mc": None,
+    t = {"symbol": "?", "pair": None, "chain": "solana",
+         "price": None, "liq": None, "mc": None,
          "age_days": None, "vol24": None, "buys5": None, "sells5": None,
          "price_change_h1": None, "websites": [], "socials": [],
          "rug_score": None, "risks": [], "mint_auth": None,
@@ -54,6 +55,8 @@ def analyze_token(mint: str) -> dict:
         except (TypeError, ValueError):
             pass
         t["symbol"] = (p.get("baseToken") or {}).get("symbol", "?")
+        t["pair"] = p.get("pairAddress")
+        t["chain"] = p.get("chainId") or "solana"
         t["liq"] = (p.get("liquidity") or {}).get("usd")
         t["mc"] = p.get("fdv")
         t["price_change_h1"] = (p.get("priceChange") or {}).get("h1")
