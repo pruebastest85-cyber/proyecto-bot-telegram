@@ -72,9 +72,30 @@ def dex_url(t: dict, mint: str) -> str:
     return f"https://dexscreener.com/solana/{mint}"
 
 
-def _ai_block(t: dict, smart: list) -> list:
-    """Bloque del veredicto de la IA. Vacío en Fase 1; se activa en Fase 2."""
-    return []
+def _ai_block(t: dict, smart_ctx: dict, mint: str) -> list:
+    """Bloque del veredicto de la IA sobre el token. Si no hay IA o
+    presupuesto, devuelve [] y queda el Risk Score heurístico como respaldo."""
+    try:
+        from ai_token import token_verdict
+        v = token_verdict(t, smart_ctx, mint)
+    except Exception:
+        v = None
+    if not v:
+        return []
+    nivel = (v.get("nivel") or "").lower()
+    emoji = "🔴" if "alto" in nivel else "🟡" if "medio" in nivel else "🟢"
+    cab = f"{emoji} *Veredicto IA: {(v.get('nivel') or '?').capitalize()}*"
+    conf = v.get("confianza")
+    if conf is not None:
+        try:
+            cab += f" ({float(conf):.0f}%)"
+        except (TypeError, ValueError):
+            pass
+    out = [cab]
+    if v.get("razon"):
+        out.append(f"_{v['razon']}_")
+    out.append("")
+    return out
 
 
 def token_report(mint: str) -> dict:
@@ -103,8 +124,14 @@ def token_report(mint: str) -> dict:
         partes.append(f"{t['age_days']:g}d")
     lines = [f"🧬 *{sym}* · " + " · ".join(partes), f"`{mint}`", ""]
 
-    # Bloque del veredicto de la IA (Fase 2). En Fase 1 va vacío.
-    lines += _ai_block(t, smart)
+    # Bloque del veredicto de la IA (Fase 2).
+    ranks = [r["buy_rank"] for r in smart if r["buy_rank"]]
+    smart_ctx = {
+        "billeteras_calidad_que_compraron": len(smart),
+        "de_ellas_elite": len(elite),
+        "mejor_rank_de_compra": min(ranks) if ranks else None,
+    }
+    lines += _ai_block(t, smart_ctx, mint)
 
     seg = ["mint " + ("⚠️" if t.get("mint_auth") else "✅"),
            "freeze " + ("⚠️" if t.get("freeze_auth") else "✅")]
