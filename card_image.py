@@ -10,6 +10,7 @@ Si algo falla, el llamador debe caer de vuelta al mensaje de texto.
 """
 
 import io
+import math
 import os
 import random
 
@@ -36,8 +37,40 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
+def _fmt_price(x) -> str:
+    """Precio en dólares legible, sin notación científica (memecoins tiny)."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "?"
+    if x <= 0:
+        return "0"
+    if x >= 1:
+        return f"{x:,.2f}"
+    d = max(2, 3 - int(math.floor(math.log10(x))))   # ~4 cifras significativas
+    return f"{x:.{d}f}".rstrip("0").rstrip(".")
+
+
 def _card_path(n: int) -> str:
     return os.path.join(_DIR, f"card_{n}.png")
+
+
+def _ago(h) -> str:
+    """Tiempo transcurrido legible: 'hace 6 min', 'hace 2h 30min', 'hace 3 d'."""
+    try:
+        h = float(h)
+    except (TypeError, ValueError):
+        return ""
+    mins = h * 60
+    if mins < 1:
+        return "recién"
+    if mins < 60:
+        return f"hace {mins:.0f} min"
+    if h < 24:
+        hh = int(h)
+        mm = int(round((h - hh) * 60))
+        return f"hace {hh}h {mm}min" if mm else f"hace {hh}h"
+    return f"hace {h / 24:.0f} d"
 
 
 def _rtext(draw, right, y, text, font, fill, shadow=True):
@@ -91,8 +124,9 @@ def make_multiple_card(mult: int, symbol: str, pct: float, base: float,
     _rtext(d, right, y, sym, f_sym, WHITE); y += 66
     _rtext(d, right, y, f"x{mult}", f_mult, GREEN); y += int(f_mult.size * 0.98)
     _rtext(d, right, y, f"+{pct:.0f}%", f_pct, GREEN); y += 76
-    _rtext(d, right, y, f"${base:.6g}  →  ${price:.6g}", f_price, WHITE); y += 46
-    _rtext(d, right, y, f"{alias} · hace {hace_h:.1f}h", f_small, MUTED)
+    _rtext(d, right, y, f"${_fmt_price(base)}  →  ${_fmt_price(price)}",
+           f_price, WHITE); y += 46
+    _rtext(d, right, y, f"{alias} · {_ago(hace_h)}", f_small, MUTED)
 
     out = io.BytesIO()
     img.save(out, "JPEG", quality=88)

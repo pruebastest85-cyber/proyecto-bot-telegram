@@ -118,22 +118,12 @@ def _close(conn, row, price: float, reason: str, icon: str):
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: {pnl:+.3f} SOL")
 
 
-def close_on_wallet_sell(conn, trade: dict, token: dict,
-                         pos: dict | None = None):
-    """La billetera que origino la señal vendio → cerramos con ella.
-    Solo si es LA MISMA wallet que abrio la señal y la venta es
-    significativa (≥50% de su posicion o cierre total); antes cualquier
-    venta parcial de cualquier ⭐ cerraba la simulada y sesgaba el PnL."""
+def close_on_wallet_sell(conn, trade: dict, token: dict):
+    """La billetera que originó la señal vendió → cerramos con ella."""
     row = conn.execute(
         "SELECT * FROM paper_trades WHERE mint=? AND status='abierta'",
         (trade["mint"],)).fetchone()
     if not row:
-        return
-    if row["wallet"] and trade.get("wallet") \
-            and row["wallet"] != trade["wallet"]:
-        return
-    if pos and pos.get("known") and not pos.get("fully_sold") \
-            and (pos.get("pct_sold") or 100) < 50:
         return
     price = token.get("price")
     if not price or price <= 0:
@@ -229,10 +219,11 @@ def resumen_text() -> str:
     if abiertas:
         out.append(f"📂 *Abiertas ({len(abiertas)}):*")
         now = time.time()
+        from card_image import _fmt_price, _ago
         for r in abiertas[:15]:
             hs = (now - r["entry_ts"]) / HOUR
             out.append(f"   · *{r['symbol']}* {r['stake_sol']:.2f} SOL "
-                       f"@ ${r['entry_price']:.6g} · hace {hs:.1f}h")
+                       f"@ ${_fmt_price(r['entry_price'])} · {_ago(hs)}")
     else:
         out.append("📂 Sin posiciones abiertas.")
     out.append("\nComandos: /paper on · /paper off · /paper max <SOL>")
