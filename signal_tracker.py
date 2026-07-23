@@ -91,12 +91,22 @@ def _alert_milestone(conn, s, pct: float, price: float):
                      (s["wallet"],)).fetchone()
     alias = (w["alias"] if w and w["alias"] else f"{s['wallet'][:8]}…")
     hace = (time.time() - s["ts"]) / 3600
-    from card_image import _fmt_price, _ago
+    from card_image import _fmt_price, _ago, _fmt_mc
     simbolo = s["symbol"] or s["mint"][:8]
     subida = pct if pct > 0 else (mult - 1) * 100
+    # Market Cap: al llamar (guardado) y ahora (escala con la subida)
+    try:
+        mc0 = s["mc"]
+    except Exception:
+        mc0 = None
+    ratio = (price / base) if base else mult
+    mc1 = (mc0 * ratio) if mc0 else None
+    linea_precio = (f"💰 MC {_fmt_mc(mc0)}  →  *{_fmt_mc(mc1)}*"
+                    if mc0 else
+                    f"💵 ${_fmt_price(base)}  →  *${_fmt_price(price)}*")
     caption = (
         f"🚀 *{simbolo}* hizo *x{mult}*  (+{subida:.0f}%)\n"
-        f"💵 ${_fmt_price(base)}  →  *${_fmt_price(price)}*\n"
+        f"{linea_precio}\n"
         f"👤 Primer llamado: *{alias}*  ·  {_ago(hace)}\n"
         f"`{s['mint']}`\n"
         f"📊 [DexScreener](https://dexscreener.com/solana/{s['mint']})")
@@ -107,7 +117,7 @@ def _alert_milestone(conn, s, pct: float, price: float):
         from card_image import make_multiple_card
         from realtime import tg_send_photo
         img = make_multiple_card(mult, simbolo, subida, base, price,
-                                 alias, hace)
+                                 alias, hace, mc_base=mc0, mc_now=mc1)
         tg_send_photo(img, caption)
         enviado = True
     except Exception as e:
@@ -219,7 +229,7 @@ def track_outcomes() -> int:
     #    query aparte para que no compitan por el cupo con las mediciones.
     recent = conn.execute(
         """SELECT signature, wallet, mint, ts, price_usd, price_1h,
-                  price_24h, alerted_pct, symbol
+                  price_24h, alerted_pct, symbol, mc
            FROM signals
            WHERE side='compra' AND price_usd IS NOT NULL AND price_usd > 0
              AND ts >= ? ORDER BY ts DESC LIMIT 30""",

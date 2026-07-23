@@ -55,6 +55,23 @@ def _card_path(n: int) -> str:
     return os.path.join(_DIR, f"card_{n}.png")
 
 
+def _fmt_mc(x) -> str:
+    """Market Cap en formato compacto: $540K · $1.1M · $2.3B."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "?"
+    if x <= 0:
+        return "?"
+    if x >= 1e9:
+        return f"${x / 1e9:.1f}B"
+    if x >= 1e6:
+        return f"${x / 1e6:.1f}M"
+    if x >= 1e3:
+        return f"${x / 1e3:.0f}K"
+    return f"${x:.0f}"
+
+
 def _ago(h) -> str:
     """Tiempo transcurrido legible: 'hace 6 min', 'hace 2h 30min', 'hace 3 d'."""
     try:
@@ -84,7 +101,7 @@ def _rtext(draw, right, y, text, font, fill, shadow=True):
 
 def make_multiple_card(mult: int, symbol: str, pct: float, base: float,
                        price: float, alias: str, hace_h: float,
-                       pool=None) -> bytes:
+                       pool=None, mc_base=None, mc_now=None) -> bytes:
     """Genera la tarjeta y devuelve los bytes JPEG."""
     candidates = [n for n in (pool or ALL_CARDS) if os.path.exists(_card_path(n))]
     if not candidates:
@@ -124,8 +141,11 @@ def make_multiple_card(mult: int, symbol: str, pct: float, base: float,
     _rtext(d, right, y, sym, f_sym, WHITE); y += 66
     _rtext(d, right, y, f"x{mult}", f_mult, GREEN); y += int(f_mult.size * 0.98)
     _rtext(d, right, y, f"+{pct:.0f}%", f_pct, GREEN); y += 76
-    _rtext(d, right, y, f"${_fmt_price(base)}  →  ${_fmt_price(price)}",
-           f_price, WHITE); y += 46
+    if mc_base and mc_now:
+        _linea = f"MC {_fmt_mc(mc_base)}  →  {_fmt_mc(mc_now)}"
+    else:
+        _linea = f"${_fmt_price(base)}  →  ${_fmt_price(price)}"
+    _rtext(d, right, y, _linea, f_price, WHITE); y += 46
     _rtext(d, right, y, f"{alias} · {_ago(hace_h)}", f_small, MUTED)
 
     out = io.BytesIO()
