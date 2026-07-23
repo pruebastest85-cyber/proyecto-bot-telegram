@@ -925,10 +925,18 @@ async def _extract_buyers_bg(chat, mint: str, symbol, chg24):
             extract_buyers, mint, symbol, chg24)
         nombre = f"${symbol}" if symbol else mint[:6]
         if status == "ok":
-            await chat.send_message(
-                f"🧠 Analicé los compradores de {nombre}: "
-                f"{n} billeteras registradas en tu red. "
-                f"Entrarán al grading en el próximo ciclo.")
+            msg = (f"🧠 Analicé los compradores de {nombre}: "
+                   f"{n} billeteras registradas en tu red. "
+                   f"Entrarán al grading en el próximo ciclo.")
+            # ¿El dev vendió? (solo cuando la extracción corrió → hereda límite)
+            try:
+                from dev_check import dev_line
+                dl = await asyncio.to_thread(dev_line, mint)
+                if dl:
+                    msg += "\n" + dl
+            except Exception as e:
+                print(f"· dev_line en bg falló: {e}")
+            await chat.send_message(msg)
         elif status == "rate":
             await chat.send_message(
                 "⏳ Alcancé el límite de análisis de tokens por hora "
