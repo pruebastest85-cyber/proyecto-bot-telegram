@@ -35,7 +35,8 @@ def analyze_token(mint: str) -> dict:
     t = {"symbol": "?", "pair": None, "chain": "solana",
          "price": None, "liq": None, "mc": None,
          "age_days": None, "vol24": None, "buys5": None, "sells5": None,
-         "price_change_h1": None, "websites": [], "socials": [],
+         "price_change_h1": None, "price_change_h24": None,
+         "websites": [], "socials": [],
          "rug_score": None, "risks": [], "mint_auth": None,
          "freeze_auth": None, "top10_pct": None, "lp_locked_pct": None}
 
@@ -60,6 +61,7 @@ def analyze_token(mint: str) -> dict:
         t["liq"] = (p.get("liquidity") or {}).get("usd")
         t["mc"] = p.get("fdv")
         t["price_change_h1"] = (p.get("priceChange") or {}).get("h1")
+        t["price_change_h24"] = (p.get("priceChange") or {}).get("h24")
         t["vol24"] = (p.get("volume") or {}).get("h24")
         m5 = (p.get("txns") or {}).get("m5") or {}
         t["buys5"], t["sells5"] = m5.get("buys"), m5.get("sells")

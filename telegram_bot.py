@@ -889,6 +889,28 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def _extract_buyers_bg(chat, mint: str, symbol, chg24):
+    """En segundo plano: extrae los compradores del token enviado y los mete
+    a la red (mismo análisis que un token ganador). No bloquea la ficha."""
+    try:
+        from token_extract import extract_buyers
+        status, n = await asyncio.to_thread(
+            extract_buyers, mint, symbol, chg24)
+        nombre = f"${symbol}" if symbol else mint[:6]
+        if status == "ok":
+            await chat.send_message(
+                f"🧠 Analicé los compradores de {nombre}: "
+                f"{n} billeteras registradas en tu red. "
+                f"Entrarán al grading en el próximo ciclo.")
+        elif status == "rate":
+            await chat.send_message(
+                "⏳ Alcancé el límite de análisis de tokens por hora "
+                "(para cuidar la cuota). Intenta de nuevo más tarde.")
+        # "cache" y "error" no molestan al usuario
+    except Exception as e:
+        print(f"· _extract_buyers_bg falló: {e}")
+
+
 async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Chat libre. Si el hub estaba esperando un dato, lo consume aquí;
     si no, cualquier texto sin /comando activa al agente IA."""
@@ -915,6 +937,11 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 rep["text"], parse_mode="Markdown", reply_markup=kb,
                 disable_web_page_preview=True)
+            # En segundo plano: extraer compradores → alimenta la red
+            data = rep.get("data") or {}
+            asyncio.create_task(_extract_buyers_bg(
+                update.message.chat, texto,
+                data.get("symbol"), data.get("price_change_h24")))
             return
         # no es un token tradeable (¿billetera?) → sigue el flujo normal
 
