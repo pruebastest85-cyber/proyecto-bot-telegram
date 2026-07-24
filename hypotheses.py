@@ -90,7 +90,7 @@ def generate_hypotheses() -> str | None:
                ("clusters", "descubridores_alfa", "estrellas_emergentes")):
         return None
     try:
-        from ai_budget import can_call, record_call
+        from ai_budget import can_call
         _c = get_conn()
         try:
             if not can_call(_c):

@@ -544,7 +544,7 @@ def process_transactions(txs: list[dict]):
         aprendizajes = get_setting(conn, "learnings", None)
         importante = consensus >= 2 or trade["sol"] >= 5 or score_sig >= 75
         try:
-            from ai_budget import can_call, record_call
+            from ai_budget import can_call
             _hay_ia = can_call(conn)
         except Exception:
             _hay_ia = True

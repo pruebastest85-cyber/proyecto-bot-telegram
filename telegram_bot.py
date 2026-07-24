@@ -47,6 +47,24 @@ AWAITING: dict[int, str] = {}
 # Un contrato/mint de Solana pegado directo (base58, 32-44 chars)
 _MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
+# Tareas en segundo plano vivas (sin esta referencia el GC puede matarlas)
+_BG_TASKS: set = set()
+
+
+async def _send_md(chat, text, **kw):
+    """Envía en Markdown; si Telegram lo rechaza (símbolos raros del token),
+    reintenta en texto plano para NO perder el mensaje en silencio.
+    Mismo criterio que realtime.tg_send."""
+    try:
+        return await chat.send_message(text, parse_mode="Markdown", **kw)
+    except Exception as e:
+        print(f"· Markdown rechazado ({e}); reintento en texto plano")
+        try:
+            return await chat.send_message(text, **kw)
+        except Exception as e2:
+            print(f"· No se pudo enviar el mensaje: {e2}")
+            return None
+
 
 def _token_keyboard(url, mint):
     """Botones bajo la ficha de token: DexScreener + 👍/👎 para aprender."""
@@ -379,12 +397,18 @@ async def run_address_command(chat, cmd: str, arg: str):
     elif cmd == "token":
         await chat.send_message("🧬 Analizando el token…")
         from token_report import token_report
-        rep = await asyncio.to_thread(token_report, arg)
+        try:
+            rep = await asyncio.to_thread(token_report, arg)
+        except Exception as e:
+            print(f"· token_report falló: {e}")
+            await chat.send_message(
+                "No pude analizar ese token ahora (la fuente de datos falló). "
+                "Inténtalo de nuevo en un momento.")
+            return
         if rep.get("found"):
             kb = _token_keyboard(rep.get("url"), arg)
-            await chat.send_message(rep["text"], parse_mode="Markdown",
-                                    reply_markup=kb,
-                                    disable_web_page_preview=True)
+            await _send_md(chat, rep["text"], reply_markup=kb,
+                           disable_web_page_preview=True)
         else:
             await chat.send_message(
                 "No encontré datos de token para esa dirección. "
@@ -963,17 +987,26 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if _MINT_RE.match(texto):
         await update.message.chat.send_action("typing")
         from token_report import token_report
-        rep = await asyncio.to_thread(token_report, texto)
+        try:
+            rep = await asyncio.to_thread(token_report, texto)
+        except Exception as e:
+            print(f"· token_report falló: {e}")
+            await update.message.reply_text(
+                "No pude analizar ese token ahora (la fuente de datos falló). "
+                "Inténtalo de nuevo en un momento.")
+            return
         if rep.get("found"):
             kb = _token_keyboard(rep.get("url"), texto)
-            await update.message.reply_text(
-                rep["text"], parse_mode="Markdown", reply_markup=kb,
-                disable_web_page_preview=True)
-            # En segundo plano: extraer compradores → alimenta la red
+            await _send_md(update.message.chat, rep["text"],
+                           reply_markup=kb, disable_web_page_preview=True)
+            # En segundo plano: extraer compradores → alimenta la red.
+            # Se guarda la referencia: sin ella el GC puede matar la tarea.
             data = rep.get("data") or {}
-            asyncio.create_task(_extract_buyers_bg(
+            tarea = asyncio.create_task(_extract_buyers_bg(
                 update.message.chat, texto,
                 data.get("symbol"), data.get("price_change_h24")))
+            _BG_TASKS.add(tarea)
+            tarea.add_done_callback(_BG_TASKS.discard)
             return
         # no es un token tradeable (¿billetera?) → sigue el flujo normal
 

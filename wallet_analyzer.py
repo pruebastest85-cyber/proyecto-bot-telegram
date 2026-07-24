@@ -18,8 +18,7 @@ import requests
 import config
 from wallet_profiler import JITO_TIP_ACCOUNTS, _api_rec
 from db import (get_conn, pending_tokens, mark_analyzed,
-                upsert_wallet_appearance, recompute_scores, top_wallets,
-                wallet_evidence)
+                upsert_wallet_appearance, recompute_scores, top_wallets)
 
 LAMPORTS = 1_000_000_000  # 1 SOL
 

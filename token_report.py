@@ -13,6 +13,16 @@ from db import get_conn
 from token_check import analyze_token
 
 
+def _esc(x) -> str:
+    """Escapa los caracteres que rompen el Markdown de Telegram.
+    Los símbolos de memecoin suelen traer _ * ` [ y sin escapar el mensaje
+    entero es rechazado con error 400 (y el usuario no recibe nada)."""
+    t = "" if x is None else str(x)
+    for ch in ("\\", "_", "*", "`", "["):
+        t = t.replace(ch, "\\" + ch)
+    return t
+
+
 def _mc(x) -> str:
     """Formato compacto: $540K · $1.1M · $2.3B."""
     try:
@@ -93,7 +103,7 @@ def _ai_block(t: dict, smart_ctx: dict, mint: str) -> list:
             pass
     out = [cab]
     if v.get("razon"):
-        out.append(f"_{v['razon']}_")
+        out.append(f"_{_esc(v['razon'])}_")
     out.append("")
     return out
 
@@ -118,6 +128,7 @@ def token_report(mint: str) -> dict:
     sym = (t.get("symbol") or "?").strip() or "?"
     if not sym.startswith("$"):
         sym = "$" + sym
+    sym = _esc(sym)
 
     partes = [f"MC {_mc(t.get('mc'))}", f"Liq {_mc(t.get('liq'))}"]
     if t.get("age_days") is not None:
@@ -151,10 +162,11 @@ def token_report(mint: str) -> dict:
     lines.append(f"⚠️ Riesgo {risk}/100 ({nivel})")
     lines.append("🔐 " + " · ".join(seg))
     if t.get("risks"):
-        lines.append("🚩 " + ", ".join(t["risks"][:4]))
+        lines.append("🚩 " + ", ".join(_esc(x) for x in t["risks"][:4]))
 
     if smart:
-        quienes = ", ".join((r["alias"] or r["wallet"][:6]) for r in smart[:5])
+        quienes = ", ".join(_esc(r["alias"] or r["wallet"][:6])
+                            for r in smart[:5])
         lines.append(f"🧠 Smart-money: {len(smart)} de tu red lo compró "
                      f"({len(elite)} ⭐ Elite)")
         lines.append(f"   _{quienes}_")
