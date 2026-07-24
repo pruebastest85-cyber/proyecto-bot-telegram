@@ -4,7 +4,8 @@ Motor de grading en cascada: separa el ALFA real de la suerte.
 En vez de una sola métrica, aplica filtros en niveles y combina todo en
 un CONSISTENCY SCORE y una clasificación en cuatro grupos:
 
-  ⭐ Elite       rentable y consistente, líder de cluster, bajo riesgo.
+  ⭐ Elite       rentable y consistente, bajo riesgo; líder de cluster
+                 O con rendimiento excepcional sostenido.
   🟢 Seguimiento buenas métricas, aún sin evidencia de liderazgo.
   🟡 Observación prometedora, le falta historial o consistencia.
   🔴 Descartada  historial débil, inconsistente o con señales de riesgo.
@@ -37,6 +38,12 @@ LEADER_MIN = _env("LEADER_MIN", 60)                # leader score "lidera"
 CONS_ELITE = _env("CONS_ELITE", 75)                # consistency para Elite
 CONS_SEG = _env("MIN_CONSISTENCY_SCORE", 58)       # consistency Seguimiento
 ELITE_NET = _env("MIN_REALIZED_PNL_ELITE_SOL", 20.0)  # PnL neto min Elite
+# Vía alternativa a Elite SIN liderar cluster: rendimiento excepcional.
+# Antes liderar era OBLIGATORIO y dejaba fuera a billeteras muy rentables
+# solo porque el grafo de co-compras aún no las detectaba como líderes
+# (el grafo tarda semanas en poblarse). Ahora liderar SUMA, pero no manda.
+ELITE_NET_SOLO = _env("ELITE_NET_SIN_LIDERAZGO", 60.0)   # PnL neto excepcional
+CONS_ELITE_SOLO = _env("CONS_ELITE_SIN_LIDERAZGO", 80)   # consistencia alta
 
 
 def _conc(p) -> float:
@@ -145,7 +152,13 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
         reasons.append("lidera en su cluster")
 
     # ── Clasificación ──
-    if quality and diversified and cons >= CONS_ELITE and net >= ELITE_NET and leads:
+    # Elite por liderazgo (ruta original) O por rendimiento excepcional
+    # sostenido (ruta nueva: no castiga a quien aún no aparece como líder).
+    excepcional = net >= ELITE_NET_SOLO and cons >= CONS_ELITE_SOLO
+    if excepcional and not leads:
+        reasons.append("rendimiento excepcional (sin liderazgo aún)")
+    if (quality and diversified and cons >= CONS_ELITE
+            and net >= ELITE_NET and (leads or excepcional)):
         return _res("⭐", "Elite", cons, reasons)
     if quality and cons >= CONS_SEG:
         return _res("🟢", "Seguimiento", cons, reasons)
@@ -194,7 +207,12 @@ def elite_gap(p, inf=None) -> list[str]:
     if cons < CONS_ELITE:
         faltan.append(f"subir consistency a ≥{CONS_ELITE} (ahora {cons})")
     if not leads:
-        faltan.append("liderar en un cluster (hoy no lidera)")
+        # Ya no es obligatorio: se indica la vía alternativa real.
+        if net < ELITE_NET_SOLO or cons < CONS_ELITE_SOLO:
+            faltan.append(
+                f"liderar un cluster — o, sin liderazgo, alcanzar "
+                f"+{ELITE_NET_SOLO:.0f} SOL y consistency ≥{CONS_ELITE_SOLO:.0f} "
+                f"(hoy {net:+.0f} SOL / {cons})")
     return faltan
 
 

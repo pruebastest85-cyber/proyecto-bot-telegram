@@ -364,6 +364,7 @@ def evaluate_tracked(conn) -> int:
                alias=COALESCE(?, alias),
                pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?,
                grade=?, consistency=?,
+               hold_median_min=?, roi_median=?,
                pnl_updated=?, wallet_score=?,
                is_tracked=?, is_bot=CASE WHEN ?='bot' THEN 1 ELSE is_bot END
                WHERE address=?""",
@@ -375,6 +376,8 @@ def evaluate_tracked(conn) -> int:
              round(profile.get("unrealized_sol", 0.0), 2),
              round(profile.get("net_pnl_sol", profile.get("pnl_total_sol", 0.0)), 2),
              (_grade or {}).get("tier"), (_grade or {}).get("consistency"),
+             profile.get("hold_median_min"),
+             (profile.get("metrics") or {}).get("roi_median"),
              now_iso(), wscore,
              seguir, verdict["clasificacion"], addr),
         )

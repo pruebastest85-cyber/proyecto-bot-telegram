@@ -457,6 +457,16 @@ async def watchdog_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· watchdog_job falló: {e}")
 
 
+async def performance_review_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Cada 24h: el rendimiento MEDIDO decide quién conserva la ⭐.
+    Degrada a las billeteras cuyas señales resultaron perdedoras."""
+    try:
+        from performance_review import review_tracked
+        await asyncio.to_thread(review_tracked)
+    except Exception as e:
+        print(f"· performance_review_job falló: {e}")
+
+
 async def learning_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         from maintenance import weekly_learning
@@ -1042,6 +1052,7 @@ async def _post_init(app: Application):
             BotCommand("ciclo", "Correr el pipeline ahora"),
             BotCommand("preguntar", "Preguntar a la IA sobre tu base"),
             BotCommand("rendimiento", "Win rate de las señales"),
+            BotCommand("estrellasperf", "Rendimiento medido de cada ⭐"),
             BotCommand("backtest", "Simular copiar las señales"),
             BotCommand("paper", "Paper trading simulado"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
@@ -1065,6 +1076,14 @@ async def _post_init(app: Application):
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
+
+
+@solo_admin
+async def cmd_wallets_perf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Rendimiento MEDIDO de cada ⭐ (no degrada nada, solo informa)."""
+    from performance_review import review_text
+    txt = await asyncio.to_thread(review_text)
+    await _send_md(update.message.chat, txt)
 
 
 @solo_admin
@@ -1340,6 +1359,7 @@ def main():
     app.add_handler(CommandHandler("senales", cmd_senales))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
+    app.add_handler(CommandHandler("estrellasperf", cmd_wallets_perf))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
@@ -1411,6 +1431,9 @@ def main():
                                 name="watchdog")
     app.job_queue.run_repeating(learning_job, interval=7 * 86400,
                                 first=3 * 86400, name="weekly_learning")
+    # Cierre del ciclo: el rendimiento medido degrada ⭐ cada 24 h
+    app.job_queue.run_repeating(performance_review_job, interval=86400,
+                                first=3600, name="performance_review")
     # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
     app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
                                 name="sync_webhook")

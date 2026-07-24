@@ -274,6 +274,47 @@ def _wget(row, key):
         return None
 
 
+def _plan_salida(w) -> str:
+    """
+    Sugerencia de salida basada en la CONDUCTA REAL de esa billetera:
+    cuánto suele aguantar (hold_median_min) y su ROI mediano por operación.
+    Copiar a alguien sin plan de salida es media estrategia; esto da el
+    marco. NO es consejo financiero ni una garantía: es lo que esa
+    billetera hace habitualmente.
+    """
+    try:
+        hold = _wget(w, "hold_median_min")
+        roi = _wget(w, "roi_median")
+    except Exception:
+        return ""
+    if hold is None and roi is None:
+        return ""
+    partes = []
+    if roi is not None:
+        try:
+            roi = float(roi)
+            if roi > 0:
+                # Objetivo algo por debajo de su mediana: salir antes que
+                # la multitud es más realista que perseguir su máximo.
+                tp = max(15, round(roi * 0.8))
+                sl = max(15, min(40, round(tp / 2)))
+                partes.append(f"objetivo *+{tp:.0f}%* · stop *-{sl:.0f}%*")
+        except (TypeError, ValueError):
+            pass
+    if hold is not None:
+        try:
+            hold = float(hold)
+            if hold >= 60:
+                partes.append(f"suele aguantar ~{hold / 60:.1f} h")
+            elif hold > 0:
+                partes.append(f"suele aguantar ~{hold:.0f} min")
+        except (TypeError, ValueError):
+            pass
+    if not partes:
+        return ""
+    return "\n🎯 Plan sugerido: " + "  ·  ".join(partes)
+
+
 def _bar(score, width=10) -> str:
     """Barra visual del score, ej. 63/100 -> ▰▰▰▰▰▰▱▱▱▱."""
     try:
@@ -648,6 +689,7 @@ def process_transactions(txs: list[dict]):
                     f"\n_(no vi su compra; profit desconocido)_")
 
         bar = _bar(score_sig)
+        salida_txt = _plan_salida(w) if es_compra else ""
         div = "━━━━━━━━━━━━━━"
         tg_send(
             f"{side_icon} *{side_txt}* de billetera ⭐{cons_txt}\n"
@@ -656,7 +698,7 @@ def process_transactions(txs: list[dict]):
             f"🎯 Señal  {bar}  *{score_sig}/100*\n\n"
             f"👤 *{alias}*  ·  _{clase}_\n"
             f"{linea_sol}{pos_txt}"
-            f"{pnl_txt}{track_txt}{pat_txt}\n"
+            f"{pnl_txt}{track_txt}{pat_txt}{salida_txt}\n"
             f"{div}\n"
             f"📋 *Token*\n{token_block}{redes}\n"
             f"{div}\n"

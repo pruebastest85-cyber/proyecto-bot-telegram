@@ -428,6 +428,8 @@ def get_conn():
                 ("wallets", "pnl_net", "DOUBLE PRECISION"),
                 ("wallets", "grade", "TEXT"),
                 ("wallets", "consistency", "DOUBLE PRECISION"),
+                ("wallets", "hold_median_min", "DOUBLE PRECISION"),
+                ("wallets", "roi_median", "DOUBLE PRECISION"),
                 ("appearances", "delay_s", "INTEGER")]:
             try:
                 pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
@@ -453,7 +455,8 @@ def get_conn():
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
                      ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
                      ("grade", "TEXT"), ("consistency", "REAL"),
-                     ("pnl_updated", "TEXT"), ("wallet_score", "REAL")]:
+                     ("pnl_updated", "TEXT"), ("wallet_score", "REAL"),
+                     ("hold_median_min", "REAL"), ("roi_median", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
