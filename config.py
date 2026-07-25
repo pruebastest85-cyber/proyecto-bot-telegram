@@ -49,17 +49,17 @@ MAX_TOKEN_AGE_DAYS = _int("MAX_TOKEN_AGE_DAYS", 14)
 # ── Presupuesto de Helius (plan 10M créditos/mes; todo tuneable por env) ──
 # Si el consumo sube demasiado, baja estos valores desde Railway (variables
 # de entorno) — no hace falta redeploy de código.
-MAX_TOKENS_PER_CYCLE = _int("MAX_TOKENS_PER_CYCLE", 50)   # tokens por ciclo
+MAX_TOKENS_PER_CYCLE = _int("MAX_TOKENS_PER_CYCLE", 8)    # tokens por ciclo
 # Con 20 páginas (2.000 txs) NO se llegaba al inicio de tokens concurridos:
 # se leían las 2.000 MÁS RECIENTES y se trataban como si fueran las primeras,
 # inventando puestos de compra. La cuota de Helius estaba al 4%, así que
 # ahora se pagina mucho más hondo y además se detecta si se alcanzó el inicio.
-HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 300)        # páginas por token (100 txs c/u)
+HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 15)         # páginas por token (100 txs c/u)
 # El PnL es EL criterio para ser Elite, y se calculaba viendo solo las
 # últimas 2.000 txs (13-40 días de un trader activo). Con 60 páginas se ven
 # ~6.000 txs: PnL, drawdown y consistencia mucho más reales. La cuota de
 # Helius estaba al 17%, así que este gasto es el que mejor se paga.
-PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 60)         # páginas al perfilar 1 billetera (~6000 txs)
+PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 12)         # páginas al perfilar 1 billetera (~1200 txs)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
 # Ventana de OBSERVACIÓN: txs a leer por token. Grande para llegar más
@@ -107,7 +107,7 @@ MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 2)
 # descubrimiento). Protege el webhook de Helius y el coste de evaluación.
 MAX_TRACKED_CANDIDATES = _int("MAX_TRACKED_CANDIDATES", 60)
 # Tope de billeteras que la IA perfila+evalúa por ciclo (coste Helius+IA).
-MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 20)
+MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 8)
 # Presupuesto de atención: máximo de ⭐ en seguimiento activo. Si se supera,
 # las de menor Priority Score descienden. Mantiene el sistema ordenado.
 MAX_ELITE = _int("MAX_ELITE", 500)
@@ -126,5 +126,12 @@ DB_PATH = os.getenv("DB_PATH", "wallets.db")
 # ── Rate limiting (respetar planes gratuitos) ─────────────────────────────
 GECKO_DELAY = 2.5                 # segundos entre requests a GeckoTerminal
 # El delay es por límite de RPS del plan, no por créditos. 0.1s ≈ 10 req/s.
+# ⚠️ COSTE REAL: la Enhanced Transactions API de Helius cuesta 100 CRÉDITOS
+# por llamada (no 1). Con 10M créditos/mes eso son solo 100.000 llamadas al
+# mes ≈ 277 por ciclo. Antes de subir cualquier tope de arriba, multiplica
+# por 100 y compruébalo contra la cuota. Docs: helius.dev/docs/billing/credits
+HELIUS_CREDITS_PER_CALL = _int("HELIUS_CREDITS_PER_CALL", 100)
+HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 10_000_000)
+
 HELIUS_DELAY = float(os.getenv("HELIUS_DELAY", "0.1"))
 DEXSCREENER_DELAY = 0.3
