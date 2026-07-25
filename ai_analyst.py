@@ -255,6 +255,38 @@ def evaluate_tracked(conn) -> int:
            ORDER BY score DESC
            LIMIT ?""",
         (_min, cutoff, _s0, _m0, _lim)).fetchall()
+
+    # ── Filtro de IDENTIDAD (antes de gastar en perfilar) ──
+    # Helius sabe qué direcciones son exchanges, protocolos, market makers,
+    # validadores, tesorerías o estafadores conocidos. Ninguna de esas es un
+    # trader al que copiar, y perfilarlas gastaría historial para nada.
+    # Cuesta 1 crédito por billetera y se cachea para siempre.
+    if rows:
+        try:
+            from wallet_identity import identificar, motivo_exclusion
+            _dirs = [r["address"] for r in rows]
+            _ids = identificar(_dirs)
+            _limpias, _fuera = [], 0
+            for r in rows:
+                a = r["address"]
+                motivo = motivo_exclusion(_ids.get(a))
+                if motivo:
+                    conn.execute(
+                        """UPDATE wallets SET is_bot=1, is_tracked=0,
+                           ai_follow=0, ai_class='entidad', ai_reason=?
+                           WHERE address=?""",
+                        (f"Excluida por identidad: {motivo}", a))
+                    _fuera += 1
+                else:
+                    _limpias.append(r)
+            if _fuera:
+                conn.commit()
+                print(f"  🏷️  {_fuera} descartadas por identidad "
+                      f"(exchange/protocolo/entidad conocida)")
+            rows = _limpias
+        except Exception as e:
+            print(f"· Filtro de identidad omitido: {e}")
+
     if not rows:
         return 0
 
@@ -363,6 +395,27 @@ def evaluate_tracked(conn) -> int:
         # ni se repite ni gasta tokens; es estable en el tiempo.
         from aliases import make_alias
         alias = make_alias(addr)
+
+        # ── Señales de FONDEO (bundle / wallets hermanas) ──
+        # Una billetera fondeada horas antes de operar es desechable, no un
+        # trader con historial. Y si varias comparten quien las fondeó, son
+        # del mismo dueño: no valen como "consenso" independiente.
+        try:
+            from wallet_funding import recien_creada, hermanas
+            _nueva, _horas, _det = recien_creada(addr)
+            if _nueva:
+                verdict["seguir"] = False
+                verdict["razon"] = (f"{verdict.get('razon','')} · ⛔ "
+                                    f"billetera desechable: {_det}")[:500]
+                print(f"  ⛔ {addr[:8]}… descartada: {_det}")
+            else:
+                _hs = hermanas(addr)
+                if len(_hs) >= 2:
+                    verdict["razon"] = (
+                        f"{verdict.get('razon','')} · ⚠️ {len(_hs)} "
+                        f"billeteras del mismo origen de fondos")[:500]
+        except Exception as e:
+            print(f"· Señales de fondeo omitidas: {e}")
 
         seguir = 1 if verdict["seguir"] else 0
         # Guarda de rendimiento MEDIDO: si sus señales ya emitidas perdieron

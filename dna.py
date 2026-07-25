@@ -217,4 +217,21 @@ def wallet_dna_text(address: str) -> str | None:
     if row and row["ai_reason"]:
         lines.append(f"\n_IA: {row['ai_reason']}_")
     lines.append(f"🔗 gmgn.ai/sol/address/{address}")
+    # Origen de los fondos: quién creó esta billetera y si tiene hermanas
+    try:
+        from wallet_funding import resumen as _fondeo_txt
+        _f = _fondeo_txt(address)
+        if _f:
+            lines.append("")
+            lines.append(_f)
+    except Exception:
+        pass
+    # Etiqueta conocida (exchange, protocolo, KOL…)
+    try:
+        from wallet_identity import etiqueta as _etq
+        _e = _etq(address)
+        if _e:
+            lines.append(f"🏷️ Identificada por Helius: *{_e}*")
+    except Exception:
+        pass
     return "\n".join(lines)
