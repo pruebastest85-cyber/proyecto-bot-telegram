@@ -199,6 +199,33 @@ def _c_helius(conn):
         return _chk("Créditos Helius", WARN, f"no se pudo comprobar ({e})")
 
 
+def _c_base_datos(conn):
+    """Tamaño de la base: si crece de más, el backup por Telegram falla."""
+    try:
+        import config as _cfg
+        ruta = getattr(_cfg, "DB_PATH", None)
+        if not ruta or not os.path.exists(ruta):
+            return _chk("Base de datos", OK, "en Postgres o sin archivo local")
+        mb = os.path.getsize(ruta) / 1e6
+        try:
+            from trades_store import estadisticas
+            ops = estadisticas().get("operaciones", 0)
+        except Exception:
+            ops = 0
+        det = f"{mb:.0f} MB · {ops:,} operaciones guardadas"
+        # El backup va comprimido (~5x), así que el margen real es mayor
+        if mb > 300:
+            return _chk("Base de datos", CRIT, det,
+                        "demasiado grande incluso comprimida: pasa a "
+                        "Postgres (DATABASE_URL) o baja MAX_TRADES_TOTAL")
+        if mb > 200:
+            return _chk("Base de datos", WARN, det,
+                        "considera pasar a Postgres para crecer sin límite")
+        return _chk("Base de datos", OK, det)
+    except Exception as e:
+        return _chk("Base de datos", WARN, f"no se pudo comprobar ({e})")
+
+
 def _c_laserstream():
     """¿Está viva la escucha en tiempo real de menor latencia?"""
     try:
@@ -258,7 +285,8 @@ def diagnostico() -> list[dict]:
     try:
         conn = get_conn()
         checks += [_c_senales(conn), _c_medicion(conn), _c_embudo(conn),
-                   _c_presupuesto(conn), _c_helius(conn), _c_backup(conn)]
+                   _c_presupuesto(conn), _c_helius(conn),
+                   _c_base_datos(conn), _c_backup(conn)]
     except Exception as e:
         checks.append(_chk("Base de datos", CRIT, f"no accesible: {e}",
                            "revisa el volumen/DATABASE_URL en Railway"))

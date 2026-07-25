@@ -46,11 +46,26 @@ def _base():
             txt = open(os.path.join(RAIZ, fn)).read()
         except OSError:
             continue
-        for m in re.finditer(
-                r"CREATE TABLE IF NOT EXISTS\s+\w+\s*\([^;\"\']*?\)",
-                txt, re.S):
+        for m in re.finditer(r"CREATE TABLE IF NOT EXISTS\s+\w+\s*\(",
+                             txt):
+            # Buscar el paréntesis de cierre REAL contando anidamiento:
+            # definiciones como "PRIMARY KEY (a, b))" tienen paréntesis
+            # dentro y un corte ingenuo generaba SQL inválido (y con ello
+            # falsos positivos por "tabla inexistente").
+            i = m.end() - 1
+            nivel, fin = 0, None
+            for j in range(i, min(len(txt), i + 4000)):
+                if txt[j] == "(":
+                    nivel += 1
+                elif txt[j] == ")":
+                    nivel -= 1
+                    if nivel == 0:
+                        fin = j + 1
+                        break
+            if not fin:
+                continue
             try:
-                c.execute(m.group(0))
+                c.execute(txt[m.start():fin])
             except Exception:
                 pass
     c.commit()

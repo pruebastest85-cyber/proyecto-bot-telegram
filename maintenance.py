@@ -26,14 +26,32 @@ def send_db_backup():
     if not (BOT_TOKEN and ADMIN_ID):
         return
     try:
-        with open(config.DB_PATH, "rb") as f:
+        # Comprimido: Telegram admite 50 MB por archivo y una base SQLite
+        # se encoge mucho al comprimirla. Así el historial puede crecer
+        # bastante más sin que el backup empiece a fallar.
+        import gzip
+        import shutil
+        import tempfile as _tmp
+        origen = config.DB_PATH
+        crudo = os.path.getsize(origen) / 1e6 if os.path.exists(origen) else 0
+        destino = _tmp.mktemp(suffix=".db.gz")
+        with open(origen, "rb") as fin, gzip.open(destino, "wb",
+                                                  compresslevel=6) as fout:
+            shutil.copyfileobj(fin, fout)
+        comprimido = os.path.getsize(destino) / 1e6
+        with open(destino, "rb") as f:
             requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
                 data={"chat_id": int(ADMIN_ID),
-                      "caption": "📦 Backup diario de la base de datos. "
-                                 "Guárdalo por si acaso."},
-                files={"document": ("wallets_backup.db", f)},
-                timeout=120)
+                      "caption": (f"📦 Backup diario ({comprimido:.1f} MB "
+                                  f"comprimido, {crudo:.0f} MB original).\n"
+                                  "Descomprime con gzip para abrirlo.")},
+                files={"document": ("wallets_backup.db.gz", f)},
+                timeout=180)
+        try:
+            os.remove(destino)
+        except Exception:
+            pass
         print("📦 Backup de la base enviado por Telegram")
         try:
             conn = get_conn()

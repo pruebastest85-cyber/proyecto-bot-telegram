@@ -171,6 +171,9 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
                                   "tok_in": 0.0, "tok_out": 0.0})
     timestamps = []
     buy_sizes = []
+    # Operaciones extraidas: se GUARDAN al final para tener
+    # historial propio y no depender siempre de Helius.
+    _ops: list[dict] = []
 
     for tx in txs:
         ts = tx.get("timestamp") or 0
@@ -222,6 +225,9 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
         # Compra: recibio token y su SOL bajo (una tx cuenta una vez)
         if delta < -0.001 and mint_in:
             mint = next(iter(mint_in))
+            _ops.append({"signature": tx.get("signature"), "mint": mint,
+                         "side": "compra", "sol": abs(delta),
+                         "tokens": mint_in[mint], "ts": ts})
             info = tokens[mint]
             info["buys"] += 1
             info["sol_out"] += abs(delta)
@@ -235,6 +241,9 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
         # Venta: envio token y su SOL subio
         elif delta > 0.001 and mint_out:
             mint = next(iter(mint_out))
+            _ops.append({"signature": tx.get("signature"), "mint": mint,
+                         "side": "venta", "sol": delta,
+                         "tokens": mint_out[mint], "ts": ts})
             info = tokens[mint]
             info["sells"] += 1
             info["sol_in"] += delta
@@ -295,6 +304,20 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
 
     result["net_pnl_sol"] = round(result["pnl_total_sol"], 2)
     result["tokens"] = dict(tokens)
+
+    # ── Guardar el historial en NUESTRA base ──
+    # Antes estas operaciones se calculaban y se tiraban: cada re-evaluación
+    # volvía a descargar lo mismo de Helius. Guardarlas permite recalcular
+    # sin llamar a nadie, alimentar análisis propios (incluida una IA local)
+    # y dejar de depender de una API externa para el histórico.
+    try:
+        from trades_store import guardar
+        _nuevas = guardar(address, _ops)
+        if _nuevas:
+            print(f"  💾 {_nuevas} operaciones nuevas guardadas "
+                  f"(historial propio)")
+    except Exception as e:
+        print(f"  · No se guardó el historial: {e}")
 
     # Métricas quant (Profit Factor, Sharpe, Expectancy, Drawdown, ROI…)
     try:

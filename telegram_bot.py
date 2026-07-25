@@ -1114,6 +1114,8 @@ async def _post_init(app: Application):
             BotCommand("rendimiento", "Win rate de las señales"),
             BotCommand("estrellasperf", "Rendimiento medido de cada ⭐"),
             BotCommand("salud", "¿Está todo funcionando bien?"),
+            BotCommand("datos", "Conocimiento propio acumulado"),
+            BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
             BotCommand("errores", "Errores registrados (24 h)"),
             BotCommand("backtest", "Simular copiar las señales"),
             BotCommand("paper", "Paper trading simulado"),
@@ -1138,6 +1140,40 @@ async def _post_init(app: Application):
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
+
+
+@solo_admin
+async def cmd_datos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Qué conocimiento propio llevamos acumulado (sin depender de Helius)."""
+    from exportar import resumen
+    from trades_store import resumen_text
+    txt = await asyncio.to_thread(resumen)
+    txt2 = await asyncio.to_thread(resumen_text)
+    await _send_md(update.message.chat, txt + "\n\n" + txt2)
+
+
+@solo_admin
+async def cmd_exportar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Exporta TODO el conocimiento a JSON y lo envía como archivo.
+    Pensado para analizarlo fuera del bot (p. ej. con una IA local)."""
+    await update.message.reply_text("📦 Preparando el export…")
+    from exportar import exportar
+    ruta = await asyncio.to_thread(exportar)
+    if not ruta:
+        await update.message.reply_text("No se pudo generar el export.")
+        return
+    try:
+        import os as _os
+        mb = _os.path.getsize(ruta) / 1e6
+        with open(ruta, "rb") as fh:
+            await update.message.reply_document(
+                document=fh, filename=_os.path.basename(ruta),
+                caption=(f"📦 Conocimiento acumulado ({mb:.1f} MB)\n"
+                         "Billeteras, operaciones, apariciones y señales "
+                         "con su resultado medido."))
+    except Exception as e:
+        await update.message.reply_text(
+            f"El export se generó pero no se pudo enviar: {e}")
 
 
 @solo_admin
@@ -1448,6 +1484,8 @@ def main():
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
     app.add_handler(CommandHandler("estrellasperf", cmd_wallets_perf))
     app.add_handler(CommandHandler("salud", cmd_salud))
+    app.add_handler(CommandHandler("datos", cmd_datos))
+    app.add_handler(CommandHandler("exportar", cmd_exportar))
     app.add_handler(CommandHandler("errores", cmd_errores))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
