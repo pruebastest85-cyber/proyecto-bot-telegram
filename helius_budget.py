@@ -52,8 +52,29 @@ def llamadas_del_mes(conn) -> int:
     return total
 
 
+def creditos_reales_del_mes(conn) -> int:
+    """Créditos contabilizados exactamente (los apunta el cliente RPC)."""
+    total = 0
+    mes = time.strftime("%Y-%m")
+    try:
+        for d in range(1, 32):
+            v = get_setting(conn, f"api_helius_credits_{mes}-{d:02d}", None)
+            if v:
+                try:
+                    total += int(float(v))
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+    return total
+
+
 def creditos_usados(conn) -> int:
-    return llamadas_del_mes(conn) * CREDITOS_POR_LLAMADA
+    """Créditos del mes: los exactos del RPC + los estimados de la API vieja
+    (100 por llamada). Así el freno sigue siendo correcto durante la
+    transición entre ambos métodos."""
+    return (creditos_reales_del_mes(conn)
+            + llamadas_del_mes(conn) * CREDITOS_POR_LLAMADA)
 
 
 def restantes(conn) -> int:

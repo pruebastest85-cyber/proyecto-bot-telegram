@@ -56,6 +56,16 @@ JITO_TIP_ACCOUNTS = {
 def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
     if pages is None:
         pages = getattr(config, "PROFILE_MAX_PAGES", 10)
+    # Ruta preferente: RPC (10x más barato y hasta 1.000 txs por llamada),
+    # así el perfil ve MUCHO más historial por el mismo presupuesto.
+    if getattr(config, "USE_RPC_HISTORY", True):
+        try:
+            from helius_rpc import historial_wallet
+            txs = historial_wallet(address, max_txs=pages * 100)
+            if txs:
+                return txs
+        except Exception as e:
+            print(f"  · RPC no disponible en perfil ({e}); método antiguo")
     url = config.HELIUS_PARSED_TX.format(address=address)
     all_txs, before = [], None
     for _ in range(pages):

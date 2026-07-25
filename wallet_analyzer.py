@@ -66,6 +66,23 @@ def fetch_parsed_txs(address: str, before: str | None = None,
 
 def fetch_earliest_txs(mint: str, max_pages: int | None = None,
                        con_estado: bool = False):
+    """Ruta preferente: getTransactionsForAddress con sortOrder=asc, que
+    devuelve las PRIMERAS transacciones del token de verdad (y cuesta 10x
+    menos). Si falla, cae al método antiguo de paginar hacia atrás."""
+    if getattr(config, "USE_RPC_HISTORY", True):
+        try:
+            from helius_rpc import primeras_txs
+            tope = getattr(config, "EARLY_BUYER_WINDOW", 1500)
+            txs, ok = primeras_txs(mint, max_txs=tope)
+            if txs:
+                return (txs, ok) if con_estado else txs
+        except Exception as e:
+            print(f"  · RPC no disponible ({e}); uso el método antiguo")
+    return _fetch_earliest_txs_legacy(mint, max_pages, con_estado)
+
+
+def _fetch_earliest_txs_legacy(mint: str, max_pages: int | None = None,
+                               con_estado: bool = False):
     """
     Pagina hacia atrás hasta las transacciones más antiguas del mint y
     devuelve las primeras EARLY_BUYER_WINDOW en orden cronológico.

@@ -59,12 +59,12 @@ HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 60)         # páginas por token (
 # últimas 2.000 txs (13-40 días de un trader activo). Con 60 páginas se ven
 # ~6.000 txs: PnL, drawdown y consistencia mucho más reales. La cuota de
 # Helius estaba al 17%, así que este gasto es el que mejor se paga.
-PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 40)         # páginas al perfilar 1 billetera (~4000 txs)
+PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 50)         # páginas al perfilar 1 billetera (~5000 txs)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
 # Ventana de OBSERVACIÓN: txs a leer por token. Grande para llegar más
 # allá de la zona de snipers (no cuesta Helius extra: ya se paginaba igual).
-EARLY_BUYER_WINDOW = _int("EARLY_BUYER_WINDOW", 1500)
+EARLY_BUYER_WINDOW = _int("EARLY_BUYER_WINDOW", 2000)
 # ── Embudo v4: observar ≠ perfilar ────────────────────────────────────
 # OBSERVAR (barato, alimenta grafo/clusters/afinidad con devs): compras
 # desde MIN_OBS_BUY_SOL hasta el rank BUYER_END_RANK.
@@ -133,6 +133,11 @@ GECKO_DELAY = 2.5                 # segundos entre requests a GeckoTerminal
 # configuración). La protección de verdad es helius_budget, que mide el
 # consumo real y pausa las descargas al llegar a HELIUS_STOP_AT_PCT.
 # Docs: helius.dev/docs/billing/credits
+# getTransactionsForAddress: 10 créditos por 100 txs (10x más barato que la
+# Enhanced API) y hasta 1.000 por llamada, con sortOrder=asc para alcanzar
+# de verdad el inicio del token. Poner USE_RPC_HISTORY=0 para volver atrás.
+USE_RPC_HISTORY = os.getenv("USE_RPC_HISTORY", "1") == "1"
+
 HELIUS_CREDITS_PER_CALL = _int("HELIUS_CREDITS_PER_CALL", 100)
 HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 10_000_000)
 HELIUS_STOP_AT_PCT = _int("HELIUS_STOP_AT_PCT", 85)   # pausar al 85%

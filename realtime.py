@@ -144,13 +144,53 @@ def watch_addresses() -> list[str]:
     return stars + [c for c in cands if c not in stars]
 
 
-def sync_helius_webhook() -> str:
-    """Crea o actualiza el webhook de Helius con las billeteras ⭐."""
+def _guardar_huella(huella: str) -> None:
+    """Recuerda qué lista de ⭐ quedó sincronizada, para no repetir la llamada."""
+    try:
+        from db import get_conn, set_setting
+        _c = get_conn()
+        try:
+            set_setting(_c, "webhook_huella", huella)
+            set_setting(_c, "webhook_sync_ts", time.time())
+        finally:
+            _c.close()
+    except Exception:
+        pass
+
+
+def sync_helius_webhook(forzar: bool = False) -> str:
+    """
+    Crea o actualiza el webhook de Helius con las billeteras ⭐.
+
+    AHORRO: cada gestión de webhook cuesta 100 CRÉDITOS (consultar + actualizar
+    = 200). Este job corría cada 30 min aunque la lista de ⭐ no hubiera
+    cambiado, y eso era ~9% de todo el consumo de Helius. Ahora se compara una
+    huella de la lista y solo se llama a la API si cambió de verdad. Cada 24 h
+    se fuerza igualmente, por si el webhook se borró por fuera.
+    """
     if not PUBLIC_URL:
         return "PUBLIC_URL no configurada; webhook no sincronizado"
     addrs = watch_addresses()
     if not addrs:
         return "Sin billeteras ⭐ aún; nada que monitorear"
+
+    # ¿Cambió algo desde la última sincronización?
+    import hashlib
+    huella = hashlib.sha1(",".join(sorted(addrs)).encode()).hexdigest()[:16]
+    if not forzar:
+        try:
+            from db import get_conn, get_setting
+            _c = get_conn()
+            try:
+                previa = get_setting(_c, "webhook_huella", "") or ""
+                ts_prev = float(get_setting(_c, "webhook_sync_ts", 0) or 0)
+            finally:
+                _c.close()
+            if previa == huella and (time.time() - ts_prev) < 86400:
+                return (f"Webhook sin cambios ({len(addrs)} billeteras); "
+                        "no se gastan créditos")
+        except Exception:
+            pass
 
     hook_url = f"https://{PUBLIC_URL}/helius"
     params = {"api-key": config.HELIUS_API_KEY}
@@ -170,10 +210,12 @@ def sync_helius_webhook() -> str:
             r = requests.put(f"{HELIUS_WEBHOOKS}/{wid}", params=params,
                              json=body, timeout=20)
             r.raise_for_status()
+            _guardar_huella(huella)
             return f"Webhook actualizado: {len(addrs)} billeteras vigiladas"
         r = requests.post(HELIUS_WEBHOOKS, params=params, json=body,
                           timeout=20)
         r.raise_for_status()
+        _guardar_huella(huella)
         return f"Webhook creado: {len(addrs)} billeteras vigiladas"
     except requests.RequestException as e:
         return f"Error sincronizando webhook: {e}"
