@@ -1115,6 +1115,7 @@ async def _post_init(app: Application):
             BotCommand("estrellasperf", "Rendimiento medido de cada ⭐"),
             BotCommand("salud", "¿Está todo funcionando bien?"),
             BotCommand("datos", "Conocimiento propio acumulado"),
+            BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
             BotCommand("errores", "Errores registrados (24 h)"),
             BotCommand("backtest", "Simular copiar las señales"),
@@ -1140,6 +1141,39 @@ async def _post_init(app: Application):
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
+
+
+def _marcar_reevaluacion(solo_sin_estrella: bool = True) -> int:
+    """Marca billeteras para que el próximo ciclo las vuelva a graduar.
+
+    Se limpia `pnl_updated`, que es lo que el selector usa para saber si un
+    veredicto caducó. Útil tras cambiar los criterios de grading: sin esto
+    habría que esperar los días de caducidad para ver el efecto.
+    """
+    conn = get_conn()
+    try:
+        cond = ("WHERE COALESCE(is_bot,0)=0 AND ai_class IS NOT NULL"
+                + (" AND COALESCE(is_tracked,0)=0" if solo_sin_estrella else ""))
+        n = conn.execute(f"SELECT COUNT(*) c FROM wallets {cond}"
+                         ).fetchone()["c"]
+        conn.execute(f"UPDATE wallets SET pnl_updated=NULL {cond}")
+        conn.commit()
+        return n
+    finally:
+        conn.close()
+
+
+@solo_admin
+async def cmd_reevaluar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Vuelve a graduar las billeteras ya evaluadas (tras cambiar criterios)."""
+    todas = bool(ctx.args and ctx.args[0].lower() in ("todas", "all"))
+    n = await asyncio.to_thread(_marcar_reevaluacion, not todas)
+    await update.message.reply_text(
+        f"🔄 {n} billeteras marcadas para volver a graduarse.\n"
+        f"Se irán procesando en los próximos ciclos "
+        f"({config.MAX_EVAL_PER_CYCLE} por ciclo, cada "
+        f"{AUTO_CYCLE_HOURS:g} h).\n\n"
+        "Usa /ciclo si quieres empezar ya.")
 
 
 @solo_admin
@@ -1485,6 +1519,7 @@ def main():
     app.add_handler(CommandHandler("estrellasperf", cmd_wallets_perf))
     app.add_handler(CommandHandler("salud", cmd_salud))
     app.add_handler(CommandHandler("datos", cmd_datos))
+    app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
     app.add_handler(CommandHandler("errores", cmd_errores))
     app.add_handler(CommandHandler("backtest", cmd_backtest))

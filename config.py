@@ -102,7 +102,10 @@ LIQ_CAP_FRACTION = _float("LIQ_CAP_FRACTION", 0.10)
 # decide (la IA/grading filtran). Tuneable por env.
 # Aparecer en UN solo token ganador es compatible con la pura suerte. Exigir
 # 2 es el filtro más barato y honesto para separar pericia de casualidad.
-MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 2)
+# Temporalmente en 1: con 2 el embudo se quedaba en 3 candidatas por ciclo.
+# El grading (Profit Factor, drawdown, concentración) es ahora quien filtra
+# la suerte. Subir a 2 cuando haya suficiente material acumulado.
+MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 1)
 # Tope de billeteras marcadas ⭐ por ciclo (las mejores por score de
 # descubrimiento). Protege el webhook de Helius y el coste de evaluación.
 MAX_TRACKED_CANDIDATES = _int("MAX_TRACKED_CANDIDATES", 60)

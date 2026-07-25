@@ -30,7 +30,13 @@ def _env(name, default):
 MIN_TRADES = int(_env("MIN_CLOSED_TRADES", 20))    # ops cerradas mínimas
 MIN_TOKENS = int(_env("MIN_TOKENS", 3))            # tokens distintos mínimos
 MAX_INACTIVE_DAYS = int(_env("MAX_INACTIVE_DAYS", 45))
-WR_MIN = _env("MIN_WIN_RATE", 60)                  # win rate mínimo (Nivel 2)
+# En memecoins se gana perdiendo poco muchas veces y ganando muchísimo
+# pocas veces: un trader excelente puede acertar solo 1 de cada 3. Exigir
+# 60% seleccionaba otra estrategia distinta (scalping constante) y dejaba
+# fuera a los rentables de verdad: 189 evaluadas → 0 estrellas.
+# Ahora esto es solo un SUELO anti-lotería; quien decide es el Profit
+# Factor y la expectativa, que son los que garantizan rentabilidad.
+WR_MIN = _env("MIN_WIN_RATE", 30)                  # suelo de acierto
 PF_MIN = _env("MIN_PROFIT_FACTOR", 1.8)            # profit factor mínimo
 MAXDD = _env("MAX_DRAWDOWN_PCT", 35)               # max drawdown máximo (%)
 CONC_MAX = _env("MAX_SINGLE_TOKEN_CONCENTRATION", 0.40)  # conc. máx 1 token
@@ -125,11 +131,19 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
                     [f"PnL neto no positivo ({net:+.1f} SOL)"])
 
     # ── Nivel 2: calidad ──
+    # CALIDAD = ¿gana más de lo que pierde, de forma sostenible?
+    #   · Profit Factor  → sus ganancias superan a sus pérdidas
+    #   · Expectativa    → cada operación tiene valor esperado positivo
+    #   · Drawdown       → sin agujeros que lo revienten
+    #   · Win rate       → solo un suelo, para excluir puro azar
+    # El ROI MEDIANO ya NO es requisito: exigirlo positivo equivale a pedir
+    # que acierte más de la mitad de las veces, lo que descarta justo a los
+    # traders asimétricos que buscamos. Sigue contando como bonus dentro
+    # del Consistency Score, pero ya no bloquea.
     quality = ((wr is None or wr >= WR_MIN)
                and (pf is None or pf >= PF_MIN)
                and (exp is None or exp > 0)
-               and (dd is None or dd < MAXDD)
-               and (rmed is None or rmed > 0))
+               and (dd is None or dd < MAXDD))
     # ── Nivel 5: diversificación ──
     diversified = conc < CONC_MAX
     # ── Nivel 6: comportamiento social ──
@@ -144,6 +158,10 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
         reasons.append(f"Win Rate {wr}%")
     if dd is not None:
         reasons.append(f"Max DD {dd}%")
+    if rmed is not None and rmed <= 0:
+        # Ya no descalifica, pero conviene saberlo: gana por asimetría
+        # (pocas operaciones muy buenas), no por acertar a menudo.
+        reasons.append("gana por asimetría (pocas grandes)")
     if diversified:
         reasons.append("beneficio diversificado")
     else:
