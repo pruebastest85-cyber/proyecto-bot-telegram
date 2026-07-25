@@ -478,7 +478,8 @@ def process_transactions(txs: list[dict]):
         t = analyze_token(trade["mint"])
         w = conn.execute(
             "SELECT ai_class, score, alias, pnl_30d, pnl_total, "
-            "wallet_score FROM wallets WHERE address=?",
+            "wallet_score, hold_median_min, roi_median "
+            "FROM wallets WHERE address=?",
             (trade["wallet"],)).fetchone()
 
         # Guardar precio, símbolo, MC y liquidez del momento

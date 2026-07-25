@@ -53,6 +53,29 @@ def _stats(conn, wallet: str):
     return {"n": len(vals), "wr": wr, "media": round(sum(vals) / len(vals), 1)}
 
 
+def perdedora_confirmada(conn, wallet: str) -> str | None:
+    """
+    ¿Las señales YA EMITIDAS de esta billetera perdieron dinero de forma
+    consistente? Devuelve el motivo (texto) o None.
+
+    Se usa como GUARDA en la re-evaluación de la IA: sin ella, la
+    re-evaluación de cada 3 días devolvía la ⭐ a billeteras que este
+    sistema ya había degradado por rendimiento medido — es decir, la IA
+    revertía en silencio un hecho medido. Mismo criterio conservador que
+    review_tracked: hacen falta las tres condiciones.
+    """
+    try:
+        st = _stats(conn, wallet)
+    except Exception:
+        return None
+    if not st or st["n"] < REVIEW_MIN_SIGNALS:
+        return None                      # sin evidencia suficiente
+    if st["wr"] < REVIEW_MIN_WR and st["media"] < 0:
+        return (f"{st['wr']}% de acierto y {st['media']:+.1f}% promedio "
+                f"en {st['n']} señales")
+    return None
+
+
 def review_tracked(notify: bool = True) -> dict:
     """
     Revisa las ⭐ activas y degrada a las que sus señales medidas pierden.
@@ -77,7 +100,7 @@ def review_tracked(notify: bool = True) -> dict:
                          f"promedio en {st['n']} señales")
                 conn.execute(
                     """UPDATE wallets SET is_tracked=0, ai_follow=0,
-                       grade='Observacion', ai_reason=?
+                       grade='Observación', ai_reason=?
                        WHERE address=?""", (razon, addr))
                 degradadas.append({"address": addr,
                                    "alias": w["alias"] or addr[:6],

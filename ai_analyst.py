@@ -359,6 +359,21 @@ def evaluate_tracked(conn) -> int:
         alias = make_alias(addr)
 
         seguir = 1 if verdict["seguir"] else 0
+        # Guarda de rendimiento MEDIDO: si sus señales ya emitidas perdieron
+        # dinero de forma consistente, la IA NO puede devolverle la ⭐ (antes
+        # la re-evaluación de 3 días revertía en silencio la degradación).
+        if seguir:
+            try:
+                from performance_review import perdedora_confirmada
+                malo = perdedora_confirmada(conn, addr)
+                if malo:
+                    seguir = 0
+                    verdict["razon"] = (
+                        f"{verdict.get('razon', '')} · ⛔ sin ⭐ por "
+                        f"rendimiento medido: {malo}")[:500]
+                    print(f"  ⛔ {addr[:8]}… no recupera ⭐: {malo}")
+            except Exception as e:
+                print(f"· guarda de rendimiento omitida: {e}")
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
                alias=COALESCE(?, alias),
