@@ -1477,6 +1477,16 @@ def main():
 
     # Servidor de webhooks para señales en tiempo real (Fase 2)
     start_webhook_server()
+    # LaserStream corre EN PARALELO al webhook: menor latencia y, sobre todo,
+    # reanuda desde el último slot tras un reinicio (antes esas señales se
+    # perdían). No hay riesgo de alertas dobles: signals.signature es clave
+    # primaria, así que la segunda vía que llegue se descarta sola.
+    try:
+        from laserstream import start as _ls_start
+        if _ls_start():
+            print("📡 LaserStream activo (webhook sigue como respaldo)")
+    except Exception as e:
+        print(f"· LaserStream no arrancó: {e}")
 
     # Ciclo automático: primero a los 60s de arrancar, luego cada N horas
     app.job_queue.run_repeating(

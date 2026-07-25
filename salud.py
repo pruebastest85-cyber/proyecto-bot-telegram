@@ -199,6 +199,23 @@ def _c_helius(conn):
         return _chk("Créditos Helius", WARN, f"no se pudo comprobar ({e})")
 
 
+def _c_laserstream():
+    """¿Está viva la escucha en tiempo real de menor latencia?"""
+    try:
+        from laserstream import activo, estado
+        if not activo():
+            return _chk("LaserStream", OK, "desactivado (solo webhook)")
+        e = estado()
+        if e.get("conectado"):
+            return _chk("LaserStream", OK,
+                        f"conectado · {e.get('recibidas', 0)} transacciones")
+        return _chk("LaserStream", WARN,
+                    f"desconectado{' — ' + e['error'] if e.get('error') else ''}",
+                    "el webhook sigue funcionando como respaldo")
+    except Exception as e:
+        return _chk("LaserStream", WARN, f"no se pudo comprobar ({e})")
+
+
 def _c_errores():
     """¿Hubo errores registrados?"""
     try:
@@ -251,6 +268,7 @@ def diagnostico() -> list[dict]:
                 conn.close()
             except Exception:
                 pass
+    checks.append(_c_laserstream())
     checks.append(_c_errores())
     return checks
 
