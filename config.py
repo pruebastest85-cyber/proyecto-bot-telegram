@@ -49,13 +49,17 @@ MAX_TOKEN_AGE_DAYS = _int("MAX_TOKEN_AGE_DAYS", 14)
 # ── Presupuesto de Helius (plan 10M créditos/mes; todo tuneable por env) ──
 # Si el consumo sube demasiado, baja estos valores desde Railway (variables
 # de entorno) — no hace falta redeploy de código.
-MAX_TOKENS_PER_CYCLE = _int("MAX_TOKENS_PER_CYCLE", 35)   # tokens por ciclo
+MAX_TOKENS_PER_CYCLE = _int("MAX_TOKENS_PER_CYCLE", 50)   # tokens por ciclo
 # Con 20 páginas (2.000 txs) NO se llegaba al inicio de tokens concurridos:
 # se leían las 2.000 MÁS RECIENTES y se trataban como si fueran las primeras,
 # inventando puestos de compra. La cuota de Helius estaba al 4%, así que
 # ahora se pagina mucho más hondo y además se detecta si se alcanzó el inicio.
-HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 120)        # páginas por token (100 txs c/u)
-PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 20)         # páginas al perfilar 1 billetera (~2000 txs)
+HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 300)        # páginas por token (100 txs c/u)
+# El PnL es EL criterio para ser Elite, y se calculaba viendo solo las
+# últimas 2.000 txs (13-40 días de un trader activo). Con 60 páginas se ven
+# ~6.000 txs: PnL, drawdown y consistencia mucho más reales. La cuota de
+# Helius estaba al 17%, así que este gasto es el que mejor se paga.
+PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 60)         # páginas al perfilar 1 billetera (~6000 txs)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
 # Ventana de OBSERVACIÓN: txs a leer por token. Grande para llegar más

@@ -49,12 +49,12 @@ def _fetch_pools(url: str, pages: int, etiqueta: str) -> list[dict]:
     return pools
 
 
-def fetch_trending_pools(pages: int = 3) -> list[dict]:
+def fetch_trending_pools(pages: int = 6) -> list[dict]:
     """Pools en tendencia de Solana (los que ya están explotando)."""
     return _fetch_pools(config.GECKO_TRENDING, pages, "en tendencia")
 
 
-def fetch_new_pools(pages: int = 2) -> list[dict]:
+def fetch_new_pools(pages: int = 4) -> list[dict]:
     """Pools recién creados (para cazar ganadores más temprano)."""
     return _fetch_pools(config.GECKO_NEW_POOLS, pages, "nuevos")
 
