@@ -271,19 +271,30 @@ def analyze_token(conn, token) -> int:
 
 
 def run_analysis():
+    """
+    Analiza tokens ganadores pendientes y DESPUÉS evalúa candidatas.
+
+    OJO: antes, si no había tokens nuevos, esta función hacía `return` y se
+    saltaba TODO lo demás — recálculo de scores, evaluación por IA y
+    perfilado. Resultado: en cuanto discovery dejaba de encontrar tokens
+    nuevos (lo normal al cabo de unos días), el embudo se paralizaba por
+    completo y no volvía a promocionar ni una billetera.
+    Ahora la evaluación de candidatas corre SIEMPRE, haya tokens nuevos o no.
+    """
     conn = get_conn()
     tokens = pending_tokens(conn)
     if not tokens:
-        print("No hay tokens pendientes. Corre primero discovery.py")
-        return
-    limite = getattr(config, "MAX_TOKENS_PER_CYCLE", 6)
-    en_cola = max(0, len(tokens) - limite)
-    tokens = tokens[:limite]
-    print(f"→ Analizando {len(tokens)} tokens ganadores"
-          + (f" ({en_cola} en cola para el próximo ciclo)" if en_cola else ""))
-
-    for token in tokens:
-        analyze_token(conn, token)
+        print("Sin tokens ganadores pendientes; se evalúan las candidatas "
+              "que ya están en la base.")
+    else:
+        limite = getattr(config, "MAX_TOKENS_PER_CYCLE", 6)
+        en_cola = max(0, len(tokens) - limite)
+        tokens = tokens[:limite]
+        print(f"→ Analizando {len(tokens)} tokens ganadores"
+              + (f" ({en_cola} en cola para el próximo ciclo)"
+                 if en_cola else ""))
+        for token in tokens:
+            analyze_token(conn, token)
 
     recompute_scores(conn, config.MIN_WINNING_TOKENS,
                      getattr(config, "MAX_TRACKED_CANDIDATES", 60))
