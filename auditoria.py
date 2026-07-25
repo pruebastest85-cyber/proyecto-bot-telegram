@@ -38,11 +38,21 @@ def _base():
     c = dbmod.get_conn()
     c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, "
               "value TEXT)")
-    c.execute("""CREATE TABLE IF NOT EXISTS submitted_tokens (
-        mint TEXT PRIMARY KEY, symbol TEXT, mc REAL, liq REAL, age_days REAL,
-        top10_pct REAL, lp_locked_pct REAL, mint_auth INTEGER,
-        freeze_auth INTEGER, risk_score INTEGER, smart_count INTEGER,
-        elite_count INTEGER, chg24 REAL, feedback INTEGER, ts REAL)""")
+    # Tablas que los módulos crean de forma PEREZOSA (no están en el
+    # esquema central): se descubren leyendo el propio código, así el
+    # auditor no hay que tocarlo cada vez que se añade una tabla nueva.
+    for fn in FILES:
+        try:
+            txt = open(os.path.join(RAIZ, fn)).read()
+        except OSError:
+            continue
+        for m in re.finditer(
+                r"CREATE TABLE IF NOT EXISTS\s+\w+\s*\([^;\"\']*?\)",
+                txt, re.S):
+            try:
+                c.execute(m.group(0))
+            except Exception:
+                pass
     c.commit()
     raw = sqlite3.connect(os.environ["DB_PATH"])
     raw.row_factory = sqlite3.Row

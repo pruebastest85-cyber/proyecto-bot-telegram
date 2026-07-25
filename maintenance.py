@@ -35,8 +35,21 @@ def send_db_backup():
                 files={"document": ("wallets_backup.db", f)},
                 timeout=120)
         print("📦 Backup de la base enviado por Telegram")
+        try:
+            conn = get_conn()
+            try:
+                set_setting(conn, "last_backup_ts", time.time())
+            finally:
+                conn.close()
+        except Exception:
+            pass
     except Exception as e:
         print(f"· Backup falló: {e}")
+        try:
+            from errores import record
+            record("backup", e)
+        except Exception:
+            pass
 
 
 def watchdog_check():
@@ -105,6 +118,11 @@ def weekly_learning():
     except Exception as e:
         conn.close()
         print(f"· Aprendizaje IA falló: {e}")
+        try:
+            from errores import record
+            record("weekly_learning", e)
+        except Exception:
+            pass
         return
     if not hallazgos:
         conn.close()

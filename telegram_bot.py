@@ -457,6 +457,21 @@ async def watchdog_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· watchdog_job falló: {e}")
 
 
+async def salud_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Cada 6 h revisa la salud del sistema. Solo avisa si algo crítico
+    falla (anti-ruido: no repite el mismo aviso en 12 h)."""
+    try:
+        from salud import revisar_y_avisar
+        await asyncio.to_thread(revisar_y_avisar)
+    except Exception as e:
+        print(f"· salud_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "salud_job", e)
+        except Exception:
+            pass
+
+
 async def performance_review_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Cada 24h: el rendimiento MEDIDO decide quién conserva la ⭐.
     Degrada a las billeteras cuyas señales resultaron perdedoras."""
@@ -488,6 +503,11 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(track_outcomes)
     except Exception as e:
         print(f"· track_outcomes falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "track_outcomes", e)
+        except Exception:
+            pass
 
 
 async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -498,6 +518,11 @@ async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(run_maintenance)
     except Exception as e:
         print(f"· predictions_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "predictions_job", e)
+        except Exception:
+            pass
 
 
 async def hypotheses_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -507,6 +532,11 @@ async def hypotheses_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(generate_hypotheses)
     except Exception as e:
         print(f"· hypotheses_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "hypotheses_job", e)
+        except Exception:
+            pass
 
 
 async def paper_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -516,6 +546,11 @@ async def paper_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(update_open_trades)
     except Exception as e:
         print(f"· paper_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "paper_job", e)
+        except Exception:
+            pass
 
 
 def _resumen_diario_text() -> str:
@@ -578,6 +613,11 @@ async def sync_webhook_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"📡 Re-sync webhook: {msg}")
     except Exception as e:
         print(f"· sync_webhook_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "sync_webhook_job", e)
+        except Exception:
+            pass
 
 
 # ─────────────────────────── SEGURIDAD ────────────────────────────────
@@ -1038,6 +1078,26 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─────────────────────────── ARRANQUE ─────────────────────────────────
 
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manejador global: registra cualquier excepción no capturada de un
+    comando. Antes se perdía en silencio y el usuario solo veía que el bot
+    no respondía."""
+    err = getattr(ctx, "error", None)
+    print(f"· Error no capturado: {err}")
+    try:
+        from errores import record
+        await asyncio.to_thread(record, "telegram", err, "handler")
+    except Exception:
+        pass
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ Algo falló al procesar eso. Ya quedó registrado; "
+                "míralo con /errores.")
+    except Exception:
+        pass
+
+
 async def _post_init(app: Application):
     """Registra el menú de comandos que se ve al pulsar '/' en Telegram."""
     try:
@@ -1053,6 +1113,8 @@ async def _post_init(app: Application):
             BotCommand("preguntar", "Preguntar a la IA sobre tu base"),
             BotCommand("rendimiento", "Win rate de las señales"),
             BotCommand("estrellasperf", "Rendimiento medido de cada ⭐"),
+            BotCommand("salud", "¿Está todo funcionando bien?"),
+            BotCommand("errores", "Errores registrados (24 h)"),
             BotCommand("backtest", "Simular copiar las señales"),
             BotCommand("paper", "Paper trading simulado"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
@@ -1076,6 +1138,30 @@ async def _post_init(app: Application):
         ])
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
+
+
+@solo_admin
+async def cmd_salud(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Autodiagnóstico. '/salud ia' añade la lectura interpretada."""
+    con_ia = bool(ctx.args and ctx.args[0].lower() in ("ia", "ai"))
+    await update.message.chat.send_action("typing")
+    from salud import salud_text
+    txt = await asyncio.to_thread(salud_text, None, con_ia)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_errores(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Errores registrados en las últimas 24 h (o las que se indiquen)."""
+    horas = 24
+    if ctx.args:
+        try:
+            horas = max(1, min(168, int(ctx.args[0])))
+        except ValueError:
+            pass
+    from errores import errores_text
+    txt = await asyncio.to_thread(errores_text, horas)
+    await _send_md(update.message.chat, txt)
 
 
 @solo_admin
@@ -1343,6 +1429,7 @@ def main():
         print("⚠️  TELEGRAM_ADMIN_ID no configurado: el bot responderá a "
               "CUALQUIERA. Configúralo antes de usarlo en serio.")
     app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("ciclo", cmd_ciclo))
@@ -1360,6 +1447,8 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
     app.add_handler(CommandHandler("estrellasperf", cmd_wallets_perf))
+    app.add_handler(CommandHandler("salud", cmd_salud))
+    app.add_handler(CommandHandler("errores", cmd_errores))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
@@ -1434,6 +1523,9 @@ def main():
     # Cierre del ciclo: el rendimiento medido degrada ⭐ cada 24 h
     app.job_queue.run_repeating(performance_review_job, interval=86400,
                                 first=3600, name="performance_review")
+    # Autodiagnóstico cada 6 h (solo avisa ante problemas críticos)
+    app.job_queue.run_repeating(salud_job, interval=6 * 3600, first=900,
+                                name="salud")
     # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
     app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
                                 name="sync_webhook")

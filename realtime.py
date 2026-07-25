@@ -87,6 +87,11 @@ def tg_send(text: str, buttons: list | None = None):
                       f"{r.text[:200]}")
     except requests.RequestException as e:
         print(f"· No se pudo enviar alerta TG: {e}")
+        try:
+            from errores import record
+            record("telegram_send", e)
+        except Exception:
+            pass
 
 
 def tg_send_photo(photo_bytes: bytes, caption: str = ""):
