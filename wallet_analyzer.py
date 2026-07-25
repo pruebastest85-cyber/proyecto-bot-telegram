@@ -23,9 +23,27 @@ from db import (get_conn, pending_tokens, mark_analyzed,
 LAMPORTS = 1_000_000_000  # 1 SOL
 
 
+_AVISO_FRENO = [0.0]
+
+
 def fetch_parsed_txs(address: str, before: str | None = None,
                      limit: int = 100) -> list[dict]:
-    """Descarga transacciones parseadas de una dirección desde Helius."""
+    """Descarga transacciones parseadas de una dirección desde Helius.
+
+    Antes de gastar, comprueba el presupuesto de créditos del mes: cada
+    llamada cuesta 100 créditos y quedarse sin cuota a mitad de mes dejaría
+    al bot ciego. El freno permite tener topes generosos sin riesgo.
+    """
+    try:
+        from helius_budget import puede_llamar
+        if not puede_llamar():
+            if time.time() - _AVISO_FRENO[0] > 3600:
+                _AVISO_FRENO[0] = time.time()
+                print("  ⛔ Presupuesto de Helius casi agotado: se pausan "
+                      "las descargas de historial hasta el próximo ciclo")
+            return []
+    except Exception:
+        pass
     url = config.HELIUS_PARSED_TX.format(address=address)
     params = {"api-key": config.HELIUS_API_KEY, "limit": limit}
     if before:

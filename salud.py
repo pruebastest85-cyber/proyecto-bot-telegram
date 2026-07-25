@@ -173,6 +173,32 @@ def _c_apis():
     return _chk("Claves API", OK, "todas presentes")
 
 
+def _c_helius(conn):
+    """¿Se está gastando la cuota de Helius a buen ritmo o de más?"""
+    try:
+        from helius_budget import (creditos_usados, pct_usado, CUOTA_MENSUAL,
+                                   FRENO_PCT, _dia_ciclo)
+        usados = creditos_usados(conn)
+        pct = pct_usado(conn)
+        dia = max(1, _dia_ciclo())
+        proy = usados / dia * 30
+        proy_pct = 100.0 * proy / CUOTA_MENSUAL if CUOTA_MENSUAL else 0
+        det = (f"{usados:,} créditos ({pct:.0f}%) · proyección "
+               f"{proy_pct:.0f}% a fin de mes")
+        if pct >= FRENO_PCT:
+            return _chk("Créditos Helius", CRIT, det,
+                        "descargas pausadas para no quedarte sin cuota")
+        if proy_pct > 90:
+            return _chk("Créditos Helius", WARN, det,
+                        "vas camino de agotar la cuota; baja los topes")
+        if proy_pct < 25:
+            return _chk("Créditos Helius", OK,
+                        det + " — sobra cuota, se puede analizar más")
+        return _chk("Créditos Helius", OK, det)
+    except Exception as e:
+        return _chk("Créditos Helius", WARN, f"no se pudo comprobar ({e})")
+
+
 def _c_errores():
     """¿Hubo errores registrados?"""
     try:
@@ -215,7 +241,7 @@ def diagnostico() -> list[dict]:
     try:
         conn = get_conn()
         checks += [_c_senales(conn), _c_medicion(conn), _c_embudo(conn),
-                   _c_presupuesto(conn), _c_backup(conn)]
+                   _c_presupuesto(conn), _c_helius(conn), _c_backup(conn)]
     except Exception as e:
         checks.append(_chk("Base de datos", CRIT, f"no accesible: {e}",
                            "revisa el volumen/DATABASE_URL en Railway"))
