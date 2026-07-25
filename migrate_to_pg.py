@@ -24,7 +24,12 @@ import db
 
 TABLES = ["winning_tokens", "wallets", "appearances", "signals",
           "settings", "chat_history", "positions", "paper_trades",
-          "predictions"]
+          "predictions",
+          # Tablas creadas de forma perezosa por sus módulos. Se migran
+          # igual: 'trades' es el historial propio (lo más valioso) y
+          # 'submitted_tokens' guarda tu feedback de qué tokens valen.
+          "trades", "submitted_tokens", "wallet_identity",
+          "wallet_funding", "errors"]
 SERIAL_TABLES = [("appearances", "id"), ("chat_history", "id"),
                  ("paper_trades", "id"), ("predictions", "id")]
 
@@ -61,7 +66,38 @@ def _run():
     pg.autocommit = True
     cur = pg.cursor()
     cur.execute(db.PG_SCHEMA)
-    print(f"{TAG} esquema Postgres listo.")
+    # Las tablas perezosas no están en PG_SCHEMA: se crean aquí para que
+    # la copia no se salte el historial propio ni el aprendizaje.
+    for ddl in (
+        """CREATE TABLE IF NOT EXISTS trades (
+             wallet TEXT NOT NULL, signature TEXT NOT NULL, mint TEXT,
+             side TEXT, sol DOUBLE PRECISION, tokens DOUBLE PRECISION,
+             ts BIGINT, PRIMARY KEY (wallet, signature))""",
+        """CREATE INDEX IF NOT EXISTS idx_trades_wallet_ts
+             ON trades (wallet, ts)""",
+        """CREATE TABLE IF NOT EXISTS submitted_tokens (
+             mint TEXT PRIMARY KEY, symbol TEXT, mc DOUBLE PRECISION,
+             liq DOUBLE PRECISION, age_days DOUBLE PRECISION,
+             top10_pct DOUBLE PRECISION, lp_locked_pct DOUBLE PRECISION,
+             mint_auth INTEGER, freeze_auth INTEGER, risk_score INTEGER,
+             smart_count INTEGER, elite_count INTEGER,
+             chg24 DOUBLE PRECISION, feedback INTEGER,
+             ts DOUBLE PRECISION)""",
+        """CREATE TABLE IF NOT EXISTS wallet_identity (
+             address TEXT PRIMARY KEY, tipo TEXT, nombre TEXT,
+             categoria TEXT, etiquetas TEXT, ts DOUBLE PRECISION)""",
+        """CREATE TABLE IF NOT EXISTS wallet_funding (
+             address TEXT PRIMARY KEY, funder TEXT, funder_nombre TEXT,
+             funder_tipo TEXT, monto DOUBLE PRECISION,
+             ts_fondeo DOUBLE PRECISION, consultado DOUBLE PRECISION)""",
+        """CREATE TABLE IF NOT EXISTS errors (
+             ts DOUBLE PRECISION, modulo TEXT, tipo TEXT, mensaje TEXT)""",
+    ):
+        try:
+            cur.execute(ddl)
+        except Exception as e:
+            print(f"{TAG} DDL perezoso omitido: {e}")
+    print(f"{TAG} esquema Postgres listo (incluidas tablas nuevas).")
 
     if not exists or size == 0:
         print(f"{TAG} No hay SQLite con datos en {DB_PATH}. "

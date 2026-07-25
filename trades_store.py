@@ -125,22 +125,29 @@ def _podar_global(conn) -> int:
             return 0
         sobran = total - MAX_TRADES_TOTAL
         # Primero: lo más viejo de billeteras sin ⭐ ni buen grado
-        conn.execute(
-            """DELETE FROM trades WHERE rowid IN (
-                 SELECT t.rowid FROM trades t
-                 LEFT JOIN wallets w ON w.address = t.wallet
-                 WHERE COALESCE(w.is_tracked,0)=0
-                   AND COALESCE(w.grade,'') NOT IN ('Elite','Seguimiento')
-                 ORDER BY t.ts ASC LIMIT ?)""", (sobran,))
+        # Se identifican por (wallet, signature) y no por rowid: rowid es
+        # exclusivo de SQLite y rompería en Postgres.
+        viejas = conn.execute(
+            """SELECT t.wallet, t.signature FROM trades t
+               LEFT JOIN wallets w ON w.address = t.wallet
+               WHERE COALESCE(w.is_tracked,0)=0
+                 AND COALESCE(w.grade,'') NOT IN ('Elite','Seguimiento')
+               ORDER BY t.ts ASC LIMIT ?""", (sobran,)).fetchall()
+        for v in viejas:
+            conn.execute("DELETE FROM trades WHERE wallet=? AND signature=?",
+                         (v["wallet"], v["signature"]))
         conn.commit()
         restante = conn.execute(
             "SELECT COUNT(*) c FROM trades").fetchone()["c"]
         if restante > MAX_TRADES_TOTAL:
             # Aún sobra: recortar lo más antiguo, sea de quien sea
-            conn.execute(
-                """DELETE FROM trades WHERE rowid IN (
-                     SELECT rowid FROM trades ORDER BY ts ASC LIMIT ?)""",
-                (restante - MAX_TRADES_TOTAL,))
+            resto = conn.execute(
+                "SELECT wallet, signature FROM trades ORDER BY ts ASC "
+                "LIMIT ?", (restante - MAX_TRADES_TOTAL,)).fetchall()
+            for v in resto:
+                conn.execute(
+                    "DELETE FROM trades WHERE wallet=? AND signature=?",
+                    (v["wallet"], v["signature"]))
             conn.commit()
         return total - conn.execute(
             "SELECT COUNT(*) c FROM trades").fetchone()["c"]
