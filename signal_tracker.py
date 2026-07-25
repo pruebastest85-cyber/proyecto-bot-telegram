@@ -87,9 +87,14 @@ def _alert_milestone(conn, s, pct: float, price: float):
     except Exception:
         return
 
-    w = conn.execute("SELECT alias FROM wallets WHERE address=?",
-                     (s["wallet"],)).fetchone()
-    alias = (w["alias"] if w and w["alias"] else f"{s['wallet'][:8]}…")
+    # Nombre SIEMPRE legible (los alias son deterministas) + posición en /top
+    try:
+        from wallet_ident import identidad
+        _ident = identidad(conn, s["wallet"])
+    except Exception:
+        _ident = {"nombre": f"{s['wallet'][:8]}…", "pos": None}
+    alias = _ident["nombre"]
+    _pos = _ident.get("pos")
     hace = (time.time() - s["ts"]) / 3600
     from card_image import _fmt_price, _ago, _fmt_mc
     simbolo = s["symbol"] or s["mint"][:8]
@@ -107,7 +112,9 @@ def _alert_milestone(conn, s, pct: float, price: float):
     caption = (
         f"🚀 *{simbolo}* hizo *x{mult}*  (+{subida:.0f}%)\n"
         f"{linea_precio}\n"
-        f"👤 Primer llamado: *{alias}*  ·  {_ago(hace)}\n"
+        f"👤 Primer llamado: *{alias}*"
+        + (f"  ·  🏆 #{_pos} del top" if _pos else "")
+        + f"  ·  {_ago(hace)}\n"
         f"`{s['mint']}`\n"
         f"📊 [DexScreener](https://dexscreener.com/solana/{s['mint']})")
 
@@ -117,7 +124,8 @@ def _alert_milestone(conn, s, pct: float, price: float):
         from card_image import make_multiple_card
         from realtime import tg_send_photo
         img = make_multiple_card(mult, simbolo, subida, base, price,
-                                 alias, hace, mc_base=mc0, mc_now=mc1)
+                                 alias, hace, mc_base=mc0, mc_now=mc1,
+                                 pos_top=_pos)
         tg_send_photo(img, caption)
         enviado = True
     except Exception as e:

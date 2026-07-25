@@ -651,7 +651,15 @@ def process_transactions(txs: list[dict]):
             links.append("📱 " + "\n📱 ".join(t["socials"]))
         redes = ("\n" + "\n".join(links) + "\n") if links else ""
 
-        alias = _wget(w, "alias") or f"{trade['wallet'][:8]}…"
+        # Nombre SIEMPRE legible + posición en /top (mismo criterio que la
+        # tarjeta x2: la dirección cruda no le dice nada a nadie).
+        try:
+            from wallet_ident import identidad
+            _id = identidad(conn, trade["wallet"])
+            alias, _postop = _id["nombre"], _id.get("pos")
+        except Exception:
+            alias, _postop = (_wget(w, "alias")
+                              or f"{trade['wallet'][:8]}…"), None
         clase = _wget(w, "ai_class") or "?"
         su = _sol_price()   # SOL/USD para mostrar importes en dólares
         pnl30, pnltot = _wget(w, "pnl_30d"), _wget(w, "pnl_total")
@@ -702,7 +710,9 @@ def process_transactions(txs: list[dict]):
             f"{div}\n"
             f"💎 *{t['symbol']}*\n`{trade['mint']}`\n\n"
             f"🎯 Señal  {bar}  *{score_sig}/100*\n\n"
-            f"👤 *{alias}*  ·  _{clase}_\n"
+            f"👤 *{alias}*"
+            + (f"  ·  🏆 #{_postop} del top" if _postop else "")
+            + f"  ·  _{clase}_\n"
             f"{linea_sol}{pos_txt}"
             f"{pnl_txt}{track_txt}{pat_txt}{salida_txt}\n"
             f"{div}\n"

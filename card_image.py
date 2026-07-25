@@ -101,7 +101,8 @@ def _rtext(draw, right, y, text, font, fill, shadow=True):
 
 def make_multiple_card(mult: int, symbol: str, pct: float, base: float,
                        price: float, alias: str, hace_h: float,
-                       pool=None, mc_base=None, mc_now=None) -> bytes:
+                       pool=None, mc_base=None, mc_now=None,
+                       pos_top=None) -> bytes:
     """Genera la tarjeta y devuelve los bytes JPEG."""
     candidates = [n for n in (pool or ALL_CARDS) if os.path.exists(_card_path(n))]
     if not candidates:
@@ -146,7 +147,10 @@ def make_multiple_card(mult: int, symbol: str, pct: float, base: float,
     else:
         _linea = f"${_fmt_price(base)}  →  ${_fmt_price(price)}"
     _rtext(d, right, y, _linea, f_price, WHITE); y += 46
-    _rtext(d, right, y, f"{alias} · {_ago(hace_h)}", f_small, MUTED)
+    _pie = f"{alias} · {_ago(hace_h)}"
+    if pos_top:
+        _pie = f"{alias} · #{pos_top} del top · {_ago(hace_h)}"
+    _rtext(d, right, y, _pie, f_small, MUTED)
 
     out = io.BytesIO()
     img.save(out, "JPEG", quality=88)
