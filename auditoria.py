@@ -118,10 +118,13 @@ def clase2_params():
                 continue
             if any(isinstance(e, ast.Starred) for e in p.elts):
                 continue
+            # Algunas llamadas van directas a psycopg2 y usan %s en vez de ?
+            n_ph = (q.value.count("%s") if "%s" in q.value
+                    else q.value.count("?"))
             n += 1
-            if q.value.count("?") != len(p.elts):
+            if n_ph != len(p.elts):
                 fallos.append(
-                    f"{fn}:{node.lineno} {q.value.count('?')} placeholders "
+                    f"{fn}:{node.lineno} {n_ph} placeholders "
                     f"vs {len(p.elts)} parámetros")
     return n
 

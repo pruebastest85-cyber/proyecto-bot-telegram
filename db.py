@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS appearances (
     est_pnl_sol     REAL,
     reason          TEXT,
     delay_s         INTEGER,
+    price_at_buy    REAL,
+    mc_at_buy       REAL,
+    entry_multiple  REAL,
     UNIQUE(wallet, mint),
     FOREIGN KEY(wallet) REFERENCES wallets(address),
     FOREIGN KEY(mint) REFERENCES winning_tokens(mint)
@@ -193,7 +196,11 @@ CREATE TABLE IF NOT EXISTS wallets (
     pnl_unreal       DOUBLE PRECISION,
     pnl_net          DOUBLE PRECISION,
     pnl_updated      TEXT,
-    wallet_score     DOUBLE PRECISION
+    wallet_score     DOUBLE PRECISION,
+    grade            TEXT,
+    consistency      DOUBLE PRECISION,
+    hold_median_min  DOUBLE PRECISION,
+    roi_median       DOUBLE PRECISION
 );
 
 CREATE TABLE IF NOT EXISTS appearances (
@@ -206,6 +213,9 @@ CREATE TABLE IF NOT EXISTS appearances (
     est_pnl_sol     DOUBLE PRECISION,
     reason          TEXT,
     delay_s         INTEGER,
+    price_at_buy    DOUBLE PRECISION,
+    mc_at_buy       DOUBLE PRECISION,
+    entry_multiple  DOUBLE PRECISION,
     UNIQUE(wallet, mint)
 );
 

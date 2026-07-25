@@ -97,6 +97,20 @@ def _run():
             cur.execute(ddl)
         except Exception as e:
             print(f"{TAG} DDL perezoso omitido: {e}")
+    # CRÍTICO: PG_SCHEMA no incluye las columnas añadidas después (grade,
+    # consistency, hold_median_min, roi_median, price_at_buy, mc_at_buy,
+    # entry_multiple…). Sin ellas, el INSERT de `wallets` y `appearances`
+    # falla entero y NO se migra nada de esas tablas. db.get_conn() aplica
+    # todas esas migraciones, así que se llama antes de copiar.
+    try:
+        _c = db.get_conn()
+        try:
+            pass
+        finally:
+            _c.close()
+        print(f"{TAG} columnas añadidas al esquema Postgres.")
+    except Exception as e:
+        print(f"{TAG} aviso: no se pudieron aplicar migraciones de columnas: {e}")
     print(f"{TAG} esquema Postgres listo (incluidas tablas nuevas).")
 
     if not exists or size == 0:
@@ -118,6 +132,24 @@ def _run():
         if not rows:
             continue
         cols = list(rows[0].keys())
+        # Quedarse solo con las columnas que existen REALMENTE en Postgres:
+        # así una columna nueva nunca vuelve a tumbar la migración entera.
+        try:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s", (t,))
+            pg_cols = {r[0] for r in cur.fetchall()}
+            if pg_cols:
+                omitidas = [c for c in cols if c not in pg_cols]
+                if omitidas:
+                    print(f"{TAG} tabla {t}: columnas omitidas (no existen "
+                          f"en Postgres): {omitidas}")
+                cols = [c for c in cols if c in pg_cols]
+        except Exception as e:
+            print(f"{TAG} tabla {t}: no se pudo comprobar columnas ({e})")
+        if not cols:
+            print(f"{TAG} tabla {t}: sin columnas compatibles, se omite.")
+            continue
         collist = ", ".join(cols)
         ph = ", ".join(["%s"] * len(cols))
         q = f"INSERT INTO {t} ({collist}) VALUES ({ph}) ON CONFLICT DO NOTHING"
