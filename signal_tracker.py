@@ -33,6 +33,40 @@ WATCH_HOURS = 48   # cuánto tiempo vigilamos el precio tras la señal
 MIN_MULTIPLE = 2   # empezar a avisar desde el doble (x2) en adelante
 
 
+def _price_mc(mint: str):
+    """(precio_usd, market_cap) actuales según DexScreener, del par de mayor
+    liquidez. Se devuelven JUNTOS porque el MC no se puede deducir del
+    precio: si el suministro cambia (típico al migrar un token de pump.fun),
+    extrapolar el MC da cifras falsas."""
+    try:
+        r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
+                         timeout=15)
+        _api_rec("dexscreener")
+        pairs = (r.json() or {}).get("pairs") or []
+        mejor, mejor_liq = None, -1.0
+        for p in pairs:
+            try:
+                px = float(p.get("priceUsd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0:
+                continue
+            liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
+            if liq > mejor_liq:
+                mejor_liq, mejor = liq, p
+        if not mejor:
+            return (None, None)
+        px = float(mejor.get("priceUsd") or 0) or None
+        mc = mejor.get("marketCap") or mejor.get("fdv")
+        try:
+            mc = float(mc) if mc else None
+        except (TypeError, ValueError):
+            mc = None
+        return (px, mc)
+    except (requests.RequestException, ValueError, TypeError):
+        return (None, None)
+
+
 def _price(mint: str) -> float | None:
     """Precio actual en USD según DexScreener."""
     try:
@@ -59,7 +93,8 @@ def _price(mint: str) -> float | None:
     return None
 
 
-def _alert_milestone(conn, s, pct: float, price: float):
+def _alert_milestone(conn, s, pct: float, price: float,
+                     mc_actual: float | None = None):
     """Avisa cuando el token señalado alcanza un NUEVO múltiplo (x2, x3, x4…).
 
     Se deduplica POR TOKEN: se guarda en settings el mayor múltiplo ya
@@ -99,13 +134,27 @@ def _alert_milestone(conn, s, pct: float, price: float):
     from card_image import _fmt_price, _ago, _fmt_mc
     simbolo = s["symbol"] or s["mint"][:8]
     subida = pct if pct > 0 else (mult - 1) * 100
-    # Market Cap: al llamar (guardado) y ahora (escala con la subida)
+    # Market Cap: el de la llamada (guardado) y el REAL de ahora.
+    # ANTES se extrapolaba (mc0 × subida del precio) y eso daba cifras
+    # falsas: si el suministro cambia —lo normal al migrar un token de
+    # pump.fun— el MC NO escala con el precio. Se llegó a anunciar
+    # "MC $51,5M" en un token que nunca estuvo cerca de esa cifra.
     try:
         mc0 = s["mc"]
     except Exception:
         mc0 = None
     ratio = (price / base) if base else mult
-    mc1 = (mc0 * ratio) if mc0 else None
+    mc1 = mc_actual                      # dato real, no extrapolado
+
+    # Verificación cruzada: si el múltiplo por precio y el del MC no se
+    # parecen, uno de los dos datos no es fiable → no se alerta. Mejor
+    # perder un aviso que mandar un número inventado.
+    if mc0 and mc1 and mc0 > 0:
+        mult_mc = mc1 / mc0
+        if ratio > 0 and (mult_mc / ratio > 3 or ratio / mult_mc > 3):
+            print(f"  ⚠️ {s['mint'][:8]}… descartada: precio dice x{ratio:.0f} "
+                  f"pero el MC dice x{mult_mc:.1f} (dato poco fiable)")
+            return
     linea_precio = (f"💰 MC {_fmt_mc(mc0)}  →  *{_fmt_mc(mc1)}*"
                     if mc0 else
                     f"💵 ${_fmt_price(base)}  →  *${_fmt_price(price)}*")
@@ -243,13 +292,16 @@ def track_outcomes() -> int:
              AND ts >= ? ORDER BY ts DESC LIMIT 30""",
         (int(now - WATCH_HOURS * HOUR),)).fetchall()
 
-    prices: dict = {}          # cache: 1 consulta de precio por mint
+    prices: dict = {}          # cache: 1 consulta por mint → (precio, mc)
 
-    def _px(mint):
+    def _px_mc(mint):
         if mint not in prices:
-            prices[mint] = _price(mint)
+            prices[mint] = _price_mc(mint)
             time.sleep(config.DEXSCREENER_DELAY)
         return prices[mint]
+
+    def _px(mint):
+        return _px_mc(mint)[0]
 
     updated = 0
     for s in pend:
@@ -271,11 +323,11 @@ def track_outcomes() -> int:
             updated += 1
     for s in recent:
         base = s["price_usd"]
-        p = _px(s["mint"])
+        p, mc_now = _px_mc(s["mint"])
         if not p:
             continue
         pct = (p / base - 1) * 100
-        _alert_milestone(conn, s, pct, p)
+        _alert_milestone(conn, s, pct, p, mc_actual=mc_now)
     conn.commit()
     _check_streaks(conn)
     _auto_threshold(conn)
