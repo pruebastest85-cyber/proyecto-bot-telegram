@@ -46,27 +46,40 @@ def fetch_parsed_txs(address: str, before: str | None = None,
         return []
 
 
-def fetch_earliest_txs(mint: str, max_pages: int | None = None) -> list[dict]:
+def fetch_earliest_txs(mint: str, max_pages: int | None = None,
+                       con_estado: bool = False):
     """
-    Pagina hacia atrás hasta las transacciones más antiguas del mint
-    y devuelve las primeras EARLY_BUYER_WINDOW en orden cronológico.
+    Pagina hacia atrás hasta las transacciones más antiguas del mint y
+    devuelve las primeras EARLY_BUYER_WINDOW en orden cronológico.
+
+    IMPORTANTE: si el token tiene más transacciones de las que caben en
+    max_pages, NUNCA se llega a su inicio real. Antes eso pasaba en
+    silencio y las txs más antiguas del lote se trataban como si fueran
+    las primeras del token (puestos de compra inventados). Ahora se
+    devuelve también si el historial está COMPLETO.
+
+    con_estado=True → (txs, completo). False → solo txs (compatibilidad).
     """
     if max_pages is None:
         max_pages = getattr(config, "HISTORY_MAX_PAGES", 5)
     pages, before = [], None
+    completo = False
     for _ in range(max_pages):
         batch = fetch_parsed_txs(mint, before=before)
         if not batch:
+            completo = True        # no hay más: se agotó la historia
             break
         pages.append(batch)
-        if len(batch) < 100:   # llegamos al inicio de la historia del token
+        if len(batch) < 100:       # página incompleta = inicio del token
+            completo = True
             break
         before = batch[-1].get("signature")
     if not pages:
-        return []
+        return ([], False) if con_estado else []
     all_txs = [tx for page in pages for tx in page]
     all_txs.reverse()  # más antigua primero
-    return all_txs[: config.EARLY_BUYER_WINDOW]
+    txs = all_txs[: config.EARLY_BUYER_WINDOW]
+    return (txs, completo) if con_estado else txs
 
 
 def extract_buys(txs: list[dict], mint: str) -> list[dict]:
@@ -83,10 +96,14 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
             continue
 
         got_token = False
+        tokens_in = 0.0
         for t in (tx.get("tokenTransfers") or []):
             if t.get("mint") == mint and t.get("toUserAccount") == buyer:
                 got_token = True
-                break
+                try:
+                    tokens_in += float(t.get("tokenAmount") or 0)
+                except (TypeError, ValueError):
+                    pass
         if not got_token:
             continue
 
@@ -106,33 +123,68 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
                     break
 
         if sol_out > 0:
+            # Precio de ENTRADA en SOL por token. Con el precio actual da el
+            # múltiplo desde su entrada: mide "compró antes de que explotara"
+            # sin depender del puesto de compra.
+            precio_entrada = (sol_out / tokens_in) if tokens_in > 0 else None
             buys.append({
                 "wallet": buyer,
                 "sol": sol_out,
+                "tokens": tokens_in,
+                "precio_entrada": precio_entrada,
                 "time": tx.get("timestamp"),
                 "signature": tx.get("signature", ""),
             })
     return buys
 
 
+def _precio_actual(mint):
+    """Precio actual en SOL por token (para medir el crecimiento desde la
+    entrada). Devuelve (precio_sol, mc_usd) o (None, None)."""
+    try:
+        from token_check import analyze_token as _tc
+        t = _tc(mint)
+        precio_usd, mc = t.get("price"), t.get("mc")
+        if not precio_usd:
+            return (None, None)
+        from realtime import _sol_price
+        sol_usd = _sol_price() or 0
+        if not sol_usd:
+            return (None, mc)
+        return (float(precio_usd) / float(sol_usd), mc)
+    except Exception as e:
+        print(f"  · No se pudo obtener el precio actual: {e}")
+        return (None, None)
+
+
 def analyze_token(conn, token) -> int:
-    """Analiza un token ganador y registra sus compradores tempranos."""
+    """Analiza un token ganador y registra a los compradores que entraron
+    ANTES de que explotara (medido por el crecimiento desde su entrada)."""
     mint, symbol = token["mint"], token["symbol"] or token["mint"][:8]
     print(f"\n▸ Analizando {symbol} ({mint[:12]}…)")
 
-    txs = fetch_earliest_txs(mint)
+    precio_ahora, mc_ahora = _precio_actual(mint)
+    min_mult = float(getattr(config, "MIN_ENTRY_MULTIPLE", 3.0))
+
+    txs, historial_completo = fetch_earliest_txs(mint, con_estado=True)
+    if not historial_completo:
+        print("  · Historial incompleto: no se alcanzó el inicio del token; "
+              "los puestos de compra NO son fiables y no se registrarán")
     if not txs:
         print("  · Sin transacciones recuperadas")
         mark_analyzed(conn, mint)
         return 0
 
-    t0 = txs[0].get("timestamp") or 0    # 1ª tx del token (para el delay)
+    # Solo es la 1ª tx REAL del token si se alcanzó su inicio; si no, el
+    # delay no significa nada y se deja vacío.
+    t0 = (txs[0].get("timestamp") or 0) if historial_completo else 0
     buys = extract_buys(txs, mint)
     print(f"  · {len(txs)} txs tempranas → {len(buys)} compras detectadas")
 
     end_rank = int(getattr(config, "BUYER_END_RANK", 600))
     min_obs = float(getattr(config, "MIN_OBS_BUY_SOL", 0.3))
     registered = 0
+    descartados_tarde = 0
     for rank, buy in enumerate(buys):
         if rank + 1 > end_rank:
             break              # fuera de la ventana de observación
@@ -141,19 +193,45 @@ def analyze_token(conn, token) -> int:
         # perfilar (BUYER_START_RANK, MIN_BUY_DELAY_SEC, MIN_BUY_SOL).
         if not (min_obs <= buy["sol"] <= config.MAX_BUY_SOL):
             continue
+
+        # ── Crecimiento desde su entrada ──
+        # Es el filtro anti-basura: si el token apenas subió desde que esta
+        # billetera compró, NO anticipó nada y no interesa registrarla.
+        pe = buy.get("precio_entrada")
+        mult_entrada = mc_entrada = None
+        if pe and pe > 0 and precio_ahora:
+            mult_entrada = precio_ahora / pe
+            if mc_ahora and mult_entrada > 0:
+                mc_entrada = float(mc_ahora) / mult_entrada
+            if mult_entrada < min_mult:
+                descartados_tarde += 1
+                continue          # llegó tarde: no aporta señal
         ts = buy["time"]
         delay = int(ts - t0) if (ts and t0 and ts >= t0) else None
+        # Sin historial completo el puesto sería inventado: mejor sin dato
+        # que con un dato falso.
+        rank_real = (rank + 1) if historial_completo else None
         buy_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else ""
         sig = (buy["signature"] or "")[:16]
-        reason = (f"Compró {buy['sol']:.2f} SOL de {symbol} como comprador "
-                  f"#{rank + 1} antes de subida de "
-                  f"+{token['price_change_24h']:.0f}% en 24h (tx {sig}…)")
+        if mult_entrada:
+            _mc = (f" (MC ~${mc_entrada:,.0f})" if mc_entrada else "")
+            reason = (f"Compró {buy['sol']:.2f} SOL de {symbol}{_mc} y el "
+                      f"token subió x{mult_entrada:.1f} desde su entrada "
+                      f"(tx {sig}…)")
+        else:
+            reason = (f"Compró {buy['sol']:.2f} SOL de {symbol} como comprador "
+                      f"#{rank + 1} antes de subida de "
+                      f"+{token['price_change_24h']:.0f}% en 24h (tx {sig}…)")
         upsert_wallet_appearance(conn, buy["wallet"], mint, buy["sol"],
-                                 buy_time, rank + 1, reason, delay)
+                                 buy_time, rank_real, reason, delay,
+                                 price_at_buy=pe, mc_at_buy=mc_entrada,
+                                 entry_multiple=mult_entrada)
         registered += 1
 
     mark_analyzed(conn, mint)
-    print(f"  ✓ {registered} billeteras registradas con evidencia")
+    print(f"  ✓ {registered} billeteras registradas"
+          + (f" · {descartados_tarde} descartadas por entrar tarde "
+             f"(<x{min_mult:g} desde su compra)" if descartados_tarde else ""))
     return registered
 
 

@@ -430,7 +430,10 @@ def get_conn():
                 ("wallets", "consistency", "DOUBLE PRECISION"),
                 ("wallets", "hold_median_min", "DOUBLE PRECISION"),
                 ("wallets", "roi_median", "DOUBLE PRECISION"),
-                ("appearances", "delay_s", "INTEGER")]:
+                ("appearances", "delay_s", "INTEGER"),
+                ("appearances", "price_at_buy", "DOUBLE PRECISION"),
+                ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
+                ("appearances", "entry_multiple", "DOUBLE PRECISION")]:
             try:
                 pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                            f"{col} {typ}")
@@ -472,7 +475,9 @@ def get_conn():
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
-    for col, typ in [("delay_s", "INTEGER")]:
+    for col, typ in [("delay_s", "INTEGER"),
+                     ("price_at_buy", "REAL"), ("mc_at_buy", "REAL"),
+                     ("entry_multiple", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE appearances ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -678,7 +683,9 @@ def mark_analyzed(conn, mint: str):
 
 def upsert_wallet_appearance(conn, wallet: str, mint: str, buy_sol: float,
                              buy_time: str, buy_rank: int, reason: str,
-                             delay_s: int | None = None):
+                             delay_s: int | None = None,
+                             price_at_buy=None, mc_at_buy=None,
+                             entry_multiple=None):
     conn.execute(
         """INSERT OR IGNORE INTO wallets (address, first_seen, last_updated)
            VALUES (?,?,?)""",
@@ -686,9 +693,11 @@ def upsert_wallet_appearance(conn, wallet: str, mint: str, buy_sol: float,
     )
     cur = conn.execute(
         """INSERT OR IGNORE INTO appearances
-           (wallet, mint, buy_sol, buy_time, buy_rank, reason, delay_s)
-           VALUES (?,?,?,?,?,?,?)""",
-        (wallet, mint, buy_sol, buy_time, buy_rank, reason, delay_s),
+           (wallet, mint, buy_sol, buy_time, buy_rank, reason, delay_s,
+            price_at_buy, mc_at_buy, entry_multiple)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (wallet, mint, buy_sol, buy_time, buy_rank, reason, delay_s,
+         price_at_buy, mc_at_buy, entry_multiple),
     )
     if cur.rowcount:  # solo si la aparición es nueva
         conn.execute(
@@ -719,7 +728,8 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     import config as _cfg
     wc = float(getattr(_cfg, "W_CAPITAL", 40)) / 100.0
     wr = float(getattr(_cfg, "W_REPEAT", 45)) / 100.0
-    wk = float(getattr(_cfg, "W_RANK", 15)) / 100.0
+    wk = float(getattr(_cfg, "W_RANK", 0)) / 100.0
+    we = float(getattr(_cfg, "W_ENTRY", 15)) / 100.0
     conn.execute(
         f"""UPDATE wallets SET score =
              {wr} * (CASE WHEN winning_tokens_count * 25.0 > 100.0
@@ -728,6 +738,10 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
                                      ELSE AVG(buy_sol) * 10.0 END
                          FROM appearances WHERE wallet = address), 0)
              + {wk} * COALESCE((SELECT AVG(100.0 / (buy_rank + 1))
+                         FROM appearances WHERE wallet = address), 0)
+             + {we} * COALESCE((SELECT CASE
+                         WHEN AVG(entry_multiple) >= 10 THEN 100.0
+                         ELSE AVG(entry_multiple) * 10.0 END
                          FROM appearances WHERE wallet = address), 0)
            WHERE is_bot = 0"""
     )

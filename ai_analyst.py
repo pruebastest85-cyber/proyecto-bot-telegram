@@ -230,25 +230,31 @@ def evaluate_tracked(conn) -> int:
     # compra FUERA de la zona de snipers (rank ≥ START, delay ≥ MIN_DELAY,
     # tamaño ≥ MIN_BUY_SOL). Los snipers/devs siguen en el grafo
     # (appearances) para clusters y afinidad, pero no gastan perfil.
+    # Puerta de selección REALINEADA con el objetivo del sistema:
+    # antes filtraba por puesto de compra (rank 30-600) y delay, lo que
+    # dejaba fuera tanto a las MUY tempranas por pericia como a las que
+    # entraron más tarde pero ganaron mucho. Y encima el rank era poco
+    # fiable. Ahora la puerta es capital + haber entrado ANTES de la
+    # subida (entry_multiple). Los bots y snipers se siguen excluyendo,
+    # pero por COMPORTAMIENTO al perfilar (flips <1min, actividad 24h,
+    # compras idénticas, market maker), que es evidencia real.
     try:
-        _r0 = int(getattr(_cfg, "BUYER_START_RANK", 30))
-        _r1 = int(getattr(_cfg, "BUYER_END_RANK", 600))
-        _d0 = int(getattr(_cfg, "MIN_BUY_DELAY_SEC", 60))
         _s0 = float(getattr(_cfg, "MIN_BUY_SOL", 1.0))
+        _m0 = float(getattr(_cfg, "MIN_ENTRY_MULTIPLE", 3.0))
     except Exception:
-        _r0, _r1, _d0, _s0 = 30, 600, 60, 1.0
+        _s0, _m0 = 1.0, 3.0
     rows = conn.execute(
         """SELECT address FROM wallets w
            WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= ?
              AND (ai_class IS NULL OR pnl_updated IS NULL OR pnl_updated < ?)
              AND EXISTS (SELECT 1 FROM appearances a
                          WHERE a.wallet = w.address
-                           AND a.buy_rank >= ? AND a.buy_rank <= ?
-                           AND COALESCE(a.delay_s, 999999) >= ?
-                           AND COALESCE(a.buy_sol, 0) >= ?)
+                           AND COALESCE(a.buy_sol, 0) >= ?
+                           AND (a.entry_multiple IS NULL
+                                OR a.entry_multiple >= ?))
            ORDER BY score DESC
            LIMIT ?""",
-        (_min, cutoff, _r0, _r1, _d0, _s0, _lim)).fetchall()
+        (_min, cutoff, _s0, _m0, _lim)).fetchall()
     if not rows:
         return 0
 

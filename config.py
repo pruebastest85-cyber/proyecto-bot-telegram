@@ -50,7 +50,11 @@ MAX_TOKEN_AGE_DAYS = _int("MAX_TOKEN_AGE_DAYS", 14)
 # Si el consumo sube demasiado, baja estos valores desde Railway (variables
 # de entorno) — no hace falta redeploy de código.
 MAX_TOKENS_PER_CYCLE = _int("MAX_TOKENS_PER_CYCLE", 35)   # tokens por ciclo
-HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 20)         # páginas por token (100 txs c/u)
+# Con 20 páginas (2.000 txs) NO se llegaba al inicio de tokens concurridos:
+# se leían las 2.000 MÁS RECIENTES y se trataban como si fueran las primeras,
+# inventando puestos de compra. La cuota de Helius estaba al 4%, así que
+# ahora se pagina mucho más hondo y además se detecta si se alcanzó el inicio.
+HISTORY_MAX_PAGES = _int("HISTORY_MAX_PAGES", 120)        # páginas por token (100 txs c/u)
 PROFILE_MAX_PAGES = _int("PROFILE_MAX_PAGES", 20)         # páginas al perfilar 1 billetera (~2000 txs)
 
 # ── Criterios para considerar una billetera "interesante" ────────────────
@@ -68,20 +72,33 @@ MIN_OBS_BUY_SOL = _float("MIN_OBS_BUY_SOL", 0.3)
 BUYER_START_RANK = _int("BUYER_START_RANK", 30)
 BUYER_END_RANK = _int("BUYER_END_RANK", 600)
 MIN_BUY_DELAY_SEC = _int("MIN_BUY_DELAY_SEC", 60)
+# CRECIMIENTO DESDE LA ENTRADA: el filtro que de verdad separa a quien
+# compró ANTES de que el token explotara de quien llegó tarde. Sustituye a
+# la ventana de buy_rank, que era frágil (dependía de leer todo el historial)
+# y no medía valoración. Un x3 significa que desde su compra el token
+# triplicó: eso es anticipación real, no suerte de estar en la lista.
+MIN_ENTRY_MULTIPLE = _float("MIN_ENTRY_MULTIPLE", 3.0)
+
 MIN_BUY_SOL = _float("MIN_BUY_SOL", 1.0)   # compra mínima para ser candidata
 MAX_BUY_SOL = _float("MAX_BUY_SOL", 300)   # ignorar ballenas/market makers
 # Pesos del score de descubrimiento (pre-filtro; el PnL decide al final):
 # capital real comprometido, reincidencia en ganadores, y algo de rank.
 W_CAPITAL = _int("W_CAPITAL", 40)
 W_REPEAT = _int("W_REPEAT", 45)
-W_RANK = _int("W_RANK", 15)
+# El puesto de compra dependía de leer TODO el historial del token (frágil).
+# Se sustituye por el múltiplo desde la entrada, que mide lo mismo (¿entró
+# antes de que explotara?) de forma fiable y con la valoración real.
+W_RANK = _int("W_RANK", 0)
+W_ENTRY = _int("W_ENTRY", 15)   # crecimiento desde su entrada
 # Ganancia REALIZABLE: el valor de una posición en cartera se topa a esta
 # fracción de la liquidez del pool (no podrías vender más sin hundirlo).
 LIQ_CAP_FRACTION = _float("LIQ_CAP_FRACTION", 0.10)
 # Nº mínimo de tokens ganadores para ser CANDIDATA a ⭐. Antes 2 (muy
 # exigente: casi nadie coincide en 2 memecoins). Ahora 1 + la rentabilidad
 # decide (la IA/grading filtran). Tuneable por env.
-MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 1)
+# Aparecer en UN solo token ganador es compatible con la pura suerte. Exigir
+# 2 es el filtro más barato y honesto para separar pericia de casualidad.
+MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 2)
 # Tope de billeteras marcadas ⭐ por ciclo (las mejores por score de
 # descubrimiento). Protege el webhook de Helius y el coste de evaluación.
 MAX_TRACKED_CANDIDATES = _int("MAX_TRACKED_CANDIDATES", 60)
