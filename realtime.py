@@ -140,8 +140,20 @@ def watch_addresses() -> list[str]:
              AND (SELECT COUNT(*) FROM signals s
                   WHERE s.wallet = w.address AND s.ts >= ?) <= 30
            ORDER BY score DESC LIMIT 40""", (hace_6h,)).fetchall()]
+    # Billeteras que ya NO son ⭐ ni candidatas pero tienen una posición
+    # simulada ABIERTA: hay que seguir viéndolas para poder cerrarla con su
+    # venta real. Si salen de la vigilancia, esa posición acabaría cerrando
+    # por TP/SL/tiempo y la simulación dejaría de medir lo que pretendía.
+    try:
+        huerfanas = [r["wallet"] for r in conn.execute(
+            "SELECT DISTINCT wallet FROM paper_trades "
+            "WHERE status='abierta'").fetchall()]
+    except Exception:
+        huerfanas = []            # tabla aún sin crear
     conn.close()
-    return stars + [c for c in cands if c not in stars]
+    fuera = [c for c in cands if c not in stars]
+    extra = [h for h in huerfanas if h not in stars and h not in fuera]
+    return stars + fuera + extra
 
 
 def _guardar_huella(huella: str) -> None:
@@ -577,10 +589,36 @@ def process_transactions(txs: list[dict]):
             (score_sig, trade["signature"]))
         conn.commit()
 
-        # Liga de ascenso: candidatas sin ⭐ se miden en silencio
+        # Liga de ascenso: candidatas sin ⭐ se miden en silencio.
+        #
+        # EXCEPCIÓN: una VENTA de una billetera que perdió la ⭐ pero aún
+        # tiene una posición simulada ABIERTA sí se procesa, solo para
+        # cerrarla. Si copiaste su compra querrías enterarte de su salida;
+        # si no, esa posición acabaría cerrando por TP/SL/tiempo y la
+        # simulación dejaría de medir lo que pretendía. No abre nada nuevo:
+        # las compras de las no-⭐ se siguen ignorando.
         if trade["wallet"] not in stars:
-            print(f"👁 Candidata {trade['wallet'][:8]}… {trade['side']} "
-                  f"{trade['sol']:.2f} SOL — registrada sin alertar")
+            _cerrar_huerfana = False
+            if not es_compra:
+                try:
+                    _cerrar_huerfana = conn.execute(
+                        "SELECT 1 FROM paper_trades WHERE wallet=? AND mint=? "
+                        "AND status='abierta' LIMIT 1",
+                        (trade["wallet"], trade["mint"])).fetchone() is not None
+                except Exception:
+                    _cerrar_huerfana = False       # tabla aún sin crear
+            if not _cerrar_huerfana:
+                print(f"👁 Candidata {trade['wallet'][:8]}… {trade['side']} "
+                      f"{trade['sol']:.2f} SOL — registrada sin alertar")
+                continue
+            print(f"🧪 Paper: {trade['wallet'][:8]}… ya no es ⭐ pero vendió "
+                  f"{t['symbol']}; cierro su posición simulada")
+            try:
+                import paper_trading
+                paper_trading.close_on_wallet_sell(
+                    conn, trade, t, pos, sigue_estrella=False)
+            except Exception as e:
+                print(f"· Cierre de paper huérfana falló: {e}")
             continue
 
         # Filtro: señales (COMPRA y VENTA) bajo el umbral no alertan (sí se miden)

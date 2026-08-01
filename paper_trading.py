@@ -119,7 +119,7 @@ def _close(conn, row, price: float, reason: str, icon: str):
 
 
 def close_on_wallet_sell(conn, trade: dict, token: dict,
-                         pos: dict | None = None):
+                         pos: dict | None = None, sigue_estrella: bool = True):
     """La billetera que origino la señal vendio → cerramos con ella.
     Solo si es LA MISMA wallet que abrio la señal y la venta es
     significativa (≥50% de su posicion o cierre total); antes cualquier
@@ -138,7 +138,9 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
     price = token.get("price")
     if not price or price <= 0:
         return
-    _close(conn, row, price, "venta de la ⭐", "🚪")
+    motivo = ("venta de la ⭐" if sigue_estrella
+              else "venta (la billetera ya no es ⭐)")
+    _close(conn, row, price, motivo, "🚪")
 
 
 def update_open_trades() -> int:
