@@ -1192,22 +1192,43 @@ async def cmd_exportar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     Pensado para analizarlo fuera del bot (p. ej. con una IA local)."""
     await update.message.reply_text("📦 Preparando el export…")
     from exportar import exportar
-    ruta = await asyncio.to_thread(exportar)
-    if not ruta:
+    rutas = await asyncio.to_thread(exportar)
+    if isinstance(rutas, str):        # compatibilidad por si vuelve una sola
+        rutas = [rutas]
+    if not rutas:
         await update.message.reply_text("No se pudo generar el export.")
         return
-    try:
-        import os as _os
-        mb = _os.path.getsize(ruta) / 1e6
-        with open(ruta, "rb") as fh:
-            await update.message.reply_document(
-                document=fh, filename=_os.path.basename(ruta),
-                caption=(f"📦 Conocimiento acumulado ({mb:.1f} MB)\n"
-                         "Billeteras, operaciones, apariciones y señales "
-                         "con su resultado medido."))
-    except Exception as e:
+
+    import os as _os
+    total = len(rutas)
+    if total > 1:
         await update.message.reply_text(
-            f"El export se generó pero no se pudo enviar: {e}")
+            f"El export ocupa demasiado para un solo archivo, van *{total} "
+            "partes*. Descárgalas todas: cada una es un JSON comprimido "
+            "válido por sí mismo.", parse_mode="Markdown")
+
+    enviadas = 0
+    for i, ruta in enumerate(rutas, start=1):
+        try:
+            mb = _os.path.getsize(ruta) / 1e6
+            cap = (f"📦 Conocimiento acumulado ({mb:.1f} MB)"
+                   if total == 1 else f"📦 Parte {i}/{total} ({mb:.1f} MB)")
+            with open(ruta, "rb") as fh:
+                await update.message.reply_document(
+                    document=fh, filename=_os.path.basename(ruta),
+                    caption=cap)
+            enviadas += 1
+        except Exception as e:
+            await update.message.reply_text(
+                f"No se pudo enviar la parte {i}/{total}: {e}")
+        finally:
+            try:
+                _os.remove(ruta)      # no dejar GB muertos en el disco
+            except OSError:
+                pass
+    if enviadas:
+        await update.message.reply_text(
+            f"✅ Export completo: {enviadas}/{total} archivo(s).")
 
 
 @solo_admin

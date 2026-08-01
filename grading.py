@@ -30,6 +30,14 @@ def _env(name, default):
 MIN_TRADES = int(_env("MIN_CLOSED_TRADES", 20))    # ops cerradas mínimas
 MIN_TOKENS = int(_env("MIN_TOKENS", 3))            # tokens distintos mínimos
 MAX_INACTIVE_DAYS = int(_env("MAX_INACTIVE_DAYS", 45))
+# Retención mínima para dar la ⭐: no es una cuestión de rentabilidad sino
+# de SEGUIBILIDAD. Medido sobre datos reales: las billeteras con retención
+# mediana < 2 min son de las MÁS rentables de la base (+849 SOL entre 10),
+# pero compran y venden en segundos. Para cuando el webhook procesa, el bot
+# alerta y tú lees y compras, esa operación ya está cerrada. Su ventaja es
+# real pero NO es copiable, así que como señal para ti no valen nada.
+# Los mejores seguibles de la muestra retienen entre 7 y 15 minutos.
+MIN_HOLD_MIN = _env("MIN_HOLD_MINUTES", 5.0)
 # En memecoins se gana perdiendo poco muchas veces y ganando muchísimo
 # pocas veces: un trader excelente puede acertar solo 1 de cada 3. Exigir
 # 60% seleccionaba otra estrategia distinta (scalping constante) y dejaba
@@ -124,6 +132,15 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
     if riesgos:
         return _res("🔴", "Descartada", cons,
                     ["señales de bot/manipulación: " + ", ".join(riesgos)])
+
+    # ── No seguible: vende antes de que te llegue la alerta ──
+    # Se descarta SOLO si tenemos el dato; sin medición no se penaliza.
+    hold = p.get("hold_median_min")
+    if hold is not None and hold < MIN_HOLD_MIN:
+        return _res("🔴", "Descartada", cons,
+                    [f"no seguible: retiene {hold:.1f} min de mediana "
+                     f"(mínimo {MIN_HOLD_MIN:.0f} min). Puede ser muy "
+                     "rentable, pero cierra antes de que puedas entrar"])
 
     # PnL debe ser positivo (el objetivo es rentabilidad)
     if net <= 0:

@@ -16,6 +16,7 @@ Ese último bloque es el más valioso para entrenar o afinar criterios: dice
 qué recomendó el sistema y qué pasó después.
 """
 
+import gzip
 import json
 import os
 import time
@@ -31,49 +32,101 @@ def _filas(conn, sql, params=()):
         return []
 
 
-def exportar(ruta: str | None = None, max_ops: int = 200_000) -> str | None:
-    """Vuelca el conocimiento a JSON. Devuelve la ruta del archivo."""
-    ruta = ruta or os.path.join(
-        os.getenv("EXPORT_DIR", "/tmp"),
-        f"wallet_edge_{time.strftime('%Y%m%d_%H%M')}.json")
+def _escribir_gz(ruta: str, datos: dict) -> float:
+    """Escribe JSON comprimido. Devuelve el tamaño en MB."""
+    with gzip.open(ruta, "wt", encoding="utf-8", compresslevel=6) as fh:
+        json.dump(datos, fh, ensure_ascii=False, default=str)
+    return os.path.getsize(ruta) / 1e6
+
+
+def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
+             limite_mb: float = 45.0) -> list[str]:
+    """
+    Vuelca el conocimiento a JSON COMPRIMIDO (.json.gz).
+
+    Devuelve una LISTA de rutas. Con 1,5 millones de operaciones el JSON
+    plano supera de largo el limite de 50 MB de Telegram, asi que:
+      1. se comprime (el JSON baja ~10x)
+      2. si aun asi no cabe, se trocea: un archivo base con billeteras,
+         apariciones, senales y tokens, y N archivos con las operaciones.
+
+    Cada parte es un JSON valido por si mismo, con 'parte' y 'partes' para
+    saber el orden al recomponerlo.
+    """
+    base_dir = os.getenv("EXPORT_DIR", "/tmp")
+    sello = time.strftime("%Y%m%d_%H%M")
+    prefijo = ruta.rsplit(".", 1)[0] if ruta else os.path.join(
+        base_dir, f"wallet_edge_{sello}")
+
     conn = get_conn()
     try:
-        datos = {
-            "generado": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "billeteras": _filas(conn, """
-                SELECT address, alias, grade, consistency, wallet_score,
-                       pnl_total, pnl_net, pnl_30d, winning_tokens_count,
-                       score, ai_class, ai_reason, is_tracked, is_bot,
-                       hold_median_min, roi_median
-                FROM wallets WHERE COALESCE(is_bot,0)=0"""),
-            "operaciones": _filas(conn, """
-                SELECT wallet, mint, side, sol, tokens, ts
-                FROM trades ORDER BY ts DESC LIMIT ?""", (max_ops,)),
-            "apariciones": _filas(conn, """
-                SELECT wallet, mint, buy_sol, buy_time, buy_rank, delay_s,
-                       price_at_buy, mc_at_buy, entry_multiple
-                FROM appearances"""),
-            "senales": _filas(conn, """
-                SELECT signature, wallet, mint, symbol, side, sol, ts,
-                       price_usd, mc, liq, chg_1h, chg_24h, signal_score,
-                       verdict FROM signals ORDER BY ts DESC LIMIT 50000"""),
-            "tokens_ganadores": _filas(conn, """
-                SELECT mint, symbol, price_change_24h, volume_24h_usd,
-                       liquidity_usd, detected_at FROM winning_tokens"""),
-        }
+        cabecera = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        billeteras = _filas(conn, """
+            SELECT address, alias, grade, consistency, wallet_score,
+                   pnl_total, pnl_net, pnl_30d, winning_tokens_count,
+                   score, ai_class, ai_reason, is_tracked, is_bot,
+                   hold_median_min, roi_median
+            FROM wallets WHERE COALESCE(is_bot,0)=0""")
+        apariciones = _filas(conn, """
+            SELECT wallet, mint, buy_sol, buy_time, buy_rank, delay_s,
+                   price_at_buy, mc_at_buy, entry_multiple
+            FROM appearances""")
+        senales = _filas(conn, """
+            SELECT signature, wallet, mint, symbol, side, sol, ts,
+                   price_usd, mc, liq, chg_1h, chg_24h, signal_score,
+                   verdict FROM signals ORDER BY ts DESC LIMIT 100000""")
+        ganadores = _filas(conn, """
+            SELECT mint, symbol, price_change_24h, volume_24h_usd,
+                   liquidity_usd, detected_at FROM winning_tokens""")
+        operaciones = _filas(conn, """
+            SELECT wallet, mint, side, sol, tokens, ts
+            FROM trades ORDER BY ts DESC LIMIT ?""", (max_ops,))
     finally:
         conn.close()
 
+    rutas: list[str] = []
     try:
-        with open(ruta, "w", encoding="utf-8") as fh:
-            json.dump(datos, fh, ensure_ascii=False, default=str)
+        # Intento 1: todo junto comprimido. Si cabe, un solo archivo.
+        unico = f"{prefijo}.json.gz"
+        mb = _escribir_gz(unico, {
+            "generado": cabecera, "parte": 1, "partes": 1,
+            "billeteras": billeteras, "apariciones": apariciones,
+            "senales": senales, "tokens_ganadores": ganadores,
+            "operaciones": operaciones})
+        if mb <= limite_mb:
+            print(f"📦 Export: {unico} · {mb:.1f} MB · "
+                  f"billeteras={len(billeteras)} operaciones={len(operaciones)} "
+                  f"senales={len(senales)}")
+            return [unico]
+
+        # Intento 2: trocear. Las operaciones son el grueso.
+        os.remove(unico)
+        print(f"· Export de {mb:.1f} MB supera {limite_mb} MB → troceando")
+
+        base_ruta = f"{prefijo}_1_base.json.gz"
+        mb_base = _escribir_gz(base_ruta, {
+            "generado": cabecera, "parte": 1,
+            "billeteras": billeteras, "apariciones": apariciones,
+            "senales": senales, "tokens_ganadores": ganadores})
+        rutas.append(base_ruta)
+
+        # Cuantas operaciones caben por trozo, estimado con lo ya medido.
+        por_trozo = max(50_000, int(len(operaciones) * (limite_mb / mb) * 0.8))
+        trozos = [operaciones[i:i + por_trozo]
+                  for i in range(0, len(operaciones), por_trozo)] or [[]]
+        total = len(trozos) + 1
+        for i, trozo in enumerate(trozos, start=2):
+            r = f"{prefijo}_{i}_operaciones.json.gz"
+            _escribir_gz(r, {"generado": cabecera, "parte": i,
+                             "partes": total, "operaciones": trozo})
+            rutas.append(r)
+
+        print(f"📦 Export en {len(rutas)} partes · base {mb_base:.1f} MB · "
+              f"{len(operaciones)} operaciones en {len(trozos)} trozos")
+        return rutas
     except Exception as e:
         print(f"· No se pudo escribir el export: {e}")
-        return None
-
-    print(f"📦 Export: {ruta} · " + " · ".join(
-        f"{k}={len(v)}" for k, v in datos.items() if isinstance(v, list)))
-    return ruta
+        return rutas
 
 
 def resumen() -> str:

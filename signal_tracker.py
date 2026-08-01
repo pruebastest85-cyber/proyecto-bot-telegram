@@ -284,12 +284,23 @@ def track_outcomes() -> int:
          int(now - DAY), int(now - 30 * HOUR))).fetchall()
     # 2) Señales recientes (<48h) para las alertas de multiplos (x2, x3…);
     #    query aparte para que no compitan por el cupo con las mediciones.
+    #
+    #    SOLO BILLETERAS ⭐ (is_tracked=1). El webhook vigila ⭐ + candidatas
+    #    prometedoras; las compras de las candidatas se registran pero NO
+    #    alertan (liga de ascenso, se les construye historial en silencio).
+    #    Sin este filtro las candidatas no mandaban alerta de compra pero SI
+    #    mandaban las cartas de x2/x3, que era justo la basura que llenaba
+    #    el chat. Las mediciones (query `pend` de arriba) siguen sin filtrar:
+    #    queremos seguir midiendo a las candidatas para poder promocionarlas.
     recent = conn.execute(
-        """SELECT signature, wallet, mint, ts, price_usd, price_1h,
-                  price_24h, alerted_pct, symbol, mc
-           FROM signals
-           WHERE side='compra' AND price_usd IS NOT NULL AND price_usd > 0
-             AND ts >= ? ORDER BY ts DESC LIMIT 30""",
+        """SELECT s.signature, s.wallet, s.mint, s.ts, s.price_usd,
+                  s.price_1h, s.price_24h, s.alerted_pct, s.symbol, s.mc
+           FROM signals s
+           JOIN wallets w ON w.address = s.wallet
+           WHERE s.side='compra' AND s.price_usd IS NOT NULL
+             AND s.price_usd > 0 AND s.ts >= ?
+             AND w.is_tracked = 1
+           ORDER BY s.ts DESC LIMIT 30""",
         (int(now - WATCH_HOURS * HOUR),)).fetchall()
 
     prices: dict = {}          # cache: 1 consulta por mint → (precio, mc)
