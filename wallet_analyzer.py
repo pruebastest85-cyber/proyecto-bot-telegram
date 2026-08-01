@@ -308,6 +308,16 @@ def run_analysis():
     except Exception as e:
         print(f"· Filtro IA omitido: {e}")
 
+    # Depuración de las ⭐ que YA existen. `evaluate_tracked` sólo mira
+    # candidatas sin evaluar o caducadas, así que una ⭐ evaluada hace poco
+    # nunca volvía a pasar por los filtros nuevos. Esto los aplica sobre lo
+    # ya guardado en la base, sin gastar créditos.
+    try:
+        from ai_analyst import depurar_estrellas
+        depurar_estrellas(conn)
+    except Exception as e:
+        print(f"· Depuración de ⭐ omitida: {e}")
+
     print("\n══ TOP BILLETERAS CANDIDATAS ══")
     for w in top_wallets(conn, 15):
         flag = "★ RASTREAR" if w["is_tracked"] else ""

@@ -488,3 +488,78 @@ def evaluate_tracked(conn) -> int:
               f"[{verdict.get('modelo', '?')}] "
               f"({verdict.get('confianza', '?')}%): {verdict.get('razon','')}")
     return evaluated
+
+
+def depurar_estrellas(conn) -> dict:
+    """
+    Aplica a las ⭐ YA EXISTENTES los filtros que sólo corrían al evaluar
+    candidatas nuevas.
+
+    Hacía falta porque `evaluate_tracked` sólo mira billeteras sin evaluar
+    o con la evaluación caducada: una ⭐ evaluada hace poco NUNCA volvía a
+    pasar por el grading, así que los filtros nuevos no la alcanzaban
+    aunque incumpliera. Se veía como "hice el ciclo y siguen todas".
+
+    No gasta créditos: usa lo que ya está guardado en la base.
+    Devuelve {"no_seguibles": n, "hermanas": n}.
+    """
+    fuera_hold, fuera_fam = [], []
+
+    # 1) No seguibles: cierran antes de que te llegue la alerta.
+    try:
+        from grading import MIN_HOLD_MIN
+        filas = conn.execute(
+            """SELECT address, hold_median_min FROM wallets
+               WHERE is_tracked = 1 AND hold_median_min IS NOT NULL
+                 AND hold_median_min < ?""", (MIN_HOLD_MIN,)).fetchall()
+        for r in filas:
+            motivo = (f" · ⚡ sin ⭐: no seguible, retiene "
+                      f"{r['hold_median_min']:.1f} min de mediana "
+                      f"(mínimo {MIN_HOLD_MIN:.0f})")
+            conn.execute(
+                """UPDATE wallets
+                   SET is_tracked = 0, ai_follow = 0, grade = 'Observación',
+                       ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
+                   WHERE address = ?""", (motivo, r["address"]))
+            fuera_hold.append(r["address"])
+        if fuera_hold:
+            conn.commit()
+    except Exception as e:
+        print(f"· depuración por retención omitida: {e}")
+
+    # 2) Una sola ⭐ por familia: se queda la de mejor wallet_score.
+    try:
+        from wallet_funding import familia
+        vistas = set()
+        estrellas = [r["address"] for r in conn.execute(
+            "SELECT address FROM wallets WHERE is_tracked = 1 "
+            "ORDER BY COALESCE(wallet_score, -1) DESC").fetchall()]
+        for addr in estrellas:
+            if addr in vistas:
+                continue
+            hs = [h for h in familia(addr) if h in estrellas]
+            if not hs:
+                continue
+            vistas.add(addr)                 # esta es la mejor de su familia
+            for h in hs:
+                if h in vistas:
+                    continue
+                vistas.add(h)
+                motivo = (f" · 🔗 sin ⭐: su hermana {addr[:8]}… "
+                          "representa a la familia")
+                conn.execute(
+                    """UPDATE wallets
+                       SET is_tracked = 0, ai_follow = 0,
+                           ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?,
+                                              1, 500)
+                       WHERE address = ?""", (motivo, h))
+                fuera_fam.append(h)
+        if fuera_fam:
+            conn.commit()
+    except Exception as e:
+        print(f"· depuración por familias omitida: {e}")
+
+    if fuera_hold or fuera_fam:
+        print(f"🧹 Depuración de ⭐: {len(fuera_hold)} no seguibles, "
+              f"{len(fuera_fam)} hermanas duplicadas")
+    return {"no_seguibles": len(fuera_hold), "hermanas": len(fuera_fam)}
