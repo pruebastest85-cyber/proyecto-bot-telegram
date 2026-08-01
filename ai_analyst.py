@@ -433,6 +433,28 @@ def evaluate_tracked(conn) -> int:
                     print(f"  ⛔ {addr[:8]}… no recupera ⭐: {malo}")
             except Exception as e:
                 print(f"· guarda de rendimiento omitida: {e}")
+
+        # Una sola ⭐ por familia: varias billeteras del mismo dueño no son
+        # varias opiniones, son la misma repetida. Se queda la mejor.
+        if seguir:
+            try:
+                from wallet_funding import (hermana_con_estrella,
+                                            destronar_hermanas)
+                jefa = hermana_con_estrella(conn, addr, wscore)
+                if jefa:
+                    seguir = 0
+                    verdict["razon"] = (
+                        f"{verdict.get('razon', '')} · 🔗 sin ⭐: su hermana "
+                        f"{jefa[:8]}… ya representa a la familia")[:500]
+                    print(f"  🔗 {addr[:8]}… cede la ⭐ a {jefa[:8]}…")
+                else:
+                    quitadas = destronar_hermanas(conn, addr)
+                    if quitadas:
+                        print(f"  🔗 {addr[:8]}… toma la ⭐ de su familia; "
+                              f"{len(quitadas)} hermana(s) degradada(s)")
+            except Exception as e:
+                print(f"· guarda de hermanas omitida: {e}")
+
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
                alias=COALESCE(?, alias),

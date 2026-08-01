@@ -147,3 +147,109 @@ def resumen(address: str) -> str | None:
     if hs:
         partes.append(f"⚠️ {len(hs)} billetera(s) del mismo origen")
     return "  ·  ".join(partes)
+
+
+# ── Familias: una sola ⭐ por dueño ────────────────────────────────────────
+# Dos billeteras fondeadas por la MISMA dirección suelen ser del mismo
+# dueño. Sin esto, una persona con 4 billeteras ocupa 4 estrellas y te
+# manda 4 alertas del mismo movimiento: parece consenso y es una sola
+# opinión. Medido en los datos: 3 de los 6 falsos positivos del modelo
+# eran la misma estrategia repetida en billeteras distintas.
+#
+# DOS PROTECCIONES, porque "mismo fondeador" NO siempre significa hermanas:
+#   1. Si el fondeador es un exchange/servicio, no son hermanas: media
+#      Solana se fondea desde la cartera caliente de Binance.
+#   2. Si un fondeador aparece en demasiadas billeteras, es un servicio
+#      aunque no sepamos su nombre. Una persona no tiene 30 billeteras.
+MAX_FAMILIA = int(os.getenv("MAX_FAMILIA", "20"))
+
+_FUNDER_IMPERSONAL = (
+    "exchange", "cex", "binance", "coinbase", "okx", "bybit", "kraken",
+    "kucoin", "gate", "mexc", "bitget", "htx", "bridge", "wormhole",
+    "protocol", "program", "validator", "treasury", "market maker",
+    "jupiter", "raydium", "orca", "pump", "moonshot",
+)
+
+
+def _es_impersonal(f: dict) -> bool:
+    txt = f"{f.get('tipo') or ''} {f.get('nombre') or ''}".lower()
+    return any(k in txt for k in _FUNDER_IMPERSONAL)
+
+
+def familia(address: str) -> list[str]:
+    """
+    Hermanas REALES de `address` (sin incluirla). Lista vacía si no se
+    puede afirmar que compartan dueño.
+    """
+    f = fondeo(address)
+    if not f or not f.get("funder") or _es_impersonal(f):
+        return []
+    conn = get_conn()
+    try:
+        _ensure(conn)
+        filas = conn.execute(
+            "SELECT address FROM wallet_funding WHERE funder=? AND address<>?",
+            (f["funder"], address)).fetchall()
+        otras = [r["address"] for r in filas]
+        # Grupo demasiado grande = servicio, no una persona
+        if len(otras) + 1 > MAX_FAMILIA:
+            return []
+        return otras
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def hermana_con_estrella(conn, address: str, mi_score) -> str | None:
+    """
+    ¿Hay ya una hermana con ⭐ igual o mejor que esta? Devuelve su
+    dirección (para explicar el porqué) o None si esta puede llevarse la
+    estrella de la familia.
+    """
+    hs = familia(address)
+    if not hs:
+        return None
+    marcas = ",".join("?" * len(hs))
+    try:
+        filas = conn.execute(
+            f"""SELECT address, COALESCE(wallet_score, -1) sc FROM wallets
+                WHERE address IN ({marcas}) AND is_tracked = 1
+                ORDER BY sc DESC""", hs).fetchall()
+    except Exception:
+        return None
+    if not filas:
+        return None
+    mejor = filas[0]
+    mio = mi_score if mi_score is not None else -1
+    return mejor["address"] if (mejor["sc"] or -1) >= mio else None
+
+
+def destronar_hermanas(conn, address: str) -> list[str]:
+    """
+    Esta billetera es la mejor de su familia: quita la ⭐ a las hermanas.
+    Devuelve a quiénes se la quitó.
+    """
+    hs = familia(address)
+    if not hs:
+        return []
+    marcas = ",".join("?" * len(hs))
+    try:
+        quitadas = [r["address"] for r in conn.execute(
+            "SELECT address FROM wallets WHERE address IN (%s) "
+            "AND is_tracked = 1" % marcas, hs).fetchall()]
+        if not quitadas:
+            return []
+        motivo = (" · 🔗 sin ⭐: su hermana %s… representa a la familia"
+                  % address[:8])
+        for a in quitadas:
+            conn.execute(
+                """UPDATE wallets
+                   SET is_tracked = 0, ai_follow = 0,
+                       ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
+                   WHERE address = ?""", (motivo, a))
+        conn.commit()
+        return quitadas
+    except Exception as e:
+        print(f"· destronar hermanas falló: {e}")
+        return []
