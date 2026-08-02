@@ -741,19 +741,20 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     wk = float(getattr(_cfg, "W_RANK", 0)) / 100.0
     we = float(getattr(_cfg, "W_ENTRY", 15)) / 100.0
     conn.execute(
-        f"""UPDATE wallets SET score =
-             {wr} * (CASE WHEN winning_tokens_count * 25.0 > 100.0
+        """UPDATE wallets SET score =
+             ? * (CASE WHEN winning_tokens_count * 25.0 > 100.0
                           THEN 100.0 ELSE winning_tokens_count * 25.0 END)
-             + {wc} * COALESCE((SELECT CASE WHEN AVG(buy_sol) >= 10 THEN 100.0
+             + ? * COALESCE((SELECT CASE WHEN AVG(buy_sol) >= 10 THEN 100.0
                                      ELSE AVG(buy_sol) * 10.0 END
                          FROM appearances WHERE wallet = address), 0)
-             + {wk} * COALESCE((SELECT AVG(100.0 / (buy_rank + 1))
+             + ? * COALESCE((SELECT AVG(100.0 / (buy_rank + 1))
                          FROM appearances WHERE wallet = address), 0)
-             + {we} * COALESCE((SELECT CASE
+             + ? * COALESCE((SELECT CASE
                          WHEN AVG(entry_multiple) >= 10 THEN 100.0
                          ELSE AVG(entry_multiple) * 10.0 END
                          FROM appearances WHERE wallet = address), 0)
-           WHERE is_bot = 0"""
+           WHERE is_bot = 0""",
+        (wr, wc, wk, we)
     )
     # La ⭐ (y por tanto las ALERTAS en tiempo real) son SOLO para las
     # billeteras que la IA CONFIRMÓ rentables (ai_follow=1). Las candidatas

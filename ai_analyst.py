@@ -434,6 +434,19 @@ def evaluate_tracked(conn) -> int:
             except Exception as e:
                 print(f"· guarda de rendimiento omitida: {e}")
 
+        if seguir:
+            try:
+                if _grade and _grade.get("tier") == "Descartada":
+                    reasons = _grade.get("reasons", [])
+                    razon_grading = reasons[0] if reasons else ""
+                    seguir = 0
+                    verdict["razon"] = (
+                        f"{verdict.get('razon', '')} · sin ⭐ por grading: "
+                        f"{razon_grading}")[:500]
+                    print(f"  ⛔ {addr[:8]}… no recibe ⭐: grading lo descarta")
+            except Exception as e:
+                print(f"· guarda de grading omitida: {e}")
+
         # Una sola ⭐ por familia: varias billeteras del mismo dueño no son
         # varias opiniones, son la misma repetida. Se queda la mejor.
         if seguir:

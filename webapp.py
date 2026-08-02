@@ -37,7 +37,7 @@ def _valid_init_data(init_data: str) -> bool:
         if not hmac.compare_digest(calc, recibido):
             return False
         user = json.loads(data.get("user", "{}"))
-        return not ADMIN_ID or str(user.get("id")) == str(ADMIN_ID)
+        return bool(ADMIN_ID) and str(user.get("id")) == str(ADMIN_ID)
     except Exception:
         return False
 

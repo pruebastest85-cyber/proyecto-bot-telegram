@@ -31,7 +31,25 @@ from wallet_admin import (discard_wallet, restore_wallet, build_top_message)
 from realtime import start_webhook_server, sync_helius_webhook
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
+_ADMIN_ID_RAW = os.getenv("TELEGRAM_ADMIN_ID")
+if not _ADMIN_ID_RAW:
+    raise RuntimeError(
+        "Falta TELEGRAM_ADMIN_ID: sin este ID cualquier usuario puede "
+        "ejecutar comandos de administrador. Configúralo como variable de entorno."
+    )
+try:
+    ADMIN_ID = int(_ADMIN_ID_RAW)
+except ValueError:
+    raise RuntimeError(
+        f"TELEGRAM_ADMIN_ID no es un entero válido: {_ADMIN_ID_RAW!r}"
+    )
+# Un 0 explícito reabriría el bypass: el decorador solo_admin comprueba
+# `if ADMIN_ID and ...`, y 0 es falsy, así que no bloquearía a nadie.
+if ADMIN_ID <= 0:
+    raise RuntimeError(
+        f"TELEGRAM_ADMIN_ID debe ser un ID de Telegram positivo, no "
+        f"{ADMIN_ID}. Con 0 el filtro de administrador queda desactivado."
+    )
 AUTO_CYCLE_HOURS = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
 
 # Evita que el ciclo automático y un comando manual corran a la vez
@@ -217,25 +235,27 @@ def run_full_cycle() -> str:
 
 def _status_text() -> str:
     conn = get_conn()
-    tokens = conn.execute("SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"]
-    pend = conn.execute(
-        "SELECT COUNT(*) c FROM winning_tokens WHERE analyzed=0").fetchone()["c"]
-    wallets = conn.execute("SELECT COUNT(*) c FROM wallets").fetchone()["c"]
-    tracked = conn.execute(
-        "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
-    descartadas = conn.execute(
-        "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
-    from db import get_setting
-    umbral = get_setting(conn, "min_signal_score", "0")
-    prof = int(float(get_setting(conn, "funnel_profiled", "0") or 0))
-    prom = int(float(get_setting(conn, "funnel_promoted", "0") or 0))
     try:
-        from api_usage import usage_line, flush as _api_flush
-        _api_flush()
-        apis = usage_line(conn)
-    except Exception:
-        apis = ""
-    conn.close()
+        tokens = conn.execute("SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"]
+        pend = conn.execute(
+            "SELECT COUNT(*) c FROM winning_tokens WHERE analyzed=0").fetchone()["c"]
+        wallets = conn.execute("SELECT COUNT(*) c FROM wallets").fetchone()["c"]
+        tracked = conn.execute(
+            "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"]
+        descartadas = conn.execute(
+            "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
+        from db import get_setting
+        umbral = get_setting(conn, "min_signal_score", "0")
+        prof = int(float(get_setting(conn, "funnel_profiled", "0") or 0))
+        prom = int(float(get_setting(conn, "funnel_promoted", "0") or 0))
+        try:
+            from api_usage import usage_line, flush as _api_flush
+            _api_flush()
+            apis = usage_line(conn)
+        except Exception:
+            apis = ""
+    finally:
+        conn.close()
     return (
         f"📊 *Estado del sistema*\n\n"
         f"⚙️ Ciclo automático: cada {AUTO_CYCLE_HOURS:g} h\n"
