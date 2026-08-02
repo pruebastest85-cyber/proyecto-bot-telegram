@@ -516,7 +516,29 @@ def depurar_estrellas(conn) -> dict:
     No gasta créditos: usa lo que ya está guardado en la base.
     Devuelve {"no_seguibles": n, "hermanas": n}.
     """
-    fuera_hold, fuera_fam = [], []
+    fuera_hold, fuera_fam, fuera_grade = [], [], []
+
+    # 0) Descartadas por el grading ya guardado en la base.
+    # Va PRIMERO a propósito: si se ejecutara después del bloque de familias,
+    # una familia cuya mejor representante estuviera Descartada se quedaría
+    # sin ninguna ⭐, porque las hermanas válidas ya habrían cedido su puesto.
+    # Quitando antes a las descartadas, la familia elige entre las que valen.
+    # No perfila ni gasta créditos: usa la columna `grade` ya escrita.
+    try:
+        filas = conn.execute(
+            """SELECT address FROM wallets
+               WHERE is_tracked = 1 AND grade = 'Descartada'""").fetchall()
+        for r in filas:
+            motivo = " · ⛔ sin ⭐: el grading la tiene como Descartada"
+            conn.execute(
+                """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
+                   ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
+                   WHERE address = ?""", (motivo, r["address"]))
+            fuera_grade.append(r["address"])
+        if fuera_grade:
+            conn.commit()
+    except Exception as e:
+        print(f"· depuración por grading omitida: {e}")
 
     # 1) No seguibles: cierran antes de que te llegue la alerta.
     try:
@@ -572,7 +594,9 @@ def depurar_estrellas(conn) -> dict:
     except Exception as e:
         print(f"· depuración por familias omitida: {e}")
 
-    if fuera_hold or fuera_fam:
+    if fuera_hold or fuera_fam or fuera_grade:
         print(f"🧹 Depuración de ⭐: {len(fuera_hold)} no seguibles, "
-              f"{len(fuera_fam)} hermanas duplicadas")
-    return {"no_seguibles": len(fuera_hold), "hermanas": len(fuera_fam)}
+              f"{len(fuera_fam)} hermanas duplicadas, "
+              f"{len(fuera_grade)} descartadas por grading")
+    return {"no_seguibles": len(fuera_hold), "hermanas": len(fuera_fam),
+            "descartadas": len(fuera_grade)}
