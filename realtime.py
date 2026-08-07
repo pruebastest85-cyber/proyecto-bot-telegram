@@ -29,7 +29,7 @@ import requests
 from flask import Flask, request, jsonify
 
 import config
-from db import get_conn, get_setting
+from db import get_conn, get_setting, top_addresses
 from token_check import analyze_token, format_token_block, ai_payload
 from signal_score import compute_signal_score
 
@@ -497,6 +497,11 @@ def process_transactions(txs: list[dict]):
     if not tracked:
         return
     conn = get_conn()
+    # Solo alertan las mejores del ranking (mismo orden que /top). Las
+    # demás ⭐ se siguen midiendo en silencio, igual que las candidatas.
+    # Conjunto vacío = no se pudo calcular → no filtramos, para no dejar
+    # el bot mudo por un fallo de consulta.
+    top = top_addresses(conn)
     for tx in txs:
         trade = _detect_trade(tx, tracked)
         if not trade:
@@ -597,7 +602,12 @@ def process_transactions(txs: list[dict]):
         # si no, esa posición acabaría cerrando por TP/SL/tiempo y la
         # simulación dejaría de medir lo que pretendía. No abre nada nuevo:
         # las compras de las no-⭐ se siguen ignorando.
-        if trade["wallet"] not in stars:
+        # Dos motivos para no alertar, con el mismo tratamiento: no tener
+        # la ⭐, o tenerla pero estar fuera del top. En ambos casos la
+        # operación se registra y se mide; solo no sale por el chat.
+        es_star = trade["wallet"] in stars
+        en_top = (not top) or trade["wallet"] in top
+        if not es_star or not en_top:
             _cerrar_huerfana = False
             if not es_compra:
                 try:
@@ -608,15 +618,18 @@ def process_transactions(txs: list[dict]):
                 except Exception:
                     _cerrar_huerfana = False       # tabla aún sin crear
             if not _cerrar_huerfana:
-                print(f"👁 Candidata {trade['wallet'][:8]}… {trade['side']} "
+                quien = "Candidata" if not es_star else "⭐ fuera del top"
+                print(f"👁 {quien} {trade['wallet'][:8]}… {trade['side']} "
                       f"{trade['sol']:.2f} SOL — registrada sin alertar")
                 continue
-            print(f"🧪 Paper: {trade['wallet'][:8]}… ya no es ⭐ pero vendió "
+            motivo_h = ("ya no es ⭐" if not es_star
+                        else "salió del top")
+            print(f"🧪 Paper: {trade['wallet'][:8]}… {motivo_h} pero vendió "
                   f"{t['symbol']}; cierro su posición simulada")
             try:
                 import paper_trading
                 paper_trading.close_on_wallet_sell(
-                    conn, trade, t, pos, sigue_estrella=False)
+                    conn, trade, t, pos, sigue_estrella=es_star)
             except Exception as e:
                 print(f"· Cierre de paper huérfana falló: {e}")
             continue
