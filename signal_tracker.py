@@ -108,6 +108,22 @@ def _alert_milestone(conn, s, pct: float, price: float,
     if mult < MIN_MULTIPLE:
         return
 
+    # Solo el top del ranking manda tarjeta. Si la señal la dio una ⭐
+    # que ya no está entre las mejores, se sigue midiendo pero no llena
+    # el chat. Conjunto vacío = no se pudo calcular → no se filtra.
+    # El múltiplo se marca igual al salir, para no repetir este aviso en
+    # cada vuelta del job.
+    try:
+        from db import top_addresses
+        _top = top_addresses(conn)
+        if _top and s["wallet"] and s["wallet"] not in _top:
+            print(f"  🔇 x{mult} de {s['mint'][:8]}… sin tarjeta: "
+                  f"la billetera está fuera del top")
+            set_setting(conn, f"mult_alert:{s['mint']}", mult)
+            return
+    except Exception as e:
+        print(f"· Filtro de top falló ({e}); mando la tarjeta igual")
+
     key = f"mult_alert:{s['mint']}"
     last = 0
     try:

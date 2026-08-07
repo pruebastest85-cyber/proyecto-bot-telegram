@@ -128,6 +128,7 @@ def kb_acciones() -> InlineKeyboardMarkup:
         [_btn("🔄 Ciclo completo", "h:run:ciclo")],
         [_btn("🔍 Descubrir tokens", "h:run:descubrir")],
         [_btn("🧮 Analizar compradores", "h:run:analizar")],
+        [_btn("🧪 Paper trading", "pap:ver")],
         _row_inicio(),
     ])
 
@@ -164,6 +165,23 @@ def kb_solo_inicio() -> InlineKeyboardMarkup:
 
 def kb_cancelar() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_btn("« Cancelar", "h:home")]])
+
+
+def kb_paper() -> InlineKeyboardMarkup:
+    """Botones bajo el resumen de /paper."""
+    return InlineKeyboardMarkup([
+        [_btn("🔄 Actualizar", "pap:ver"),
+         _btn("🗑 Reiniciar", "pap:pedir")],
+    ])
+
+
+def kb_paper_confirmar(abiertas: int, cerradas: int) -> InlineKeyboardMarkup:
+    """Segundo paso: borrar el historial es irreversible, así que el
+    primer botón solo pregunta y este es el que ejecuta."""
+    return InlineKeyboardMarkup([
+        [_btn(f"⚠️ Sí, borrar {abiertas + cerradas}", "pap:reset")],
+        [_btn("« No, dejarlo como está", "pap:ver")],
+    ])
 
 
 SECCIONES = {
@@ -763,6 +781,53 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await handle_hub(q, ctx)
         return
 
+    # Paper trading: ver resumen, pedir confirmación y reiniciar.
+    # Va en dos pasos a propósito — 'pap:pedir' solo pregunta, y solo
+    # 'pap:reset' borra. Un dedo mal puesto no debe costar el historial.
+    if data.startswith("pap:"):
+        accion = data[4:]
+        from paper_trading import contar, resumen_text, reset
+        if accion == "ver":
+            await q.answer()
+            txt = await asyncio.to_thread(resumen_text)
+            try:
+                await q.edit_message_text(txt, parse_mode="Markdown",
+                                          reply_markup=kb_paper())
+            except Exception:
+                # Telegram rechaza editar si el texto no cambió
+                await q.message.chat.send_message(
+                    txt, parse_mode="Markdown", reply_markup=kb_paper())
+            return
+        if accion == "pedir":
+            abiertas, cerradas = await asyncio.to_thread(contar)
+            if abiertas + cerradas == 0:
+                await q.answer("No hay nada que reiniciar.", show_alert=True)
+                return
+            await q.answer()
+            await q.edit_message_text(
+                f"🗑 *Reiniciar paper trading*\n\n"
+                f"Se borrarán *{abiertas}* posiciones abiertas y "
+                f"*{cerradas}* cerradas.\n"
+                f"⚠️ No se puede deshacer.",
+                parse_mode="Markdown",
+                reply_markup=kb_paper_confirmar(abiertas, cerradas))
+            return
+        if accion == "reset":
+            await q.answer("⏳ Borrando…")
+            try:
+                abiertas, cerradas = await asyncio.to_thread(reset)
+            except Exception as e:
+                await q.edit_message_text(f"❌ No se pudo reiniciar: {e}")
+                return
+            txt = await asyncio.to_thread(resumen_text)
+            await q.edit_message_text(
+                f"✅ *Paper trading reiniciado*\n"
+                f"Borradas {abiertas} abiertas y {cerradas} cerradas.\n\n"
+                + txt, parse_mode="Markdown", reply_markup=kb_paper())
+            return
+        await q.answer()
+        return
+
     # Feedback 👍/👎 sobre un token enviado (aprendizaje)
     if data.startswith("tk:up:") or data.startswith("tk:dn:"):
         good = data.startswith("tk:up:")
@@ -973,12 +1038,63 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Cuántas billeteras del ranking pueden alertar. /topalertas [n]
+
+    0 = sin límite (vuelve al comportamiento de antes: alerta cualquier ⭐).
+    """
+    from db import set_setting, TOP_ALERTAS_DEFAULT
+    conn = get_conn()
+    try:
+        args = ctx.args or []
+        if args:
+            try:
+                n = int(float(args[0]))
+                if n < 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text(
+                    "Uso: /topalertas <n>   (0 = sin límite)")
+                return
+            set_setting(conn, "top_alertas", n)
+            txt = (f"📡 Alertan las *top {n}* billeteras."
+                   if n else "📡 Sin límite: alerta cualquier billetera ⭐.")
+            await update.message.reply_text(txt, parse_mode="Markdown")
+            return
+        actual = get_setting(conn, "top_alertas", str(TOP_ALERTAS_DEFAULT))
+        await update.message.reply_text(
+            f"📡 Ahora mismo alertan las *top {actual}* billeteras "
+            f"(señales y tarjetas).\nCambiar: `/topalertas 20`  ·  "
+            f"`/topalertas 0` quita el límite.",
+            parse_mode="Markdown")
+    finally:
+        conn.close()
+
+
+@solo_admin
 async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Paper trading: /paper (resumen) · /paper on|off · /paper max <SOL>."""
+    """Paper trading: /paper (resumen) · /paper on|off · /paper max <SOL>
+    · /paper reset (con confirmación)."""
     from db import set_setting
     from paper_trading import resumen_text
     args = [a.lower() for a in (ctx.args or [])]
     if args:
+        if args[0] == "reset":
+            # No borra aquí: enseña lo que se perdería y pide confirmación.
+            from paper_trading import contar
+            abiertas, cerradas = await asyncio.to_thread(contar)
+            if abiertas + cerradas == 0:
+                await update.message.reply_text(
+                    "🧪 No hay nada que reiniciar: el historial ya está vacío.")
+                return
+            await update.message.reply_text(
+                f"🗑 *Reiniciar paper trading*\n\n"
+                f"Se borrarán *{abiertas}* posiciones abiertas y "
+                f"*{cerradas}* cerradas.\n"
+                f"⚠️ No se puede deshacer.",
+                parse_mode="Markdown",
+                reply_markup=kb_paper_confirmar(abiertas, cerradas))
+            return
         conn = get_conn()
         if args[0] in ("on", "off"):
             set_setting(conn, "paper_enabled", "1" if args[0] == "on" else "0")
@@ -1003,10 +1119,12 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         conn.close()
         await update.message.reply_text(
-            "Uso: /paper · /paper on · /paper off · /paper max <SOL>")
+            "Uso: /paper · /paper on · /paper off · /paper max <SOL> "
+            "· /paper reset")
         return
     txt = await asyncio.to_thread(resumen_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await update.message.reply_text(txt, parse_mode="Markdown",
+                                    reply_markup=kb_paper())
 
 
 @solo_admin
@@ -1140,6 +1258,7 @@ async def _post_init(app: Application):
             BotCommand("errores", "Errores registrados (24 h)"),
             BotCommand("backtest", "Simular copiar las señales"),
             BotCommand("paper", "Paper trading simulado"),
+            BotCommand("topalertas", "Cuántas billeteras pueden alertar"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -1584,6 +1703,7 @@ def main():
     app.add_handler(CommandHandler("entidades", cmd_entidad))
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
+    app.add_handler(CommandHandler("topalertas", cmd_top_alertas))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
