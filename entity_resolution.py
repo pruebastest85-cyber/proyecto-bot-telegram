@@ -23,7 +23,10 @@ from statistics import median
 from db import get_conn
 
 _CACHE = {"e": None, "ts": 0.0}
-_TTL = 300
+_TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
+                   # cada 10 min y forzaba una reconstruccion en CADA
+                   # pasada. Son datos historicos: media hora de
+                   # retraso no cambia ninguna cifra.
 MIN_SHARED = 3        # tokens en común mínimos para considerar un vínculo
 MIN_CONF = 70         # confianza mínima para unir dos wallets
 
@@ -141,6 +144,8 @@ def _build():
 def _graph():
     if _CACHE["e"] is not None and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["e"]
+    # Soltar el viejo ANTES de construir el nuevo (ver alpha.graph).
+    _CACHE["e"] = None
     g = _build()
     _CACHE["e"] = g
     _CACHE["ts"] = time.time()

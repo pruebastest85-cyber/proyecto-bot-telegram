@@ -23,6 +23,8 @@ TABLES = ["wallets", "winning_tokens", "appearances", "signals",
           "settings", "predictions", "positions", "paper_trades",
           "chat_history"]
 
+BATCH = 1000      # filas por lote al volcar; acota la memoria del backup
+
 
 def make_backup() -> tuple[str, str, str]:
     """Genera el backup y devuelve (ruta_temporal, nombre_archivo, texto)."""
@@ -31,20 +33,45 @@ def make_backup() -> tuple[str, str, str]:
     if getattr(_db, "USE_PG", False):
         path = f"/tmp/backup_{stamp}.json"
         conn = _db.get_conn()
-        data, filas = {}, 0
+        filas = 0
+        # Se escribe por lotes directamente al archivo. Antes se montaba
+        # un diccionario con TODAS las filas de TODAS las tablas y luego
+        # se volcaba: la base entera en memoria de golpe, cada 24 h. El
+        # archivo que sale es identico; solo cambia como se construye.
         try:
-            for t in TABLES:
-                try:
-                    rows = conn.execute(f"SELECT * FROM {t}").fetchall()
-                    data[t] = [dict(r) for r in rows]
-                    filas += len(data[t])
-                except Exception as e:
-                    data[t] = {"_error": str(e)}
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{")
+                for i, t in enumerate(TABLES):
+                    if i:
+                        f.write(",")
+                    f.write(json.dumps(t) + ":")
+                    try:
+                        cur = conn.execute(f"SELECT * FROM {t}")
+                    except Exception as e:
+                        # La consulta fallo antes de escribir nada de la
+                        # tabla, asi que el JSON sigue siendo valido.
+                        f.write(json.dumps({"_error": str(e)}))
+                        continue
+                    f.write("[")
+                    primero = True
+                    while True:
+                        lote = cur.fetchmany(BATCH)
+                        if not lote:
+                            break
+                        for r in lote:
+                            if not primero:
+                                f.write(",")
+                            f.write(json.dumps(dict(r), ensure_ascii=False,
+                                               default=str))
+                            primero = False
+                        filas += len(lote)
+                    f.write("]")
+                f.write("}")
         finally:
             conn.close()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, default=str)
-        cap = (f"💾 Backup (Postgres → JSON) · {filas} filas · {stamp}\n"
+        mb = os.path.getsize(path) / 1024 / 1024
+        cap = (f"💾 Backup (Postgres → JSON) · {filas} filas · {mb:.1f} MB · "
+               f"{stamp}\n"
                "Guárdalo en sitio seguro. Restaurable con un script de import.")
         return path, f"wallets_backup_{stamp}.json", cap
 

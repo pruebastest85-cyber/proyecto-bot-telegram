@@ -156,6 +156,10 @@ CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
 CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
+-- Faltaba, y es el que necesita el grafo de influencia: agrupa las
+-- apariciones por token para saber quien compro antes que quien. Sin el,
+-- ese calculo recorre la tabla entera.
+CREATE INDEX IF NOT EXISTS idx_appearances_mint ON appearances(mint);
 """
 
 # Esquema PostgreSQL: mismas tablas con TODAS las columnas ya incluidas
@@ -308,6 +312,10 @@ CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
 CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
+-- Faltaba, y es el que necesita el grafo de influencia: agrupa las
+-- apariciones por token para saber quien compro antes que quien. Sin el,
+-- ese calculo recorre la tabla entera.
+CREATE INDEX IF NOT EXISTS idx_appearances_mint ON appearances(mint);
 """
 
 
@@ -342,6 +350,12 @@ class _PgCursor:
 
     def fetchall(self):
         return self._cur.fetchall()
+
+    def fetchmany(self, size=1000):
+        """Lectura por lotes. La tiene sqlite3 de serie y faltaba aqui;
+        sin ella, leer una tabla grande obliga a fetchall() y a meterla
+        entera en memoria."""
+        return self._cur.fetchmany(size)
 
     @property
     def rowcount(self):

@@ -20,7 +20,10 @@ import influence as _inf
 import alpha as _alpha
 
 _CACHE = {"v": None, "ts": 0.0}
-_TTL = 300
+_TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
+                   # cada 10 min y forzaba una reconstruccion en CADA
+                   # pasada. Son datos historicos: media hora de
+                   # retraso no cambia ninguna cifra.
 
 FEATURES = ["temprana", "experiencia", "leader", "pct_first",
             "originality", "alpha", "wallet_score", "consistency"]
@@ -66,6 +69,8 @@ def _vectors():
 def _graph():
     if _CACHE["v"] is not None and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["v"]
+    # Soltar el viejo ANTES de construir el nuevo (ver alpha.graph).
+    _CACHE["v"] = None
     g = _vectors()
     _CACHE["v"] = g
     _CACHE["ts"] = time.time()
