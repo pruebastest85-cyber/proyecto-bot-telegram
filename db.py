@@ -443,7 +443,12 @@ def get_conn():
                 ("appearances", "delay_s", "INTEGER"),
                 ("appearances", "price_at_buy", "DOUBLE PRECISION"),
                 ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
-                ("appearances", "entry_multiple", "DOUBLE PRECISION")]:
+                ("appearances", "entry_multiple", "DOUBLE PRECISION"),
+                # Paper trading en DÓLARES. Antes solo se guardaba el monto
+                # en SOL y el PnL se calculaba aplicando a SOL una variación
+                # de precio medida en USD: dos unidades distintas mezcladas.
+                ("paper_trades", "stake_usd", "DOUBLE PRECISION"),
+                ("paper_trades", "pnl_usd", "DOUBLE PRECISION")]:
             try:
                 pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                            f"{col} {typ}")
@@ -490,6 +495,12 @@ def get_conn():
                      ("entry_multiple", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE appearances ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
+    # Paper trading en DÓLARES (ver el comentario del bloque Postgres).
+    for col, typ in [("stake_usd", "REAL"), ("pnl_usd", "REAL")]:
+        try:
+            conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
     # Tabla predictions (motor predictivo): columnas añadidas después de
@@ -790,6 +801,34 @@ def top_wallets(conn, limit=20):
            LIMIT ?""",
         (limit,),
     ).fetchall()
+
+
+TOP_ALERTAS_DEFAULT = 15
+
+
+def top_addresses(conn, limit: int | None = None) -> set:
+    """Direcciones de las mejores `limit` billeteras, con EXACTAMENTE el
+    mismo orden que /top y que wallet_ident.posicion.
+
+    Existe para que las alertas y las tarjetas salgan solo del top: antes
+    alertaba cualquier billetera con la ⭐, sin importar en qué puesto
+    estuviera. Si algo falla devuelve un conjunto vacío, y quien llama
+    debe interpretarlo como "no filtres" en vez de "no alertes nada".
+    """
+    if limit is None:
+        try:
+            limit = int(float(get_setting(
+                conn, "top_alertas", str(TOP_ALERTAS_DEFAULT))
+                or TOP_ALERTAS_DEFAULT))
+        except (TypeError, ValueError):
+            limit = TOP_ALERTAS_DEFAULT
+    if limit <= 0:
+        return set()
+    try:
+        return {r["address"] for r in top_wallets(conn, limit)}
+    except Exception as e:
+        print(f"· top_addresses falló ({e}); no se filtra por top")
+        return set()
 
 
 def wallet_evidence(conn, wallet: str):
