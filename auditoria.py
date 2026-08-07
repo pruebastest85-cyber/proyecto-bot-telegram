@@ -23,6 +23,10 @@ import sys
 import tempfile
 import unicodedata
 
+# Forzar UTF-8 en la consola de Windows (CP1252 no soporta emojis/acentos)
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 RAIZ = os.path.dirname(os.path.abspath(__file__))
 FILES = [f for f in sorted(os.listdir(RAIZ)) if f.endswith(".py")
          and f != "auditoria.py"]
@@ -43,7 +47,8 @@ def _base():
     # auditor no hay que tocarlo cada vez que se añade una tabla nueva.
     for fn in FILES:
         try:
-            txt = open(os.path.join(RAIZ, fn)).read()
+            with open(os.path.join(RAIZ, fn), encoding="utf-8") as f:
+                txt = f.read()
         except OSError:
             continue
         for m in re.finditer(r"CREATE TABLE IF NOT EXISTS\s+\w+\s*\(",
@@ -77,7 +82,8 @@ def _base():
 def _arboles():
     for fn in FILES:
         try:
-            yield fn, ast.parse(open(os.path.join(RAIZ, fn)).read(), fn)
+            with open(os.path.join(RAIZ, fn), encoding="utf-8") as f:
+                yield fn, ast.parse(f.read(), fn)
         except SyntaxError as e:
             fallos.append(f"{fn}: no compila — {e}")
 
@@ -86,9 +92,26 @@ def clase1_sql(raw):
     """SQL contra el esquema real."""
     n = 0
     for fn, tree in _arboles():
+        # Trozos de f-string: NO son consultas, son pedazos de una.
+        #
+        # El filtro `"{" in s` de abajo descarta el SQL con huecos, pero
+        # solo funciona con cadenas normales. En un f-string, Python parte
+        # el texto en Constant sueltos que ya no contienen la llave, así
+        # que llegaban aquí como si fueran consultas enteras y se
+        # denunciaban tablas "inexistentes" que en realidad son CTEs
+        # definidas en otro trozo de la misma consulta.
+        #
+        # Validar un fragmento no demuestra nada, así que se saltan. El
+        # SQL compuesto en tiempo de ejecución hay que cubrirlo con una
+        # prueba propia (ver test_influence_equivalencia.py).
+        trozos = {id(c) for j in ast.walk(tree)
+                  if isinstance(j, ast.JoinedStr)
+                  for c in ast.walk(j) if isinstance(c, ast.Constant)}
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Constant)
                     and isinstance(node.value, str)):
+                continue
+            if id(node) in trozos:
                 continue
             s = node.value.strip()
             if not SQLRE.match(s) or "{" in s or "%s" in s:
@@ -303,7 +326,8 @@ def clase4_literales():
     """Valores escritos vs filtrados (desajustes por tilde/mayúscula)."""
     escritos, filtrados = {}, {}
     for fn in FILES:
-        txt = open(os.path.join(RAIZ, fn)).read()
+        with open(os.path.join(RAIZ, fn), encoding="utf-8") as f:
+            txt = f.read()
         for col in ("grade", "ai_class", "side", "status", "tier"):
             for m in re.finditer(rf"{col}\s*=\s*'([^']+)'", txt):
                 escritos.setdefault(col, set()).add(m.group(1))

@@ -12,18 +12,39 @@ Fuente: tabla `appearances` (wallet, mint, buy_time al segundo, buy_rank).
 Para cada token ganador ordena a las billeteras por hora de compra y
 acumula, sobre TODOS los tokens, quién precede a quién y con qué demora.
 
-Cacheado en memoria (TTL corto) porque recorrer el grafo es O(pares).
+DÓNDE SE HACE LA CUENTA — y por qué importa
+-------------------------------------------
+El conteo de parejas lo hace la BASE DE DATOS, no Python.
+
+Antes se traían todas las apariciones y se recorrían en memoria todas las
+parejas de compradores de cada token. Eso crece al CUADRADO: 100
+compradores en un token son 4.950 parejas; 500 son 124.750. Se guardaba un
+diccionario con una lista por pareja, se cacheaba y no se soltaba nunca.
+El servicio moría por «Out of memory» en Railway (agosto 2026).
+
+Ahora la agregación va en SQL con `HAVING shared >= MIN_SHARED`. No se
+pierde ni un dato: las parejas con menos coincidencias ya las descartaba
+`_weight()`, así que nunca se usaban para nada. Simplemente dejan de
+fabricarse y de ocupar memoria.
+
+Empate de tiempos: si dos billeteras compran el token en el mismo segundo,
+antes el orden lo decidía el orden en que la base devolvía las filas — es
+decir, era arbitrario y podía cambiar entre ejecuciones. Ahora desempata la
+dirección de la billetera, que es estable. Es MÁS determinista que antes,
+no menos.
 """
 
 import calendar
 import time
-from collections import defaultdict
-from statistics import median
 
+import db as _db
 from db import get_conn
 
 _CACHE = {"g": None, "ts": 0.0}
-_TTL = 300
+_TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
+                   # cada 10 min y forzaba una reconstruccion en CADA
+                   # pasada. Son datos historicos: media hora de
+                   # retraso no cambia ninguna cifra.
 MIN_SHARED = 3          # nº mínimo de tokens compartidos para confiar en una arista
 STRONG_EDGE = 0.60      # peso mínimo para considerar A→B una relación fuerte
 
@@ -37,84 +58,191 @@ def _ts(s):
         return None
 
 
+def _pg() -> bool:
+    return bool(getattr(_db, "USE_PG", False))
+
+
+def _ts_sql(col: str) -> str:
+    """Segundos desde época a partir del texto ISO, o NULL si no tiene ese
+    formato exacto. Replica lo que hace `_ts()` en Python: si la cadena no
+    encaja con "%Y-%m-%dT%H:%M:%SZ", el tiempo se considera desconocido."""
+    if _pg():
+        return (f"CASE WHEN {col} ~ "
+                f"'^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T[0-9]{{2}}:[0-9]{{2}}:"
+                f"[0-9]{{2}}Z$' "
+                f"THEN CAST(EXTRACT(EPOCH FROM CAST({col} AS timestamp)) "
+                f"AS BIGINT) END")
+    return (f"CASE WHEN {col} GLOB "
+            f"'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T"
+            f"[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' "
+            f"THEN CAST(strftime('%s', {col}) AS INTEGER) END")
+
+
+def _cte_apariciones() -> str:
+    """Apariciones utilizables, con su clave de orden dentro del token.
+
+    `ord` reproduce el criterio de Python: la hora de compra si se conoce
+    y, si no, 10^12 + buy_rank para que las desconocidas queden al final.
+    """
+    ts = _ts_sql("a.buy_time")
+    return f"""
+    ap AS (
+        SELECT a.mint AS mint, a.wallet AS wallet,
+               {ts} AS ts,
+               COALESCE({ts}, 1000000000000 + COALESCE(a.buy_rank, 0)) AS ord
+        FROM appearances a
+        JOIN wallets w ON w.address = a.wallet
+        WHERE COALESCE(w.is_bot, 0) = 0
+    )"""
+
+
+# Una fila por cada par ordenado (x antes que y) dentro de un mismo token.
+# El desempate por dirección de billetera hace el orden estable.
+_CTE_PARES = """
+    pares AS (
+        SELECT x.wallet AS wa, y.wallet AS wb,
+               CASE WHEN x.ts IS NOT NULL AND y.ts IS NOT NULL
+                         AND y.ts >= x.ts
+                    THEN y.ts - x.ts END AS gap
+        FROM ap x
+        JOIN ap y ON x.mint = y.mint
+                 AND (x.ord < y.ord OR (x.ord = y.ord AND x.wallet < y.wallet))
+    )"""
+
+
+def _mediana(origen: str, grupo: str, valor: str) -> str:
+    """SQL que devuelve (k, m) con la mediana exacta de `valor` por `grupo`.
+
+    En Postgres lo hace PERCENTILE_CONT. SQLite no lo tiene, así que se
+    toma el valor central — o la media de los dos centrales si hay un
+    número par — que es exactamente lo que hace statistics.median.
+    """
+    if _pg():
+        return (f"SELECT {grupo} AS k, "
+                f"PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {valor}) AS m "
+                f"FROM {origen} WHERE {valor} IS NOT NULL GROUP BY {grupo}")
+    return (f"SELECT k, AVG(v * 1.0) AS m FROM ("
+            f"  SELECT {grupo} AS k, {valor} AS v,"
+            f"         ROW_NUMBER() OVER (PARTITION BY {grupo} "
+            f"                            ORDER BY {valor}) AS rn,"
+            f"         COUNT(*) OVER (PARTITION BY {grupo}) AS cg"
+            f"  FROM {origen} WHERE {valor} IS NOT NULL"
+            f") t WHERE rn IN ((cg + 1) / 2, (cg + 2) / 2) GROUP BY k")
+
+
+def _redondear(x):
+    """round() de Python sobre lo que devuelva la base (puede ser Decimal)."""
+    return None if x is None else round(float(x))
+
+
 def _build():
+    ap = _cte_apariciones()
     conn = get_conn()
     try:
-        rows = conn.execute(
-            """SELECT a.mint, a.wallet, a.buy_time, a.buy_rank
-               FROM appearances a JOIN wallets w ON w.address = a.wallet
-               WHERE COALESCE(w.is_bot, 0) = 0""").fetchall()
         meta = {r["address"]: {"alias": r["alias"],
                                "wallet_score": r["wallet_score"],
                                "ai_class": r["ai_class"]}
                 for r in conn.execute(
                     "SELECT address, alias, wallet_score, ai_class FROM wallets"
                 ).fetchall()}
+
+        # ── Parejas: solo las que superan MIN_SHARED ──────────────────────
+        # `shared` es el nº de tokens en común (las dos direcciones sumadas).
+        # Las que no llegan al mínimo las descartaba igualmente _weight(),
+        # así que filtrarlas aquí no pierde nada y evita materializarlas.
+        med_par = _mediana("pares", "wa || '>' || wb", "gap")
+        filas = conn.execute(f"""
+            WITH {ap}, {_CTE_PARES},
+            cnt AS (SELECT wa, wb, COUNT(*) AS n FROM pares GROUP BY wa, wb),
+            med AS ({med_par})
+            SELECT c.wa AS wa, c.wb AS wb, c.n AS n, m.m AS med,
+                   c.n + COALESCE(r.n, 0) AS shared
+            FROM cnt c
+            LEFT JOIN cnt r ON r.wa = c.wb AND r.wb = c.wa
+            LEFT JOIN med m ON m.k = c.wa || '>' || c.wb
+            WHERE c.n + COALESCE(r.n, 0) >= {int(MIN_SHARED)}
+        """).fetchall()
+
+        edges, both = {}, {}
+        for r in filas:
+            edges[(r["wa"], r["wb"])] = {"count": r["n"],
+                                         "med_gap": _redondear(r["med"])}
+            both[frozenset((r["wa"], r["wb"]))] = r["shared"]
+
+        # ── Estadísticas por billetera ────────────────────────────────────
+        def _mapa(sql):
+            return {r["k"]: r["m"] for r in conn.execute(sql).fetchall()}
+
+        appear = _mapa(f"WITH {ap} SELECT wallet AS k, COUNT(*) AS m "
+                       f"FROM ap GROUP BY wallet")
+        leads = _mapa(f"WITH {ap}, {_CTE_PARES} "
+                      f"SELECT wa AS k, COUNT(*) AS m FROM pares GROUP BY wa")
+        lags = _mapa(f"WITH {ap}, {_CTE_PARES} "
+                     f"SELECT wb AS k, COUNT(*) AS m FROM pares GROUP BY wb")
+
+        # Líder de cada token = la de menor `ord`, desempatando por
+        # dirección. Solo cuenta en tokens con 2+ compradores, igual que
+        # antes. Se usa para `first_count` y para la demora.
+        cte_lider = f"""
+            {ap},
+            n_tok AS (SELECT mint, COUNT(*) AS c FROM ap GROUP BY mint),
+            lider AS (
+                SELECT p.mint AS mint, MIN(p.wallet) AS wallet
+                FROM ap p
+                JOIN n_tok t ON t.mint = p.mint AND t.c >= 2
+                WHERE p.ord = (SELECT MIN(q.ord) FROM ap q
+                               WHERE q.mint = p.mint)
+                GROUP BY p.mint
+            )"""
+        first = _mapa(f"WITH {cte_lider} "
+                      f"SELECT wallet AS k, COUNT(*) AS m "
+                      f"FROM lider GROUP BY wallet")
+
+        lead_s = _mapa(f"WITH {ap}, {_CTE_PARES} "
+                       f"{_mediana('pares', 'wa', 'gap')}")
+        lag_s = _mapa(f"WITH {ap}, {_CTE_PARES} "
+                      f"{_mediana('pares', 'wb', 'gap')}")
+
+        # Demora de cada billetera respecto al PRIMER comprador del token.
+        # Se excluye a la propia líder por dirección, no por posición: así
+        # un empate no borra por error a la otra billetera empatada.
+        cte_demora = f"""
+            {cte_lider},
+            prim AS (
+                SELECT l.mint AS mint, l.wallet AS wallet, a3.ts AS ts
+                FROM lider l
+                JOIN ap a3 ON a3.mint = l.mint AND a3.wallet = l.wallet
+            ),
+            demoras AS (
+                SELECT a2.wallet AS wallet, a2.ts - prim.ts AS d
+                FROM ap a2
+                JOIN prim ON prim.mint = a2.mint
+                WHERE a2.wallet <> prim.wallet
+                  AND a2.ts IS NOT NULL AND prim.ts IS NOT NULL
+                  AND a2.ts >= prim.ts
+            )"""
+        delay_s = _mapa(f"WITH {cte_demora} "
+                        f"{_mediana('demoras', 'wallet', 'd')}")
     finally:
         conn.close()
 
-    by_token = defaultdict(list)
-    for r in rows:
-        by_token[r["mint"]].append((r["wallet"], _ts(r["buy_time"]), r["buy_rank"]))
-
-    edges = defaultdict(lambda: {"count": 0, "gaps": []})   # (a,b): a antes de b
-    both = defaultdict(int)                                  # frozenset{a,b}
-    appear = defaultdict(int)
-    first = defaultdict(int)
-    leads = defaultdict(int)
-    lags = defaultdict(int)
-    lead_gaps = defaultdict(list)     # segundos que la wallet va por delante
-    lag_gaps = defaultdict(list)      # segundos que la wallet va por detrás
-    delay_leader = defaultdict(list)  # segundos tras el PRIMER comprador del token
-
-    for entries in by_token.values():
-        for w, ts, rk in entries:
-            appear[w] += 1
-        if len(entries) < 2:
-            continue
-        ordered = sorted(entries,
-                         key=lambda e: (e[1] if e[1] is not None
-                                        else 10**12 + (e[2] or 0)))
-        first[ordered[0][0]] += 1
-        lead_w, lead_ts, _ = ordered[0]
-        if lead_ts is not None:
-            for w, tw, _ in ordered[1:]:
-                if tw is not None and tw >= lead_ts:
-                    delay_leader[w].append(tw - lead_ts)
-        n = len(ordered)
-        for i in range(n):
-            a, ta, _ = ordered[i]
-            for j in range(i + 1, n):
-                b, tb, _ = ordered[j]
-                if a == b:
-                    continue
-                e = edges[(a, b)]
-                e["count"] += 1
-                both[frozenset((a, b))] += 1
-                leads[a] += 1
-                lags[b] += 1
-                if ta is not None and tb is not None and tb >= ta:
-                    gap = tb - ta
-                    e["gaps"].append(gap)
-                    lead_gaps[a].append(gap)
-                    lag_gaps[b].append(gap)
-
     wallets = {}
-    for w in appear:
-        lo, la = leads[w], lags[w]
+    for w, n_ap in appear.items():
+        lo, la = leads.get(w, 0), lags.get(w, 0)
         tot = lo + la
+        fc = first.get(w, 0)
         wallets[w] = {
             "alias": (meta.get(w, {}) or {}).get("alias") or w[:6],
             "wallet_score": (meta.get(w, {}) or {}).get("wallet_score"),
             "ai_class": (meta.get(w, {}) or {}).get("ai_class"),
-            "appearances": appear[w],
-            "first_count": first[w],
-            "pct_first": round(100 * first[w] / appear[w]) if appear[w] else 0,
+            "appearances": n_ap,
+            "first_count": fc,
+            "pct_first": round(100 * fc / n_ap) if n_ap else 0,
             "leader_score": round(100 * lo / tot) if tot else None,
             "follower_score": round(100 * la / tot) if tot else None,
-            "avg_lead_s": round(median(lead_gaps[w])) if lead_gaps[w] else None,
-            "avg_lag_s": round(median(lag_gaps[w])) if lag_gaps[w] else None,
-            "avg_delay_s": round(median(delay_leader[w])) if delay_leader[w] else None,
+            "avg_lead_s": _redondear(lead_s.get(w)),
+            "avg_lag_s": _redondear(lag_s.get(w)),
+            "avg_delay_s": _redondear(delay_s.get(w)),
         }
     return {"edges": edges, "both": both, "wallets": wallets, "meta": meta}
 
@@ -122,6 +250,9 @@ def _build():
 def graph():
     if _CACHE["g"] and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["g"]
+    # Soltar el viejo ANTES de construir el nuevo: si no, durante la
+    # construccion conviven dos grafos enteros y el pico es el doble.
+    _CACHE["g"] = None
     g = _build()
     _CACHE["g"] = g
     _CACHE["ts"] = time.time()
@@ -129,13 +260,16 @@ def graph():
 
 
 def _weight(g, a, b):
-    """Peso dirigido A→B: % de tokens compartidos en que A precede a B."""
+    """Peso dirigido A→B: % de tokens compartidos en que A precede a B.
+
+    La mediana de la demora ya viene calculada por la base (`med_gap`);
+    antes se guardaba la lista entera de demoras solo para sacarla aquí.
+    """
     sh = g["both"].get(frozenset((a, b)), 0)
     if sh < MIN_SHARED:
         return None, sh, None
-    c = g["edges"].get((a, b), {}).get("count", 0)
-    gaps = g["edges"].get((a, b), {}).get("gaps", [])
-    return c / sh, sh, (round(median(gaps)) if gaps else None)
+    e = g["edges"].get((a, b), {})
+    return e.get("count", 0) / sh, sh, e.get("med_gap")
 
 
 def role(address: str) -> str | None:

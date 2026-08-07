@@ -24,7 +24,10 @@ from collections import defaultdict
 from db import get_conn
 
 _CACHE = {"g": None, "ts": 0.0}
-_TTL = 300
+_TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
+                   # cada 10 min y forzaba una reconstruccion en CADA
+                   # pasada. Son datos historicos: media hora de
+                   # retraso no cambia ninguna cifra.
 MIN_SHARED = 3       # tokens compartidos con la cohorte para dar un score
 
 
@@ -104,6 +107,10 @@ def _build():
 def graph():
     if _CACHE["g"] is not None and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["g"]
+    # Soltar el viejo ANTES de construir el nuevo: si no, durante la
+    # construccion conviven dos estructuras enteras en memoria y el pico
+    # es el doble de lo necesario.
+    _CACHE["g"] = None
     g = _build()
     _CACHE["g"] = g
     _CACHE["ts"] = time.time()
