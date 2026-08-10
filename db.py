@@ -413,22 +413,38 @@ def _dedupe_aliases(conn):
             """SELECT alias FROM wallets
                WHERE alias IS NOT NULL AND COALESCE(is_bot, 0) = 0
                GROUP BY alias HAVING COUNT(*) > 1""").fetchall()
+        if not dups:
+            return
+        # Todos los apodos ya usados, para no renombrar hacia otro choque.
+        # ANTES se renombraba con make_alias(direccion), que es DETERMINISTA:
+        # si el nombre nuevo tambien estaba cogido, el choque era permanente
+        # y esto se repetia en CADA conexion a la base, para siempre. Con
+        # 13.595 billeteras y 46.464 nombres posibles los choques no son
+        # raros: por la paradoja del cumpleanos son ~2.000.
+        ocupados = {r["alias"] for r in conn.execute(
+            "SELECT alias FROM wallets WHERE alias IS NOT NULL").fetchall()}
+        from aliases import make_alias_unico
+        total = 0
         for d in dups:
             rows = conn.execute(
                 """SELECT address FROM wallets WHERE alias = ?
                    ORDER BY COALESCE(first_seen, ''), address""",
                 (d["alias"],)).fetchall()
-            from aliases import make_alias
+            # El PRIMERO conserva el nombre, asi que sigue ocupado: no hay
+            # que sacarlo de `ocupados`. Si se saca, make_alias_unico lo ve
+            # libre y devuelve exactamente el nombre que ya chocaba, porque
+            # todos los duplicados derivan del mismo nombre base.
             for r in rows[1:]:
-                # Renombrar cada repetido con un alias determinista y único
+                nuevo_alias = make_alias_unico(r["address"], ocupados)
+                ocupados.add(nuevo_alias)
                 conn.execute(
                     "UPDATE wallets SET alias = ? WHERE address = ?",
-                    (make_alias(r["address"]), r["address"]))
-            if rows[1:]:
-                print(f"· Alias duplicado: {d['alias']} → "
-                      f"{len(rows) - 1} se renombrarán")
-        if dups:
-            conn.commit()
+                    (nuevo_alias, r["address"]))
+                total += 1
+        conn.commit()
+        if total:
+            print(f"· Apodos duplicados resueltos: {total} "
+                  f"en {len(dups)} nombres")
     except Exception as e:
         print(f"· Dedupe de alias omitido: {e}")
 

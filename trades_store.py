@@ -47,7 +47,10 @@ MAX_TRADES_POR_WALLET = _int_env("MAX_TRADES_POR_WALLET", 3000)
 # En Postgres el archivo no viaja por Telegram (el backup es un volcado
 # JSON), así que el historial puede ser mucho mayor. En SQLite el backup va
 # comprimido, lo que ya multiplica varias veces el margen.
-_POR_DEFECTO = 5_000_000 if os.getenv("DATABASE_URL", "").strip() else 2_000_000
+# El tope de 5.000.000 llenó un volumen de 5 GB: 3,4 GB solo esta tabla.
+# 800.000 operaciones ocupan ~550 MB, que es asumible y sobra para calcular
+# métricas locales sin volver a pedirle nada a Helius.
+_POR_DEFECTO = 800_000 if os.getenv("DATABASE_URL", "").strip() else 300_000
 MAX_TRADES_TOTAL = _int_env("MAX_TRADES_TOTAL", _POR_DEFECTO)
 
 
@@ -78,6 +81,21 @@ def guardar(wallet: str, operaciones: list[dict]) -> int:
         conn = get_conn()
         try:
             _ensure(conn)
+            # No guardar historial de billeteras ya descartadas como bot.
+            # El perfilador las marca DESPUES de haberlas analizado, asi que
+            # sus operaciones se colaban y se quedaban para siempre: llegaron
+            # a ser 4,9 millones de filas (el 98% de la tabla, 3,4 GB) que
+            # nadie volvia a consultar. Llenaron el volumen de Postgres.
+            # La clasificacion se conserva en wallets.is_bot, que es lo que
+            # de verdad usa el sistema.
+            try:
+                r = conn.execute(
+                    "SELECT COALESCE(is_bot,0) b FROM wallets WHERE address=?",
+                    (wallet,)).fetchone()
+                if r and r["b"]:
+                    return 0
+            except Exception:
+                pass          # si la consulta falla, se guarda igual
             for o in operaciones:
                 sig = o.get("signature")
                 if not sig:
@@ -263,3 +281,30 @@ def resumen_text() -> str:
                f"{MAX_TRADES_TOTAL:,} en total (para que el backup diario "
                "siga cabiendo en Telegram)._")
     return "\n".join(out)
+
+
+def purgar_bots(conn=None) -> int:
+    """
+    Borra el historial de billeteras marcadas como bot. Se ejecuta en el
+    mantenimiento: una billetera se marca como bot DESPUES de perfilarla,
+    así que sus operaciones ya estaban guardadas.
+    """
+    propia = conn is None
+    if propia:
+        conn = get_conn()
+    try:
+        _ensure(conn)
+        cur = conn.execute(
+            "DELETE FROM trades WHERE wallet IN "
+            "(SELECT address FROM wallets WHERE COALESCE(is_bot,0)=1)")
+        n = cur.rowcount or 0
+        if n:
+            conn.commit()
+            print(f"🧹 Purgadas {n} operaciones de billeteras bot")
+        return n
+    except Exception as e:
+        print(f"· purgar_bots falló: {e}")
+        return 0
+    finally:
+        if propia:
+            conn.close()

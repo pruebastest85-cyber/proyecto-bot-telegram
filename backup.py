@@ -11,6 +11,7 @@ El historial acumulado (billeteras, apariciones, señales, clusters,
 predicciones) es lo que da valor al sistema: conviene respaldarlo.
 """
 
+import gzip
 import json
 import os
 import sqlite3
@@ -31,7 +32,7 @@ def make_backup() -> tuple[str, str, str]:
     stamp = time.strftime("%Y%m%d_%H%M")
 
     if getattr(_db, "USE_PG", False):
-        path = f"/tmp/backup_{stamp}.json"
+        path = f"/tmp/backup_{stamp}.json.gz"
         conn = _db.get_conn()
         filas = 0
         # Se escribe por lotes directamente al archivo. Antes se montaba
@@ -39,7 +40,8 @@ def make_backup() -> tuple[str, str, str]:
         # se volcaba: la base entera en memoria de golpe, cada 24 h. El
         # archivo que sale es identico; solo cambia como se construye.
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with gzip.open(path, "wt", encoding="utf-8",
+                           compresslevel=6) as f:
                 f.write("{")
                 for i, t in enumerate(TABLES):
                     if i:
@@ -70,10 +72,13 @@ def make_backup() -> tuple[str, str, str]:
         finally:
             conn.close()
         mb = os.path.getsize(path) / 1024 / 1024
-        cap = (f"💾 Backup (Postgres → JSON) · {filas} filas · {mb:.1f} MB · "
-               f"{stamp}\n"
-               "Guárdalo en sitio seguro. Restaurable con un script de import.")
-        return path, f"wallets_backup_{stamp}.json", cap
+        cap = (f"💾 Backup (Postgres → JSON.gz) · {filas} filas · "
+               f"{mb:.1f} MB · {stamp}\n"
+               "Restaurar con:  python restaurar_backup.py <archivo>")
+        if mb > 45:
+            cap += ("\n⚠️ Cerca del límite de 50 MB de Telegram: baja "
+                    "MAX_TRADES_TOTAL o excluye tablas grandes.")
+        return path, f"wallets_backup_{stamp}.json.gz", cap
 
     # ── SQLite: copia consistente con la API de backup ──
     path = f"/tmp/backup_{stamp}.db"

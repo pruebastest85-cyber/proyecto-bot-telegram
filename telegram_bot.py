@@ -489,7 +489,8 @@ async def backup_job(ctx: ContextTypes.DEFAULT_TYPE):
 
 async def watchdog_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        from maintenance import watchdog_check
+        from maintenance import watchdog_check, purgar_historial_bots
+        await asyncio.to_thread(purgar_historial_bots)
         await asyncio.to_thread(watchdog_check)
     except Exception as e:
         print(f"· watchdog_job falló: {e}")
@@ -1043,7 +1044,7 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     0 = sin límite (vuelve al comportamiento de antes: alerta cualquier ⭐).
     """
-    from db import set_setting, TOP_ALERTAS_DEFAULT
+    from db import set_setting, get_setting, TOP_ALERTAS_DEFAULT
     conn = get_conn()
     try:
         args = ctx.args or []

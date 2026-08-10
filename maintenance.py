@@ -93,6 +93,24 @@ def watchdog_check():
     except Exception as e:
         print(f"· Watchdog falló: {e}")
 
+def purgar_historial_bots() -> int:
+    """
+    Borra el historial de operaciones de billeteras marcadas como bot.
+
+    Se marca a una billetera como bot DESPUES de perfilarla, asi que sus
+    operaciones ya estan guardadas cuando llega el veredicto. Sin esta
+    limpieza se acumulan indefinidamente: llegaron a 4,9 millones de filas
+    (3,4 GB, el 98% de la tabla) y llenaron el volumen de Postgres al 100%,
+    tumbando la base entera. La clasificacion se conserva en wallets.is_bot.
+    """
+    try:
+        from trades_store import purgar_bots
+        return purgar_bots()
+    except Exception as e:
+        print(f"· purgar_historial_bots falló: {e}")
+        return 0
+
+
 
 def weekly_learning():
     """Analiza con IA las señales medidas y guarda hallazgos accionables."""
