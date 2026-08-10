@@ -23,6 +23,7 @@ Esquema:
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 from config import DB_PATH
@@ -449,46 +450,50 @@ def _dedupe_aliases(conn):
         print(f"· Dedupe de alias omitido: {e}")
 
 
-def get_conn():
-    """Devuelve una conexión lista para usar (SQLite o Postgres) con el
-    esquema ya creado. La interfaz es la misma en ambos modos."""
-    if USE_PG:
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = True
-        pg = _PgConn(conn)
-        pg.executescript(PG_SCHEMA)
-        # Migraciones idempotentes para bases ya existentes (Postgres soporta
-        # ADD COLUMN IF NOT EXISTS).
-        for tbl, col, typ in [
-                ("predictions", "tier", "TEXT"),
-                ("predictions", "first_confirm_s", "INTEGER"),
-                ("predictions", "price0", "DOUBLE PRECISION"),
-                ("wallets", "pnl_unreal", "DOUBLE PRECISION"),
-                ("wallets", "pnl_net", "DOUBLE PRECISION"),
-                ("wallets", "grade", "TEXT"),
-                ("wallets", "consistency", "DOUBLE PRECISION"),
-                ("wallets", "hold_median_min", "DOUBLE PRECISION"),
-                ("wallets", "roi_median", "DOUBLE PRECISION"),
-                ("appearances", "delay_s", "INTEGER"),
-                ("appearances", "price_at_buy", "DOUBLE PRECISION"),
-                ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
-                ("appearances", "entry_multiple", "DOUBLE PRECISION"),
-                # Paper trading en DÓLARES. Antes solo se guardaba el monto
-                # en SOL y el PnL se calculaba aplicando a SOL una variación
-                # de precio medida en USD: dos unidades distintas mezcladas.
-                ("paper_trades", "stake_usd", "DOUBLE PRECISION"),
-                ("paper_trades", "pnl_usd", "DOUBLE PRECISION")]:
-            try:
-                pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
-                           f"{col} {typ}")
-            except Exception:
-                pass
-        _dedupe_aliases(pg)
-        return pg
+# El esquema, las migraciones y el barrido de apodos son IDEMPOTENTES pero
+# no son gratis. Antes se ejecutaban en CADA conexion: cada webhook de Helius
+# entra en su propio hilo y abria varias conexiones, asi que Postgres se
+# quedaba sin cupo ("FATAL: sorry, too many clients already") y se perdian
+# transacciones enteras. Ahora la preparacion corre UNA vez por proceso y el
+# resto de conexiones solo conectan.
+_ESQUEMA_LISTO = False
+_ESQUEMA_LOCK = threading.Lock()
 
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
+
+def _preparar_pg(pg):
+    """Crea el esquema y aplica las migraciones en Postgres. Una sola vez."""
+    pg.executescript(PG_SCHEMA)
+    # Migraciones idempotentes para bases ya existentes (Postgres soporta
+    # ADD COLUMN IF NOT EXISTS).
+    for tbl, col, typ in [
+            ("predictions", "tier", "TEXT"),
+            ("predictions", "first_confirm_s", "INTEGER"),
+            ("predictions", "price0", "DOUBLE PRECISION"),
+            ("wallets", "pnl_unreal", "DOUBLE PRECISION"),
+            ("wallets", "pnl_net", "DOUBLE PRECISION"),
+            ("wallets", "grade", "TEXT"),
+            ("wallets", "consistency", "DOUBLE PRECISION"),
+            ("wallets", "hold_median_min", "DOUBLE PRECISION"),
+            ("wallets", "roi_median", "DOUBLE PRECISION"),
+            ("appearances", "delay_s", "INTEGER"),
+            ("appearances", "price_at_buy", "DOUBLE PRECISION"),
+            ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
+            ("appearances", "entry_multiple", "DOUBLE PRECISION"),
+            # Paper trading en DÓLARES. Antes solo se guardaba el monto
+            # en SOL y el PnL se calculaba aplicando a SOL una variación
+            # de precio medida en USD: dos unidades distintas mezcladas.
+            ("paper_trades", "stake_usd", "DOUBLE PRECISION"),
+            ("paper_trades", "pnl_usd", "DOUBLE PRECISION")]:
+        try:
+            pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
+                       f"{col} {typ}")
+        except Exception:
+            pass
+    _dedupe_aliases(pg)
+
+
+def _preparar_sqlite(conn):
+    """Lo mismo para SQLite. Una sola vez."""
     try:
         # WAL + busy_timeout: evita "database is locked" con los hilos del
         # webhook y los jobs periodicos escribiendo a la vez.
@@ -548,6 +553,38 @@ def get_conn():
             pass
     conn.commit()
     _dedupe_aliases(conn)
+
+
+def get_conn():
+    """Devuelve una conexion lista para usar (SQLite o Postgres) con el
+    esquema ya creado. La interfaz es la misma en ambos modos."""
+    global _ESQUEMA_LISTO
+    if USE_PG:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = True
+        pg = _PgConn(conn)
+        if not _ESQUEMA_LISTO:
+            with _ESQUEMA_LOCK:
+                if not _ESQUEMA_LISTO:
+                    _preparar_pg(pg)
+                    _ESQUEMA_LISTO = True
+        return pg
+
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        # WAL y busy_timeout son ajustes POR CONEXION, no del esquema: estos
+        # si tienen que aplicarse siempre.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except sqlite3.OperationalError:
+        pass
+    if not _ESQUEMA_LISTO:
+        with _ESQUEMA_LOCK:
+            if not _ESQUEMA_LISTO:
+                _preparar_sqlite(conn)
+                _ESQUEMA_LISTO = True
     return conn
 
 

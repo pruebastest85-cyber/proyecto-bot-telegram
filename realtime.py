@@ -118,19 +118,31 @@ def tg_send_photo(photo_bytes: bytes, caption: str = ""):
         print(f"· No se pudo enviar foto TG: {e}")
 
 
-def tracked_addresses() -> list[str]:
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT address FROM wallets WHERE is_tracked=1").fetchall()
-    conn.close()
+def tracked_addresses(conn=None) -> list[str]:
+    """Si se pasa `conn` se reutiliza (y NO se cierra: es de quien la abrio).
+    Sin `conn` abre y cierra la suya, como siempre."""
+    propia = conn is None
+    if propia:
+        conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT address FROM wallets WHERE is_tracked=1").fetchall()
+    finally:
+        if propia:
+            conn.close()
     return [r["address"] for r in rows]
 
 
-def watch_addresses() -> list[str]:
+def watch_addresses(conn=None) -> list[str]:
     """⭐ + candidatas prometedoras (liga de ascenso): las candidatas se
     monitorean en silencio para construir su track record real antes de
-    darles la estrella."""
-    conn = get_conn()
+    darles la estrella.
+
+    Igual que tracked_addresses: `conn` opcional para no abrir una conexion
+    nueva cuando quien llama ya tiene una."""
+    propia = conn is None
+    if propia:
+        conn = get_conn()
     stars = [r["address"] for r in conn.execute(
         "SELECT address FROM wallets WHERE is_tracked=1").fetchall()]
     hace_6h = int(time.time()) - 6 * 3600
@@ -150,7 +162,8 @@ def watch_addresses() -> list[str]:
             "WHERE status='abierta'").fetchall()]
     except Exception:
         huerfanas = []            # tabla aún sin crear
-    conn.close()
+    if propia:
+        conn.close()
     fuera = [c for c in cands if c not in stars]
     extra = [h for h in huerfanas if h not in stars and h not in fuera]
     return stars + fuera + extra
@@ -182,6 +195,7 @@ def sync_helius_webhook(forzar: bool = False) -> str:
     """
     if not PUBLIC_URL:
         return "PUBLIC_URL no configurada; webhook no sincronizado"
+    invalidar_vigiladas()      # la lista va a cambiar: que no quede cacheada
     addrs = watch_addresses()
     if not addrs:
         return "Sin billeteras ⭐ aún; nada que monitorear"
@@ -491,12 +505,51 @@ def _recarga_reciente(wallet: str, ts: int) -> float:
         return 0.0
 
 
+# La lista de vigiladas se consultaba en CADA webhook, con dos conexiones
+# nuevas cada vez. Cambia como mucho una vez por ciclo (cada 2 h), asi que
+# 60 s de cache no pierden nada y quitan casi toda la presion sobre Postgres.
+_VIG_TTL = 60.0
+_VIG_LOCK = threading.Lock()
+_VIG_CACHE = {"ts": 0.0, "watch": None, "stars": None}
+
+
+def _listas_vigiladas(conn):
+    """(vigiladas, ⭐) reutilizando `conn` y con cache de 60 s."""
+    ahora = time.time()
+    with _VIG_LOCK:
+        if (_VIG_CACHE["watch"] is not None
+                and ahora - _VIG_CACHE["ts"] < _VIG_TTL):
+            return _VIG_CACHE["watch"], _VIG_CACHE["stars"]
+    w = watch_addresses(conn)
+    e = tracked_addresses(conn)
+    with _VIG_LOCK:
+        _VIG_CACHE.update({"ts": ahora, "watch": w, "stars": e})
+    return w, e
+
+
+def invalidar_vigiladas():
+    """Fuerza releer la lista: se llama al cambiar las ⭐."""
+    with _VIG_LOCK:
+        _VIG_CACHE["ts"] = 0.0
+
+
 def process_transactions(txs: list[dict]):
-    tracked = set(watch_addresses())
-    stars = set(tracked_addresses())
+    # UNA conexion para todo el lote. Antes se abrian tres (watch_addresses,
+    # tracked_addresses y esta) por cada webhook y por cada hilo, que es lo
+    # que agotaba el cupo de Postgres.
+    conn = get_conn()
+    try:
+        _proc(txs, conn)
+    finally:
+        conn.close()
+
+
+def _proc(txs: list[dict], conn):
+    lista_w, lista_e = _listas_vigiladas(conn)
+    tracked = set(lista_w)
+    stars = set(lista_e)
     if not tracked:
         return
-    conn = get_conn()
     # Solo alertan las mejores del ranking (mismo orden que /top). Las
     # demás ⭐ se siguen midiendo en silencio, igual que las candidatas.
     # Conjunto vacío = no se pudo calcular → no filtramos, para no dejar
@@ -836,7 +889,6 @@ def process_transactions(txs: list[dict]):
                 paper_trading.close_on_wallet_sell(conn, trade, t, pos)
         except Exception as e:
             print(f"· Paper trading falló: {e}")
-    conn.close()
 
 
 flask_app = Flask(__name__)

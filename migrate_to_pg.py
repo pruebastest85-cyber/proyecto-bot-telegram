@@ -66,6 +66,28 @@ def _run():
     pg.autocommit = True
     cur = pg.cursor()
     cur.execute(db.PG_SCHEMA)
+
+    # ── Marca de migración ya hecha ───────────────────────────────────────
+    # Esto corre en CADA arranque del contenedor (Procfile). El .db de
+    # SQLite lleva meses congelado, pero se volvían a empujar sus ~11.000
+    # filas a Postgres en cada reinicio: no rompe nada (ON CONFLICT DO
+    # NOTHING) pero resucita billeteras ya purgadas y alarga el arranque.
+    # La huella es tamaño+fecha del archivo: si el .db no cambió, no hay
+    # nada nuevo que migrar. Si algún día cambia, la migración se repite
+    # sola, que es justo lo que se querría.
+    huella = f"{size}:{int(os.path.getmtime(DB_PATH)) if exists else 0}"
+    try:
+        cur.execute("CREATE TABLE IF NOT EXISTS settings "
+                    "(key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("SELECT value FROM settings WHERE key='migracion_sqlite'")
+        fila = cur.fetchone()
+        if fila and fila[0] == huella:
+            print(f"{TAG} el .db de SQLite no ha cambiado desde la última "
+                  f"migración ({huella}): no hay nada que copiar.")
+            pg.close()
+            return
+    except Exception as e:
+        print(f"{TAG} no pude leer la marca de migración ({e}); migro igual.")
     # Las tablas perezosas no están en PG_SCHEMA: se crean aquí para que
     # la copia no se salte el historial propio ni el aprendizaje.
     for ddl in (
@@ -170,6 +192,12 @@ def _run():
             print(f"{TAG} secuencia {t}: aviso: {e}")
 
     s.close()
+    try:
+        cur.execute(
+            "INSERT INTO settings (key, value) VALUES ('migracion_sqlite', %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (huella,))
+    except Exception as e:
+        print(f"{TAG} no pude guardar la marca de migración: {e}")
     pg.close()
     print(f"{TAG} MIGRACIÓN COMPLETA: {total} filas procesadas.")
 
