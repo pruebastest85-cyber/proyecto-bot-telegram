@@ -40,6 +40,11 @@ def posicion(conn, address: str, tope: int = 200):
         rows = conn.execute(
             """SELECT address FROM wallets WHERE is_bot = 0
                ORDER BY is_tracked DESC,
+                        -- Debe ser IDENTICO al de db.top_wallets (ver alli
+                        -- el porque): si divergen, /top y la posicion que
+                        -- se muestra en las tarjetas dejan de coincidir.
+                        CASE WHEN pnl_total IS NOT NULL AND pnl_total < 0
+                             THEN 1 ELSE 0 END,
                         CASE WHEN wallet_score IS NULL THEN 1 ELSE 0 END,
                         wallet_score DESC,
                         COALESCE(pnl_total, -1e9) DESC,

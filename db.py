@@ -861,6 +861,16 @@ def top_wallets(conn, limit=20):
                   ai_class, alias, pnl_30d, pnl_total, wallet_score
            FROM wallets WHERE is_bot = 0
            ORDER BY is_tracked DESC,
+                    -- Una ⭐ que PIERDE dinero no puede ocupar sitio en el
+                    -- top que alimenta las alertas y el copytrading. El
+                    -- wallet_score solo da 30 de 100 puntos al PnL, asi que
+                    -- una billetera que acierta mucho pero pierde fuerte de
+                    -- vez en cuando adelantaba a otras que si ganan: habia
+                    -- 2 en perdidas dentro del top 15 (una a -33,6 SOL) y
+                    -- 2 con mas de +100 SOL fuera. Se usa pnl_total: solo
+                    -- lo REALIZADO, no lo que aun tiene en cartera.
+                    CASE WHEN pnl_total IS NOT NULL AND pnl_total < 0
+                         THEN 1 ELSE 0 END,
                     CASE WHEN wallet_score IS NULL THEN 1 ELSE 0 END,
                     wallet_score DESC,
                     COALESCE(pnl_total, -1e9) DESC,

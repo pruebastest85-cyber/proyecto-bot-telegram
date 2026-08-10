@@ -287,12 +287,25 @@ def _ai_signal_verdict(payload: dict, smart: bool = False) -> dict | None:
             headers={"x-api-key": ANTHROPIC_API_KEY,
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
+            # SIN prefill del assistant. Antes se mandaba
+            # {"role":"assistant","content":"{"} para forzar JSON, pero los
+            # modelos 4.6+ (claude-sonnet-5 entre ellos) lo rechazan con
+            # 400: "This model does not support assistant message prefill".
+            # Fallaba el 100% de las llamadas al modelo potente, justo en
+            # las señales importantes (consenso o montos grandes), y caían
+            # al modelo rápido por el respaldo de abajo. Haiku 4.5 si lo
+            # aceptaba, por eso solo se veia fallar a sonnet.
+            # No hace falta el prefill: _extract_json ya saca el bloque
+            # {...} aunque venga envuelto en texto o markdown.
             json={"model": modelo, "max_tokens": 200,
-                  "messages": [{"role": "user", "content": prompt},
-                               {"role": "assistant", "content": "{"}]},
+                  "messages": [{"role": "user", "content": prompt}]},
             timeout=45)
+        if r.status_code >= 400:
+            # El motivo exacto viene en el CUERPO; raise_for_status solo
+            # deja "400 Client Error" y por eso costo tanto verlo.
+            print(f"· IA señal {modelo} HTTP {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
-        text = "{" + "".join(b.get("text", "") for b in r.json()["content"])
+        text = "".join(b.get("text", "") for b in r.json()["content"])
         return _extract_json(text)
     except Exception as e:
         print(f"· IA señal falló ({modelo}): {e}")
