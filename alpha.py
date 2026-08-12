@@ -18,6 +18,7 @@ nuevas. Cacheado en memoria como el grafo de influencia.
 """
 
 import calendar
+import threading
 import time
 from collections import defaultdict
 
@@ -104,17 +105,30 @@ def _build():
     return out
 
 
+_BUILD_LOCK = threading.Lock()
+
+
 def graph():
     if _CACHE["g"] is not None and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["g"]
     # Soltar el viejo ANTES de construir el nuevo: si no, durante la
     # construccion conviven dos estructuras enteras en memoria y el pico
     # es el doble de lo necesario.
-    _CACHE["g"] = None
-    g = _build()
-    _CACHE["g"] = g
-    _CACHE["ts"] = time.time()
-    return g
+    # CANDADO: sin el, dos hilos con el cache caducado construian el grafo
+    # A LA VEZ y las consultas pesadas corrian duplicadas en Postgres. El
+    # 12/8/2026 varios procesos simultaneos llenaron el disco con archivos
+    # temporales ("No space left on device"). El que llega segundo espera
+    # y recibe el grafo que construyo el primero, sin pagar nada.
+    with _BUILD_LOCK:
+        # Doble comprobacion: si otro hilo lo construyo mientras
+        # esperabamos el candado, ya esta fresco y se usa tal cual.
+        if _CACHE["g"] is not None and time.time() - _CACHE["ts"] < _TTL:
+            return _CACHE["g"]
+        _CACHE["g"] = None
+        g = _build()
+        _CACHE["g"] = g
+        _CACHE["ts"] = time.time()
+        return g
 
 
 def alpha_profile(address: str) -> dict | None:
