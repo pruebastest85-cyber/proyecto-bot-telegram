@@ -230,6 +230,40 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
     price = token.get("price")
     if not price or price <= 0:
         return
+
+    # ── Salida inteligente (solo reglas, sin IA) ──────────────────────
+    # Si el perfil de deriva post-venta dice que esta billetera "vende
+    # temprano" (el token sigue subiendo despues de sus ventas), NO se
+    # cierra con ella: se holdea con trailing stop y tope de tiempo.
+    # El stop-loss y el take-profit normales SIGUEN activos durante el
+    # hold. Todo queda registrado (politica, precio al vender la lider)
+    # para medir si el hold extra gano dinero de verdad.
+    # Solo si sigue siendo ⭐: si perdio la estrella, se cierra y punto.
+    if sigue_estrella and row["status"] == "abierta":
+        try:
+            from salidas import perfil_salida
+            perfil = perfil_salida(conn, row["wallet"])
+        except Exception:
+            perfil = None
+        if perfil and perfil.get("clase") == "vende temprano":
+            extra_min = _f(conn, "paper_hold_extra_min", 60.0)
+            hasta = int(time.time() + extra_min * 60)
+            conn.execute(
+                "UPDATE paper_trades SET politica='holdear', "
+                "precio_venta_lider=?, pico=?, hold_hasta=? WHERE id=?",
+                (price, price, hasta, row["id"]))
+            conn.commit()
+            deriva = perfil.get("deriva_24h")
+            if deriva is None:
+                deriva = perfil.get("deriva_1h")
+            _tg(f"🕐 *Hold extra* en {row['symbol']}: la ⭐ vendió, pero "
+                f"su perfil dice que vende temprano "
+                f"({deriva:+.0f}% de deriva tras sus ventas). "
+                f"Mantengo hasta {extra_min:.0f} min con trailing stop.")
+            print(f"🕐 Paper: hold extra en {row['symbol']} "
+                  f"(deriva {deriva:+.0f}%)")
+            return
+
     motivo = ("venta de la ⭐" if sigue_estrella
               else "venta (la billetera ya no es ⭐)")
     _close(conn, row, price, motivo, "🚪")
@@ -274,6 +308,24 @@ def update_open_trades() -> int:
         elif pct <= sl:
             _close(conn, row, price, "stop-loss", "🛑")
             cerradas += 1
+        elif _campo(row, "politica") == "holdear":
+            # Posicion en hold extra: la ⭐ ya vendio pero su perfil dice
+            # "vende temprano". Trailing stop sobre el maximo alcanzado
+            # desde su venta, y tope de tiempo. TP/SL de arriba siguen
+            # mandando (por eso este bloque va despues).
+            trail = abs(_f(conn, "paper_trail_pct", 15.0))
+            pico = max(_campo(row, "pico") or price, price)
+            if pico != _campo(row, "pico"):
+                conn.execute("UPDATE paper_trades SET pico=? WHERE id=?",
+                             (pico, row["id"]))
+                conn.commit()
+            caida = (price / pico - 1) * 100
+            if caida <= -trail:
+                _close(conn, row, price, "trailing del hold", "🪂")
+                cerradas += 1
+            elif now >= (_campo(row, "hold_hasta") or 0):
+                _close(conn, row, price, "fin del hold extra", "🕐")
+                cerradas += 1
         elif now - row["entry_ts"] > timeout:
             _close(conn, row, price, "tiempo", "⏰")
             cerradas += 1

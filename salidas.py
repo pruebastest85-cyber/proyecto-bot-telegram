@@ -122,3 +122,32 @@ def salidas_text(conn) -> str:
         "\n🕐 vende temprano → al copiarla conviene holdear más que ella"
         "\n🎯 sale en la cima → conviene vender en cuanto ella venda")
     return "\n".join(lineas)
+
+
+def hold_report(conn) -> str | None:
+    """Resultado medido de los holds extra cerrados: ¿ganar mas que
+    copiar la venta de la ⭐, o perder? Compara el precio de salida real
+    contra el precio al que vendio la lider. None si aun no hay datos."""
+    try:
+        rows = conn.execute(
+            """SELECT symbol, exit_price, precio_venta_lider, exit_reason
+               FROM paper_trades
+               WHERE politica='holdear' AND status<>'abierta'
+                 AND exit_price IS NOT NULL
+                 AND precio_venta_lider IS NOT NULL
+                 AND precio_venta_lider > 0
+               ORDER BY exit_ts DESC LIMIT 50""").fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    extras = [(r["exit_price"] / r["precio_venta_lider"] - 1) * 100
+              for r in rows]
+    gano = sum(1 for e in extras if e > 0)
+    med = median(extras)
+    lineas = [f"\n🕐 *Holds extra cerrados: {len(extras)}*",
+              f"El hold le gano a copiar la venta en {gano}/{len(extras)} "
+              f"· extra mediano {med:+.1f}%"]
+    for r, e in list(zip(rows, extras))[:5]:
+        lineas.append(f"  · {r['symbol']}: {e:+.1f}% ({r['exit_reason']})")
+    return "\n".join(lineas)

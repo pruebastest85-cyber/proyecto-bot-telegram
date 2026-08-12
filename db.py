@@ -483,7 +483,14 @@ def _preparar_pg(pg):
             # en SOL y el PnL se calculaba aplicando a SOL una variación
             # de precio medida en USD: dos unidades distintas mezcladas.
             ("paper_trades", "stake_usd", "DOUBLE PRECISION"),
-            ("paper_trades", "pnl_usd", "DOUBLE PRECISION")]:
+            ("paper_trades", "pnl_usd", "DOUBLE PRECISION"),
+            # Salida inteligente (fase 2 del copy trading): si el perfil de
+            # la billetera dice "vende temprano", al vender ella la posicion
+            # simulada NO cierra: holdea con trailing stop y tope de tiempo.
+            ("paper_trades", "politica", "TEXT"),
+            ("paper_trades", "precio_venta_lider", "DOUBLE PRECISION"),
+            ("paper_trades", "pico", "DOUBLE PRECISION"),
+            ("paper_trades", "hold_hasta", "BIGINT")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -533,7 +540,9 @@ def _preparar_sqlite(conn):
         except sqlite3.OperationalError:
             pass
     # Paper trading en DÓLARES (ver el comentario del bloque Postgres).
-    for col, typ in [("stake_usd", "REAL"), ("pnl_usd", "REAL")]:
+    for col, typ in [("stake_usd", "REAL"), ("pnl_usd", "REAL"),
+                     ("politica", "TEXT"), ("precio_venta_lider", "REAL"),
+                     ("pico", "REAL"), ("hold_hasta", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

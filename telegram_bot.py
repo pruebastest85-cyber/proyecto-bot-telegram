@@ -1592,10 +1592,13 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @solo_admin
 async def cmd_salidas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Deriva post-venta por billetera: ¿vende temprano o sale en la cima?"""
-    from salidas import salidas_text
+    from salidas import salidas_text, hold_report
     conn = get_conn()
     try:
         txt = salidas_text(conn)
+        extra = hold_report(conn)
+        if extra:
+            txt += "\n" + extra
     finally:
         conn.close()
     await update.message.reply_text(txt, parse_mode="Markdown")
