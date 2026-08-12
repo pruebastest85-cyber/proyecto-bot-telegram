@@ -1590,6 +1590,18 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_salidas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Deriva post-venta por billetera: ¿vende temprano o sale en la cima?"""
+    from salidas import salidas_text
+    conn = get_conn()
+    try:
+        txt = salidas_text(conn)
+    finally:
+        conn.close()
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
 async def cmd_hermanas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔗 Buscando vínculos entre billeteras ⭐… (puede tardar ~1 min)")
@@ -1684,6 +1696,7 @@ def main():
     app.add_handler(CommandHandler("exportar", cmd_exportar))
     app.add_handler(CommandHandler("errores", cmd_errores))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
+    app.add_handler(CommandHandler("salidas", cmd_salidas))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
     app.add_handler(CommandHandler("clusters", cmd_clusters))

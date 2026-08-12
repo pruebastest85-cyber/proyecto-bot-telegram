@@ -298,6 +298,26 @@ def track_outcomes() -> int:
            ORDER BY ts ASC LIMIT 30""",
         (int(now - HOUR), int(now - 3 * HOUR),
          int(now - DAY), int(now - 30 * HOUR))).fetchall()
+    # 1b) VENTAS de billeteras ⭐, mismas ventanas de medicion. Se miden
+    #     para conocer la "deriva post-venta" de cada billetera: si el token
+    #     sigue subiendo despues de que ella vende (vende demasiado pronto)
+    #     o se desploma (sale en la cima). Ese perfil decide, en el copy
+    #     trading, si conviene holdear mas que la billetera copiada o salir
+    #     antes. Solo ⭐: las salidas de las candidatas no se copian, y
+    #     medirlas gastaria cupo de DexScreener sin uso. Query y cupo
+    #     APARTE para que las ventas no compitan con las compras.
+    pend_ventas = conn.execute(
+        """SELECT s.signature, s.wallet, s.mint, s.ts, s.price_usd,
+                  s.price_1h, s.price_24h, s.alerted_pct, s.symbol
+           FROM signals s
+           JOIN wallets w ON w.address = s.wallet
+           WHERE s.side='venta' AND s.price_usd IS NOT NULL
+             AND s.price_usd > 0 AND w.is_tracked = 1
+             AND ((s.price_1h IS NULL AND s.ts <= ? AND s.ts >= ?)
+               OR (s.price_24h IS NULL AND s.ts <= ? AND s.ts >= ?))
+           ORDER BY s.ts ASC LIMIT 15""",
+        (int(now - HOUR), int(now - 3 * HOUR),
+         int(now - DAY), int(now - 30 * HOUR))).fetchall()
     # 2) Señales recientes (<48h) para las alertas de multiplos (x2, x3…);
     #    query aparte para que no compitan por el cupo con las mediciones.
     #
@@ -331,7 +351,7 @@ def track_outcomes() -> int:
         return _px_mc(mint)[0]
 
     updated = 0
-    for s in pend:
+    for s in list(pend) + list(pend_ventas):
         base = s["price_usd"]
         p = _px(s["mint"])
         if not p:
