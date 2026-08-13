@@ -118,6 +118,25 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
     if ya:
         return False
 
+    # ── Enfriamiento por token ────────────────────────────────────────
+    # La posicion de un token la abre la PRIMERA ⭐ que lo compra y la
+    # cierra su propia venta. Sin este bloqueo, si otra ⭐ compraba el
+    # mismo token minutos despues del cierre, se abria una posicion
+    # NUEVA a otro market cap: re-compras en cadena del mismo token.
+    # Un token ya jugado no se vuelve a jugar hasta pasar el plazo
+    # ("paper_reentrada_h"; 0 = sin bloqueo).
+    reent_h = _f(conn, "paper_reentrada_h", 24.0)
+    if reent_h > 0:
+        ult = conn.execute(
+            "SELECT MAX(exit_ts) t FROM paper_trades "
+            "WHERE mint=? AND status<>'abierta'",
+            (trade["mint"],)).fetchone()
+        if ult and ult["t"] and time.time() - ult["t"] < reent_h * 3600:
+            print(f"· Paper: {trade['mint'][:8]}… ya se jugó hace "
+                  f"{(time.time()-ult['t'])/3600:.1f}h (enfriamiento "
+                  f"{reent_h:g}h); no se reabre")
+            return False
+
     # Máximo de posiciones abiertas
     max_abiertas = int(_f(conn, "paper_max_abiertas", 10))
     n = conn.execute(
@@ -155,22 +174,26 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
     fee_sol = _f(conn, "paper_fee_sol", 0.0005)
     costo_entrada = fee_sol * su if su and su > 0 else None
 
+    # Cuanto tardamos en copiar: desde que la ⭐ opero en la cadena
+    # hasta este instante. Con el camino caliente deberia rondar 1-3 s;
+    # por la via normal (analisis completo + IA) eran 5-15 s.
+    demora = max(0.0, time.time() - (trade.get("ts") or time.time()))
     conn.execute(
         """INSERT INTO paper_trades
            (signature, wallet, mint, symbol, stake_sol, stake_usd,
             entry_price, entry_ts, signal_score, status,
-            tokens_raw, slippage_entrada_pct, costos_usd)
-           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?)""",
+            tokens_raw, slippage_entrada_pct, costos_usd, demora_s)
+           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?)""",
         (trade["signature"], trade["wallet"], trade["mint"], sym,
          stake, stake_usd, price, trade["ts"], score,
          str(cot["tokens_raw"]) if cot else None,
          cot.get("slippage_pct") if cot else None,
-         costo_entrada))
+         costo_entrada, round(demora, 2)))
     conn.commit()
     monto = (f"{_usd(stake_usd)} ({stake:.2f} SOL)" if stake_usd is not None
              else f"{stake:.2f} SOL")
     print(f"🧪 Paper: compra simulada {monto} en {sym} "
-          f"@ ${_precio(price)}")
+          f"@ ${_precio(price)} · demora {demora:.1f}s")
     extra_cot = ""
     if cot and cot.get("slippage_pct") is not None:
         extra_cot = (f"\n📉 Slippage real de entrada: "
@@ -411,6 +434,9 @@ def resumen_text() -> str:
         "AVG(slippage_entrada_pct) slip "
         "FROM paper_trades WHERE status='cerrada' "
         "AND pnl_usd_neto IS NOT NULL AND pnl_usd IS NOT NULL").fetchone()
+    demora = conn.execute(
+        "SELECT AVG(demora_s) d, COUNT(demora_s) n FROM paper_trades "
+        "WHERE demora_s IS NOT NULL").fetchone()
     por_motivo = conn.execute(
         "SELECT exit_reason r, COUNT(*) n, SUM(pnl_sol) pnl, "
         "SUM(pnl_usd) pnl_usd "
@@ -457,6 +483,9 @@ def resumen_text() -> str:
                 + (f"\n   slippage medio de entrada "
                    f"{real['slip']:.1f}%" if real["slip"] is not None
                    else ""))
+        if demora and (demora["n"] or 0) > 0:
+            out.append(f"⚡ Demora señal→copia: {demora['d']:.1f}s de media "
+                       f"({demora['n']} medidas)")
     else:
         out.append("Aún no hay operaciones cerradas.")
     out.append("")

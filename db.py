@@ -498,7 +498,10 @@ def _preparar_pg(pg):
             ("paper_trades", "slippage_entrada_pct", "DOUBLE PRECISION"),
             ("paper_trades", "costos_usd", "DOUBLE PRECISION"),
             ("paper_trades", "usd_salida_real", "DOUBLE PRECISION"),
-            ("paper_trades", "pnl_usd_neto", "DOUBLE PRECISION")]:
+            ("paper_trades", "pnl_usd_neto", "DOUBLE PRECISION"),
+            # Camino caliente: segundos entre la operacion de la ⭐ en la
+            # cadena y la apertura del paper. Mide cuanto tardamos en copiar.
+            ("paper_trades", "demora_s", "DOUBLE PRECISION")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -553,7 +556,7 @@ def _preparar_sqlite(conn):
                      ("pico", "REAL"), ("hold_hasta", "INTEGER"),
                      ("tokens_raw", "TEXT"), ("slippage_entrada_pct", "REAL"),
                      ("costos_usd", "REAL"), ("usd_salida_real", "REAL"),
-                     ("pnl_usd_neto", "REAL")]:
+                     ("pnl_usd_neto", "REAL"), ("demora_s", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

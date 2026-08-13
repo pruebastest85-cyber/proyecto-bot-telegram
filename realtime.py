@@ -598,6 +598,36 @@ def _proc(txs: list[dict], conn):
                              trade["sol"], tokens_tx, trade["ts"])
         es_acum = bool(es_compra and pos.get("is_accumulation"))
 
+        # ── CAMINO CALIENTE (copy trading rápido) ────────────────────
+        # Si la operacion es de una ⭐ del top, el paper actua YA con una
+        # sola consulta ligera de precio (~0,5 s). El analisis completo
+        # (RugCheck, IA, alertas, motor predictivo) sigue corriendo
+        # despues, para el registro y el chat, pero ya no retrasa la
+        # copia: por la via normal pasaban 5-15 s entre la jugada de la
+        # ⭐ y el paper; por aqui, 1-3 s. Es la antesala del executor
+        # real, que colgara de este mismo punto.
+        #   - Compra: abre el paper (idempotente: si la via normal llega
+        #     despues, el candado "ya abierta" evita el duplicado).
+        #   - Venta: cierra/holdea segun el perfil (tambien idempotente).
+        # Copia TODA operacion de una ⭐ del top (asi funciona copiar
+        # billeteras); el umbral de score solo gobierna las ALERTAS.
+        # Apagable sin codigo: setting paper_rapido = 0.
+        if trade["wallet"] in stars and ((not top) or trade["wallet"] in top):
+            try:
+                if int(float(get_setting(conn, "paper_rapido", "1") or 1)):
+                    import paper_trading as _pt
+                    from signal_tracker import _price_mc as _pm
+                    _p0, _mc0 = _pm(trade["mint"])
+                    if _p0 and _p0 > 0:
+                        _t0 = {"price": _p0, "symbol": trade["mint"][:6],
+                               "mc": _mc0}
+                        if es_compra:
+                            _pt.open_trade(conn, trade, _t0, None)
+                        else:
+                            _pt.close_on_wallet_sell(conn, trade, _t0, pos)
+            except Exception as e:
+                print(f"· Camino caliente falló ({e}); sigue la vía normal")
+
         since = trade["ts"] - CONSENSUS_WINDOW_MIN * 60
         consensus = conn.execute(
             "SELECT COUNT(DISTINCT s.wallet) c FROM signals s "
