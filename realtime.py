@@ -688,6 +688,27 @@ def _proc(txs: list[dict], conn):
         conn.execute(
             "UPDATE signals SET signal_score=? WHERE signature=?",
             (score_sig, trade["signature"]))
+        # ── Relleno de la posicion abierta por el camino caliente ──
+        # El camino caliente abre el paper ANTES de conocer el ticker real
+        # (pone el prefijo del mint) y antes de calcular el score (NULL).
+        # La via normal ya no puede reabrir la posicion (candado "una por
+        # token"), asi que RELLENA esos dos huecos en la fila existente.
+        # Sin esto, /paper mostraba "7xKq4B" en vez de "BONK" y la columna
+        # signal_score quedaba vacia para el analisis de scores.
+        try:
+            sym_real = t.get("symbol")
+            if sym_real:
+                conn.execute(
+                    "UPDATE paper_trades SET symbol=? "
+                    "WHERE signature=? AND symbol=?",
+                    (sym_real, trade["signature"], trade["mint"][:6]))
+            conn.execute(
+                "UPDATE paper_trades SET signal_score=? "
+                "WHERE signature=? AND signal_score IS NULL",
+                (score_sig, trade["signature"]))
+            conn.commit()
+        except Exception as e:
+            print(f"· Relleno de paper falló: {e}")
         conn.commit()
 
         # Liga de ascenso: candidatas sin ⭐ se miden en silencio.
