@@ -71,13 +71,21 @@ Responde SOLO con JSON válido, sin markdown ni texto extra:
 
 
 def _ensure_columns(conn):
+    # IF NOT EXISTS donde el motor lo soporta (Postgres): sin el, cada
+    # ejecucion intentaba el ALTER a secas, Postgres lo rechazaba con
+    # 'column ... already exists' y aunque el except lo tragaba, el error
+    # quedaba EN ROJO en los logs de Postgres en cada evaluacion — puro
+    # ruido que ya asusto mas de una vez. SQLite no soporta la clausula,
+    # asi que alli se mantiene el intento pelado con su except.
+    import db as _db
+    ine = "IF NOT EXISTS " if getattr(_db, "USE_PG", False) else ""
     for col, typ in [("ai_class", "TEXT"), ("ai_follow", "INTEGER"),
                      ("ai_reason", "TEXT"), ("alias", "TEXT"),
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
                      ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
                      ("pnl_updated", "TEXT")]:
         try:
-            conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
+            conn.execute(f"ALTER TABLE wallets ADD COLUMN {ine}{col} {typ}")
         except Exception:
             pass
     conn.commit()
