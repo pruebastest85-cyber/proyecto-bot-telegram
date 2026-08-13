@@ -139,21 +139,45 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
     # al cerrar: lo que quieres saber es cuánto dinero habrías puesto.
     su = _sol_a_usd()
     stake_usd = stake * su if su and su > 0 else None
+
+    # ── Ejecucion simulada: cotizacion REAL de Jupiter (sin ejecutar) ──
+    # ¿Cuantos tokens darian AHORA por este monto, con la ruta real y su
+    # impacto? Eso captura el slippage y los fees de pool que el paper
+    # clasico ignoraba. Si Jupiter no responde o no hay ruta, la posicion
+    # se abre igual que siempre (solo que sin la parte "real").
+    cot = None
+    if stake_usd:
+        try:
+            from ejecucion_simulada import cotizar_compra
+            cot = cotizar_compra(trade["mint"], stake_usd, su)
+        except Exception as e:
+            print(f"· Paper: cotización de entrada falló ({e})")
+    fee_sol = _f(conn, "paper_fee_sol", 0.0005)
+    costo_entrada = fee_sol * su if su and su > 0 else None
+
     conn.execute(
         """INSERT INTO paper_trades
            (signature, wallet, mint, symbol, stake_sol, stake_usd,
-            entry_price, entry_ts, signal_score, status)
-           VALUES (?,?,?,?,?,?,?,?,?, 'abierta')""",
+            entry_price, entry_ts, signal_score, status,
+            tokens_raw, slippage_entrada_pct, costos_usd)
+           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?)""",
         (trade["signature"], trade["wallet"], trade["mint"], sym,
-         stake, stake_usd, price, trade["ts"], score))
+         stake, stake_usd, price, trade["ts"], score,
+         str(cot["tokens_raw"]) if cot else None,
+         cot.get("slippage_pct") if cot else None,
+         costo_entrada))
     conn.commit()
     monto = (f"{_usd(stake_usd)} ({stake:.2f} SOL)" if stake_usd is not None
              else f"{stake:.2f} SOL")
     print(f"🧪 Paper: compra simulada {monto} en {sym} "
           f"@ ${_precio(price)}")
+    extra_cot = ""
+    if cot and cot.get("slippage_pct") is not None:
+        extra_cot = (f"\n📉 Slippage real de entrada: "
+                     f"{cot['slippage_pct']:.1f}% (cotización Jupiter)")
     _tg(f"🧪 *Paper:* compra simulada\n"
         f"💵 Monto: *{monto}*\n"
-        f"🪙 Token: *{sym}*  ·  entrada ${_precio(price)}\n"
+        f"🪙 Token: *{sym}*  ·  entrada ${_precio(price)}{extra_cot}\n"
         f"📂 {n + 1}/{max_abiertas} abiertas\nVer: /paper")
     return True
 
@@ -186,12 +210,35 @@ def _close(conn, row, price: float, reason: str, icon: str):
     # SUM(stake_usd) del resumen se saltaría esa fila y el ROI saldría
     # calculado sobre un total demasiado pequeño — lo detectó la prueba:
     # dos operaciones cerradas y solo una contada en «invertido».
+    # ── Salida REAL: cotizar en Jupiter la venta de los tokens crudos
+    # que la cotizacion de entrada dijo que recibiriamos. El PnL neto =
+    # dolares que darian de verdad - invertido - fees de prioridad de las
+    # dos transacciones. Es la cifra que decide si el copy trading real
+    # seria rentable; pnl_usd (el clasico) queda para comparar.
+    pnl_neto = usd_salida = None
+    costos = _campo(row, "costos_usd")
+    tokens_raw = _campo(row, "tokens_raw")
+    if tokens_raw and stake_usd is not None:
+        try:
+            from ejecucion_simulada import cotizar_venta
+            su2 = _sol_a_usd()
+            v = cotizar_venta(row["mint"], int(tokens_raw), su2) \
+                if su2 and su2 > 0 else None
+            if v:
+                fee_sol = _f(conn, "paper_fee_sol", 0.0005)
+                costos = (costos or 0) + fee_sol * su2
+                usd_salida = v["usd_salida"]
+                pnl_neto = usd_salida - stake_usd - costos
+        except Exception as e:
+            print(f"· Paper: cotización de salida falló ({e})")
+
     conn.execute(
         """UPDATE paper_trades SET status='cerrada', exit_price=?,
            exit_ts=?, exit_reason=?, pnl_pct=?, pnl_sol=?, pnl_usd=?,
-           stake_usd=? WHERE id=?""",
+           stake_usd=?, costos_usd=?, usd_salida_real=?, pnl_usd_neto=?
+           WHERE id=?""",
         (price, int(time.time()), reason, pct, pnl, pnl_usd,
-         stake_usd, row["id"]))
+         stake_usd, costos, usd_salida, pnl_neto, row["id"]))
     conn.commit()
 
     res = "🟢" if pnl >= 0 else "🔴"
@@ -201,10 +248,14 @@ def _close(conn, row, price: float, reason: str, icon: str):
     else:
         linea_pnl = (f"{res} PnL: *{pnl:+.3f} SOL*  "
                      f"sobre {row['stake_sol']:.2f} SOL")
+    linea_neto = ""
+    if pnl_neto is not None:
+        linea_neto = (f"\n⚖️ Neto real (Jupiter, con slippage y fees): "
+                      f"*{_usd_firmado(pnl_neto)}*")
     _tg(f"{icon} *Paper cerrada* ({reason}): *{row['symbol']}*\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
         f"*${_precio(price)}*  ({pct:+.0f}%)\n"
-        f"{linea_pnl}\n"
+        f"{linea_pnl}{linea_neto}\n"
         f"Resumen: /paper")
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: "
           f"{_usd_firmado(pnl_usd) if pnl_usd is not None else f'{pnl:+.3f} SOL'}")
@@ -352,6 +403,14 @@ def resumen_text() -> str:
         "SUM(CASE WHEN stake_usd IS NULL THEN 1 ELSE 0 END) sin_usd, "
         "SUM(CASE WHEN pnl_sol>0 THEN 1 ELSE 0 END) wins "
         "FROM paper_trades WHERE status='cerrada'").fetchone()
+    # Comparacion optimista vs REAL, solo sobre las cerradas que tienen
+    # ambas cifras: la brecha entre las dos es el costo verdadero de
+    # ejecutar (slippage + fees) y decide si el copy trading real da.
+    real = conn.execute(
+        "SELECT COUNT(*) n, SUM(pnl_usd) opt, SUM(pnl_usd_neto) neto, "
+        "AVG(slippage_entrada_pct) slip "
+        "FROM paper_trades WHERE status='cerrada' "
+        "AND pnl_usd_neto IS NOT NULL AND pnl_usd IS NOT NULL").fetchone()
     por_motivo = conn.execute(
         "SELECT exit_reason r, COUNT(*) n, SUM(pnl_sol) pnl, "
         "SUM(pnl_usd) pnl_usd "
@@ -387,6 +446,17 @@ def resumen_text() -> str:
             cifra = (_usd_firmado(m["pnl_usd"]) if m["pnl_usd"] is not None
                      else f"{(m['pnl'] or 0):+.2f} SOL")
             out.append(f"   · {m['r']}: {m['n']}  ({cifra})")
+        if real and (real["n"] or 0) > 0:
+            brecha = (real["opt"] or 0) - (real["neto"] or 0)
+            out.append(
+                f"⚖️ *Realidad vs papel* ({real['n']} con cotización "
+                f"Jupiter):\n"
+                f"   papel {_usd_firmado(real['opt'] or 0)} → "
+                f"neto real *{_usd_firmado(real['neto'] or 0)}*  "
+                f"(costo de ejecutar: {_usd(brecha)})"
+                + (f"\n   slippage medio de entrada "
+                   f"{real['slip']:.1f}%" if real["slip"] is not None
+                   else ""))
     else:
         out.append("Aún no hay operaciones cerradas.")
     out.append("")

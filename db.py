@@ -490,7 +490,15 @@ def _preparar_pg(pg):
             ("paper_trades", "politica", "TEXT"),
             ("paper_trades", "precio_venta_lider", "DOUBLE PRECISION"),
             ("paper_trades", "pico", "DOUBLE PRECISION"),
-            ("paper_trades", "hold_hasta", "BIGINT")]:
+            ("paper_trades", "hold_hasta", "BIGINT"),
+            # Ejecucion simulada (cotizaciones reales de Jupiter, sin
+            # ejecutar): tokens crudos recibidos al "comprar", slippage
+            # medido al entrar, costos fijos estimados y PnL NETO real.
+            ("paper_trades", "tokens_raw", "TEXT"),
+            ("paper_trades", "slippage_entrada_pct", "DOUBLE PRECISION"),
+            ("paper_trades", "costos_usd", "DOUBLE PRECISION"),
+            ("paper_trades", "usd_salida_real", "DOUBLE PRECISION"),
+            ("paper_trades", "pnl_usd_neto", "DOUBLE PRECISION")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -542,7 +550,10 @@ def _preparar_sqlite(conn):
     # Paper trading en DÓLARES (ver el comentario del bloque Postgres).
     for col, typ in [("stake_usd", "REAL"), ("pnl_usd", "REAL"),
                      ("politica", "TEXT"), ("precio_venta_lider", "REAL"),
-                     ("pico", "REAL"), ("hold_hasta", "INTEGER")]:
+                     ("pico", "REAL"), ("hold_hasta", "INTEGER"),
+                     ("tokens_raw", "TEXT"), ("slippage_entrada_pct", "REAL"),
+                     ("costos_usd", "REAL"), ("usd_salida_real", "REAL"),
+                     ("pnl_usd_neto", "REAL")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
