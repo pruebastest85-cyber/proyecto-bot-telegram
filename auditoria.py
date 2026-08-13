@@ -76,6 +76,12 @@ def _base():
     c.commit()
     raw = sqlite3.connect(os.environ["DB_PATH"])
     raw.row_factory = sqlite3.Row
+    # Tablas TEMPORALES que el codigo crea en tiempo de ejecucion y que
+    # por tanto no estan en el esquema: se declaran aqui con sus columnas
+    # reales para que la clase 1 pueda validar las consultas que las usan
+    # (y siga detectando errores de columnas contra ellas).
+    raw.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_pares "
+                "(wa TEXT, wb TEXT, gap REAL)")     # influence._build
     return raw
 
 

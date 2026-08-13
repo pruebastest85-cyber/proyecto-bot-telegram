@@ -140,6 +140,21 @@ def _build():
     ap = _cte_apariciones()
     conn = get_conn()
     try:
+        # ── Dieta de temporales (13/8/2026) ───────────────────────────
+        # El join de pares se recalculaba en CADA una de las ~6 consultas
+        # de este build, y en Postgres cada una podia usar 3 workers en
+        # paralelo, cada uno con sus propios archivos temporales: el 12/8
+        # esa multiplicacion lleno el disco entero (4+ GB de pgsql_tmp) y,
+        # tras ponerle tope (temp_file_limit=512MB), excedia el tope y el
+        # grafo no se construia. Ahora: sin paralelismo (una consulta = un
+        # proceso) y `pares` se materializa UNA vez en una tabla temporal
+        # que las demas consultas leen. Mismo resultado, ~1/6 del costo.
+        try:
+            conn.execute("SET max_parallel_workers_per_gather = 0")
+        except Exception:
+            pass          # SQLite no lo tiene; alli tampoco hace falta
+        conn.execute(f"CREATE TEMPORARY TABLE tmp_pares AS "
+                     f"WITH {ap}, {_CTE_PARES} SELECT * FROM pares")
         meta = {r["address"]: {"alias": r["alias"],
                                "wallet_score": r["wallet_score"],
                                "ai_class": r["ai_class"]}
@@ -151,10 +166,11 @@ def _build():
         # `shared` es el nº de tokens en común (las dos direcciones sumadas).
         # Las que no llegan al mínimo las descartaba igualmente _weight(),
         # así que filtrarlas aquí no pierde nada y evita materializarlas.
-        med_par = _mediana("pares", "wa || '>' || wb", "gap")
+        med_par = _mediana("tmp_pares", "wa || '>' || wb", "gap")
         filas = conn.execute(f"""
-            WITH {ap}, {_CTE_PARES},
-            cnt AS (SELECT wa, wb, COUNT(*) AS n FROM pares GROUP BY wa, wb),
+            WITH
+            cnt AS (SELECT wa, wb, COUNT(*) AS n FROM tmp_pares
+                    GROUP BY wa, wb),
             med AS ({med_par})
             SELECT c.wa AS wa, c.wb AS wb, c.n AS n, m.m AS med,
                    c.n + COALESCE(r.n, 0) AS shared
@@ -176,10 +192,10 @@ def _build():
 
         appear = _mapa(f"WITH {ap} SELECT wallet AS k, COUNT(*) AS m "
                        f"FROM ap GROUP BY wallet")
-        leads = _mapa(f"WITH {ap}, {_CTE_PARES} "
-                      f"SELECT wa AS k, COUNT(*) AS m FROM pares GROUP BY wa")
-        lags = _mapa(f"WITH {ap}, {_CTE_PARES} "
-                     f"SELECT wb AS k, COUNT(*) AS m FROM pares GROUP BY wb")
+        leads = _mapa("SELECT wa AS k, COUNT(*) AS m FROM tmp_pares "
+                      "GROUP BY wa")
+        lags = _mapa("SELECT wb AS k, COUNT(*) AS m FROM tmp_pares "
+                     "GROUP BY wb")
 
         # Líder de cada token = la de menor `ord`, desempatando por
         # dirección. Solo cuenta en tokens con 2+ compradores, igual que
@@ -199,10 +215,8 @@ def _build():
                       f"SELECT wallet AS k, COUNT(*) AS m "
                       f"FROM lider GROUP BY wallet")
 
-        lead_s = _mapa(f"WITH {ap}, {_CTE_PARES} "
-                       f"{_mediana('pares', 'wa', 'gap')}")
-        lag_s = _mapa(f"WITH {ap}, {_CTE_PARES} "
-                      f"{_mediana('pares', 'wb', 'gap')}")
+        lead_s = _mapa(_mediana('tmp_pares', 'wa', 'gap'))
+        lag_s = _mapa(_mediana('tmp_pares', 'wb', 'gap'))
 
         # Demora de cada billetera respecto al PRIMER comprador del token.
         # Se excluye a la propia líder por dirección, no por posición: así
@@ -245,6 +259,8 @@ def _build():
             "avg_lag_s": _redondear(lag_s.get(w)),
             "avg_delay_s": _redondear(delay_s.get(w)),
         }
+    # (tmp_pares y el SET de paralelismo mueren solos con la conexion,
+    #  que el finally de arriba ya cerro)
     return {"edges": edges, "both": both, "wallets": wallets, "meta": meta}
 
 
