@@ -166,18 +166,36 @@ def _build():
         # `shared` es el nº de tokens en común (las dos direcciones sumadas).
         # Las que no llegan al mínimo las descartaba igualmente _weight(),
         # así que filtrarlas aquí no pierde nada y evita materializarlas.
-        med_par = _mediana("tmp_pares", "wa || '>' || wb", "gap")
-        filas = conn.execute(f"""
-            WITH
-            cnt AS (SELECT wa, wb, COUNT(*) AS n FROM tmp_pares
-                    GROUP BY wa, wb),
-            med AS ({med_par})
-            SELECT c.wa AS wa, c.wb AS wb, c.n AS n, m.m AS med,
+        #
+        # En DOS pasos a proposito (13/8/2026): antes la mediana se
+        # calculaba para TODOS los pares y luego el WHERE tiraba casi
+        # todas. Ese PERCENTILE_CONT ordenaba 1,8M de filas con clave de
+        # texto y, sumado a los joins de la misma consulta, excedia
+        # temp_file_limit (512 MB) y el grafo no se construia. Ahora:
+        # 1º se decide QUIENES califican (conteo barato), 2º la mediana
+        # se calcula SOLO para esos. Resultado identico (lo garantiza el
+        # test de equivalencia); el ordenamiento pasa de millones de
+        # filas a las de los pares que de verdad forman aristas.
+        conn.execute(f"""
+            CREATE TEMPORARY TABLE tmp_calif AS
+            WITH cnt AS (SELECT wa, wb, COUNT(*) AS n FROM tmp_pares
+                         GROUP BY wa, wb)
+            SELECT c.wa AS wa, c.wb AS wb, c.n AS n,
                    c.n + COALESCE(r.n, 0) AS shared
             FROM cnt c
             LEFT JOIN cnt r ON r.wa = c.wb AND r.wb = c.wa
-            LEFT JOIN med m ON m.k = c.wa || '>' || c.wb
-            WHERE c.n + COALESCE(r.n, 0) >= {int(MIN_SHARED)}
+            WHERE c.n + COALESCE(r.n, 0) >= {int(MIN_SHARED)}""")
+        conn.execute(
+            "CREATE TEMPORARY TABLE tmp_pares_calif AS "
+            "SELECT p.wa, p.wb, p.gap FROM tmp_pares p "
+            "JOIN tmp_calif q ON q.wa = p.wa AND q.wb = p.wb")
+        med_par = _mediana("tmp_pares_calif", "wa || '>' || wb", "gap")
+        filas = conn.execute(f"""
+            WITH med AS ({med_par})
+            SELECT q.wa AS wa, q.wb AS wb, q.n AS n, m.m AS med,
+                   q.shared AS shared
+            FROM tmp_calif q
+            LEFT JOIN med m ON m.k = q.wa || '>' || q.wb
         """).fetchall()
 
         edges, both = {}, {}
@@ -282,8 +300,19 @@ def graph():
         # esperabamos el candado, ya esta fresco y se usa tal cual.
         if _CACHE["g"] is not None and time.time() - _CACHE["ts"] < _TTL:
             return _CACHE["g"]
+        # Enfriamiento tras fallo: el 13/8 la construccion fallaba (temp
+        # de Postgres) y cada llamada la reintentaba entera: 9 consultas
+        # de ~30 s en 4 minutos, pura lena al fuego. Si fallo hace poco,
+        # se devuelve un grafo vacio valido y se reintenta en 10 min.
+        if time.time() - _CACHE.get("fallo", 0) < 600:
+            return {"edges": {}, "both": {}, "wallets": {}, "meta": {}}
         _CACHE["g"] = None
-        g = _build()
+        try:
+            g = _build()
+        except Exception as e:
+            _CACHE["fallo"] = time.time()
+            print(f"· Grafo de influencia falló ({e}); reintento en 10 min")
+            return {"edges": {}, "both": {}, "wallets": {}, "meta": {}}
         _CACHE["g"] = g
         _CACHE["ts"] = time.time()
         return g

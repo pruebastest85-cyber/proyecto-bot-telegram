@@ -82,6 +82,10 @@ def _base():
     # (y siga detectando errores de columnas contra ellas).
     raw.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_pares "
                 "(wa TEXT, wb TEXT, gap REAL)")     # influence._build
+    raw.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_calif "
+                "(wa TEXT, wb TEXT, n INTEGER, shared INTEGER)")
+    raw.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_pares_calif "
+                "(wa TEXT, wb TEXT, gap REAL)")
     return raw
 
 
