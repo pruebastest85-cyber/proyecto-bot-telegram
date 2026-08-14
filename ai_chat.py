@@ -26,41 +26,79 @@ _ADDR = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
 
 
 def _snapshot() -> dict:
+    """Foto de la base para la IA del chat.
+
+    Rediseñada el 13/8/2026: la version anterior no incluia NADA del paper
+    trading (la IA "respondia" sumando el PnL on-chain de las billeteras y
+    vendiendolo como resultado del paper), la lista de rastreadas se
+    cortaba por el tope de 8000 caracteres ("solo tienes 16 activas") y
+    senales_totales (historico completo) se presentaba como si fuera de
+    24 h. Ahora: bloque real de paper, top 30 en el ORDEN VERDADERO del
+    ranking, campos minimos para caber en el tope, y una leyenda con las
+    unidades para que el modelo no confunda de quien es cada cifra.
+    """
+    import time as _t
     conn = get_conn()
-    wallets = [dict(r) for r in conn.execute(
-        """SELECT address, alias, ai_class, score, wallet_score,
-                  winning_tokens_count, pnl_30d, pnl_total, is_tracked
-           FROM wallets WHERE is_bot=0
-           ORDER BY score DESC LIMIT 15""").fetchall()]
-    # TODAS las billeteras rastreadas (⭐) — sin límite, para no confundir
-    rastreadas = [dict(r) for r in conn.execute(
-        """SELECT address, alias, ai_class, score, wallet_score,
-                  winning_tokens_count, pnl_30d, pnl_total
-           FROM wallets WHERE is_tracked=1
-           ORDER BY score DESC""").fetchall()]
+    hace24 = int(_t.time()) - 86400
+
+    # El top 30 REAL (mismo orden que /top y que el copy trading)
+    from db import top_wallets
+    top30 = [{"puesto": i, "alias": r["alias"], "address": r["address"][:8],
+              "score_ia": r["wallet_score"],
+              "pnl_onchain_sol": r["pnl_total"]}
+             for i, r in enumerate(top_wallets(conn, 30), 1)]
+
+    # Paper trading DE VERDAD (la simulacion del dueño, en USD)
+    pt24 = dict(conn.execute(
+        """SELECT COUNT(*) cerradas, SUM(pnl_usd) pnl_usd,
+                  SUM(pnl_usd_neto) pnl_neto_usd, SUM(stake_usd) invertido
+           FROM paper_trades WHERE status<>'abierta'
+             AND exit_ts >= ?""", (hace24,)).fetchone())
+    pt_tot = dict(conn.execute(
+        """SELECT COUNT(*) cerradas, SUM(pnl_usd) pnl_usd,
+           (SELECT COUNT(*) FROM paper_trades WHERE status='abierta') abiertas
+           FROM paper_trades WHERE status<>'abierta'""").fetchone())
+    pt_ult = [dict(r) for r in conn.execute(
+        """SELECT symbol, exit_reason, pnl_usd, pnl_usd_neto
+           FROM paper_trades WHERE status<>'abierta'
+           ORDER BY exit_ts DESC LIMIT 5""").fetchall()]
+
     senales = [dict(r) for r in conn.execute(
-        """SELECT wallet, mint, symbol, side, sol, ts, chg_1h, chg_24h, mc
-           FROM signals ORDER BY ts DESC LIMIT 20""").fetchall()]
-    posiciones = [dict(r) for r in conn.execute(
-        """SELECT wallet, mint, tokens, sol_cost, realized_sol, buys, sells
-           FROM positions ORDER BY last_ts DESC LIMIT 25""").fetchall()]
+        """SELECT wallet, symbol, side, sol, ts, chg_24h
+           FROM signals ORDER BY ts DESC LIMIT 10""").fetchall()]
     tot = {
         "billeteras": conn.execute(
             "SELECT COUNT(*) c FROM wallets").fetchone()["c"],
-        "rastreadas": conn.execute(
+        "rastreadas_con_estrella": conn.execute(
             "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1").fetchone()["c"],
         "descartadas_bots": conn.execute(
             "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"],
         "tokens_ganadores": conn.execute(
             "SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"],
-        "senales_totales": conn.execute(
+        "senales_historico_completo": conn.execute(
             "SELECT COUNT(*) c FROM signals").fetchone()["c"],
+        "senales_24h": conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE ts >= ?",
+            (hace24,)).fetchone()["c"],
     }
     conn.close()
-    return {"totales": tot, "top_billeteras": wallets,
-            "billeteras_rastreadas": rastreadas,
-            "senales_recientes": senales,
-            "posiciones_recientes": posiciones}
+    return {
+        "leyenda": {
+            "pnl_onchain_sol": "ganancia DE ESA BILLETERA en la cadena, "
+                               "en SOL. NO es dinero del dueño ni del paper",
+            "paper_trading": "la simulacion de copy trading del dueño, en "
+                             "DOLARES (stakes de ~76 USD). Es la unica "
+                             "cifra que es 'suya'",
+            "senales_historico_completo": "desde el inicio del sistema, "
+                                          "NO son de hoy",
+            "top_30": "el orden REAL del ranking que alerta y se copia",
+        },
+        "totales": tot,
+        "paper_trading": {"ultimas_24h_usd": pt24, "acumulado_usd": pt_tot,
+                          "ultimas_cerradas": pt_ult},
+        "top_30": top30,
+        "senales_recientes": senales,
+    }
 
 
 def answer_question(pregunta: str) -> str:

@@ -75,7 +75,13 @@ SYSTEM = (
     "(incluido cuánto tiene o cuánto profit hizo una billetera) usa "
     "consultar_base, y perfil_billetera si preguntan por una dirección "
     "concreta. Para acciones que modifican, invoca la herramienta "
-    "directamente: el sistema le pedirá confirmación al usuario, no tú.")
+    "directamente: el sistema le pedirá confirmación al usuario, no tú. "
+    "REGLAS DE HONESTIDAD: nunca inventes cifras ni conceptos que no "
+    "estén en los datos de las herramientas. El pnl de una billetera es "
+    "SU ganancia on-chain, no la del dueño; las ganancias del dueño son "
+    "SOLO las del bloque paper_trading (en dólares). Si te preguntan "
+    "algo que no está en los datos, dilo claro y sugiere el comando "
+    "exacto (/paper, /salidas, /top, /status) en vez de improvisar.")
 
 HISTORY_TURNS = 12   # mensajes de memoria (6 intercambios)
 
