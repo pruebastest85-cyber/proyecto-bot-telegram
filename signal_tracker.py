@@ -328,16 +328,32 @@ def track_outcomes() -> int:
     #    mandaban las cartas de x2/x3, que era justo la basura que llenaba
     #    el chat. Las mediciones (query `pend` de arriba) siguen sin filtrar:
     #    queremos seguir midiendo a las candidatas para poder promocionarlas.
+    #    LA PRIMERA ⭐ MANDA (13/8/2026): los multiplos se miden SOLO desde
+    #    la señal de la primera ⭐ que compro el token, igual que el paper
+    #    trading. Antes cada señal usaba SU precio de compra como base: si
+    #    A compro barato y B caro, el mismo pump daba "x5" con la base de A
+    #    y "x2" con la de B, numeros distintos que se colaban uno tras otro
+    #    por el deduplicador (que compara el VALOR del multiplo). Con 5 ⭐
+    #    comprando lo mismo, era una metralleta de tarjetas repetidas.
     recent = conn.execute(
         """SELECT s.signature, s.wallet, s.mint, s.ts, s.price_usd,
                   s.price_1h, s.price_24h, s.alerted_pct, s.symbol, s.mc
            FROM signals s
            JOIN wallets w ON w.address = s.wallet
+           JOIN (SELECT s2.mint AS mint, MIN(s2.ts) AS t0
+                 FROM signals s2
+                 JOIN wallets w2 ON w2.address = s2.wallet
+                      AND w2.is_tracked = 1
+                 WHERE s2.side='compra' AND s2.price_usd IS NOT NULL
+                   AND s2.price_usd > 0 AND s2.ts >= ?
+                 GROUP BY s2.mint) primera
+             ON primera.mint = s.mint AND primera.t0 = s.ts
            WHERE s.side='compra' AND s.price_usd IS NOT NULL
              AND s.price_usd > 0 AND s.ts >= ?
              AND w.is_tracked = 1
            ORDER BY s.ts DESC LIMIT 30""",
-        (int(now - WATCH_HOURS * HOUR),)).fetchall()
+        (int(now - WATCH_HOURS * HOUR),
+         int(now - WATCH_HOURS * HOUR))).fetchall()
 
     prices: dict = {}          # cache: 1 consulta por mint → (precio, mc)
 
@@ -368,7 +384,12 @@ def track_outcomes() -> int:
                 "UPDATE signals SET price_24h=?, chg_24h=? WHERE signature=?",
                 (p, pct, s["signature"]))
             updated += 1
+    _ya_visto = set()
     for s in recent:
+        # empate de ts en el mismo mint: solo una base por token
+        if s["mint"] in _ya_visto:
+            continue
+        _ya_visto.add(s["mint"])
         base = s["price_usd"]
         p, mc_now = _px_mc(s["mint"])
         if not p:

@@ -227,7 +227,14 @@ def _close(conn, row, price: float, reason: str, icon: str):
     if stake_usd is None:
         su = _sol_a_usd()
         stake_usd = (row["stake_sol"] or 0) * su if su and su > 0 else None
-    pnl_usd = stake_usd * pct / 100 if stake_usd is not None else None
+    # Ventas parciales espejo: el cierre liquida solo la FRACCION que
+    # queda viva, y al total se le suma lo ya realizado por los trozos.
+    # En filas sin parciales frac=1 y realizado=0: identico a siempre.
+    frac = _campo(row, "fraccion_restante")
+    frac = 1.0 if frac is None else frac
+    realizado = _campo(row, "pnl_realizado_usd") or 0
+    pnl_usd = (stake_usd * frac * pct / 100 + realizado
+               if stake_usd is not None else None)
 
     # stake_usd se guarda también cuando se ha reconstruido. Si no, el
     # SUM(stake_usd) del resumen se saltaría esa fila y el ROI saldría
@@ -238,10 +245,11 @@ def _close(conn, row, price: float, reason: str, icon: str):
     # dolares que darian de verdad - invertido - fees de prioridad de las
     # dos transacciones. Es la cifra que decide si el copy trading real
     # seria rentable; pnl_usd (el clasico) queda para comparar.
-    pnl_neto = usd_salida = None
+    pnl_neto = None
+    usd_salida = _campo(row, "usd_salida_real")   # acumulado de parciales
     costos = _campo(row, "costos_usd")
     tokens_raw = _campo(row, "tokens_raw")
-    if tokens_raw and stake_usd is not None:
+    if tokens_raw and stake_usd is not None and int(tokens_raw) > 0:
         try:
             from ejecucion_simulada import cotizar_venta
             su2 = _sol_a_usd()
@@ -250,10 +258,13 @@ def _close(conn, row, price: float, reason: str, icon: str):
             if v:
                 fee_sol = _f(conn, "paper_fee_sol", 0.0005)
                 costos = (costos or 0) + fee_sol * su2
-                usd_salida = v["usd_salida"]
+                usd_salida = (usd_salida or 0) + v["usd_salida"]
                 pnl_neto = usd_salida - stake_usd - costos
         except Exception as e:
             print(f"· Paper: cotización de salida falló ({e})")
+    elif usd_salida is not None and stake_usd is not None:
+        # todo se vendio ya por trozos: el neto sale de lo acumulado
+        pnl_neto = usd_salida - stake_usd - (costos or 0)
 
     conn.execute(
         """UPDATE paper_trades SET status='cerrada', exit_price=?,
@@ -284,6 +295,58 @@ def _close(conn, row, price: float, reason: str, icon: str):
           f"{_usd_firmado(pnl_usd) if pnl_usd is not None else f'{pnl:+.3f} SOL'}")
 
 
+def _venta_parcial(conn, row, price: float, pct: float):
+    """La ⭐ vendio el pct% de SU posicion: el paper vende el mismo pct%
+    de la SUYA. La fila sigue abierta con la fraccion restante; el PnL del
+    trozo vendido se acumula en pnl_realizado_usd y se suma al cierre."""
+    frac = _campo(row, "fraccion_restante")
+    frac = 1.0 if frac is None else frac
+    vendida = frac * pct / 100.0
+    nueva = max(0.0, frac - vendida)
+
+    pct_precio = (price / row["entry_price"] - 1) * 100
+    stake_usd = _campo(row, "stake_usd")
+    pnl_trozo = (stake_usd * vendida * pct_precio / 100
+                 if stake_usd is not None else None)
+    realizado = (_campo(row, "pnl_realizado_usd") or 0) + (pnl_trozo or 0)
+
+    # Ejecucion simulada del trozo: cotizar en Jupiter la venta de la
+    # parte proporcional de los tokens crudos, y acumular el resultado
+    # real (usd_salida_real) y la fee, igual que hace el cierre total.
+    tokens_raw = _campo(row, "tokens_raw")
+    nuevos_tokens = tokens_raw
+    usd_real = _campo(row, "usd_salida_real")
+    costos = _campo(row, "costos_usd")
+    if tokens_raw:
+        try:
+            from ejecucion_simulada import cotizar_venta
+            su = _sol_a_usd()
+            trozo = int(int(tokens_raw) * pct / 100.0)
+            v = cotizar_venta(row["mint"], trozo, su) \
+                if su and su > 0 and trozo > 0 else None
+            if v:
+                usd_real = (usd_real or 0) + v["usd_salida"]
+                fee_sol = _f(conn, "paper_fee_sol", 0.0005)
+                costos = (costos or 0) + fee_sol * su
+            nuevos_tokens = str(int(tokens_raw) - trozo)
+        except Exception as e:
+            print(f"· Paper: cotización parcial falló ({e})")
+
+    conn.execute(
+        """UPDATE paper_trades SET fraccion_restante=?, pnl_realizado_usd=?,
+           tokens_raw=?, usd_salida_real=?, costos_usd=? WHERE id=?""",
+        (nueva, realizado, nuevos_tokens, usd_real, costos, row["id"]))
+    conn.commit()
+
+    txt_pnl = (f" · PnL del trozo {_usd_firmado(pnl_trozo)}"
+               if pnl_trozo is not None else "")
+    _tg(f"✂️ *Venta parcial copiada* en *{row['symbol']}*: la ⭐ vendió "
+        f"el {pct:.0f}% y el paper vende su {pct:.0f}%"
+        f" (queda {nueva*100:.0f}% de la posición){txt_pnl}")
+    print(f"✂️ Paper: venta parcial {pct:.0f}% en {row['symbol']} "
+          f"(queda {nueva*100:.0f}%)")
+
+
 def close_on_wallet_sell(conn, trade: dict, token: dict,
                          pos: dict | None = None, sigue_estrella: bool = True):
     """La billetera que origino la señal vendio → cerramos con ella.
@@ -298,12 +361,27 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
     if row["wallet"] and trade.get("wallet") \
             and row["wallet"] != trade["wallet"]:
         return
-    if pos and pos.get("known") and not pos.get("fully_sold") \
-            and (pos.get("pct_sold") or 100) < 50:
-        return
     price = token.get("price")
     if not price or price <= 0:
         return
+
+    # ── Espejo proporcional (implementado a pedido, 13/8/2026) ────────
+    # Antes: venta <50% se ignoraba y >=50% cerraba TODO. Ahora el paper
+    # copia el porcentaje: si la ⭐ vendio el 15%, vendemos nuestro 15%.
+    # Solo cuenta como cierre total si ella vendio (casi) todo.
+    #   - < paper_parcial_min_pct (5%): polvo, se ignora.
+    #   - entre medio: venta parcial espejo, la posicion sigue viva.
+    #   - >= paper_total_pct (95%) o fully_sold: cierre total (abajo).
+    if pos and pos.get("known") and not pos.get("fully_sold") \
+            and pos.get("pct_sold") is not None:
+        pct_v = float(pos["pct_sold"])
+        tope_total = _f(conn, "paper_total_pct", 95.0)
+        min_parcial = _f(conn, "paper_parcial_min_pct", 5.0)
+        if pct_v < min_parcial:
+            return                      # venta de polvo: no se copia
+        if pct_v < tope_total and row["status"] == "abierta":
+            _venta_parcial(conn, row, price, pct_v)
+            return
 
     # ── Salida inteligente (solo reglas, sin IA) ──────────────────────
     # Si el perfil de deriva post-venta dice que esta billetera "vende
