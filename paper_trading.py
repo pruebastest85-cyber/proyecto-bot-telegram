@@ -194,11 +194,32 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
              else f"{stake:.2f} SOL")
     print(f"🧪 Paper: compra simulada {monto} en {sym} "
           f"@ ${_precio(price)} · demora {demora:.1f}s")
+    # La jugada de la ⭐ visible en el aviso (pedido del 17/8): las copias
+    # del camino caliente pueden nacer de señales bajo el umbral, que no
+    # mandan tarjeta — sin esto, aparecian copias "de la nada".
+    linea_star = ""
+    try:
+        _rw = conn.execute("SELECT alias FROM wallets WHERE address=?",
+                           (trade["wallet"],)).fetchone()
+        _nom = (_rw["alias"] if _rw and _rw["alias"]
+                else trade["wallet"][:8] + "…")
+        _pos = None
+        try:
+            from wallet_ident import posicion
+            _pos = posicion(conn, trade["wallet"], 30)
+        except Exception:
+            pass
+        linea_star = (f"\n⭐ Copiando a *{_nom}*"
+                      + (f" (#{_pos} del top)" if _pos else "")
+                      + (f" · compró {float(trade.get('sol') or 0):.2f} SOL"
+                         if trade.get("sol") else ""))
+    except Exception:
+        pass
     extra_cot = ""
     if cot and cot.get("slippage_pct") is not None:
         extra_cot = (f"\n📉 Slippage real de entrada: "
                      f"{cot['slippage_pct']:.1f}% (cotización Jupiter)")
-    _tg(f"🧪 *Paper:* compra simulada\n"
+    _tg(f"🧪 *Paper:* compra simulada{linea_star}\n"
         f"💵 Monto: *{monto}*\n"
         f"🪙 Token: *{sym}*  ·  entrada ${_precio(price)}{extra_cot}\n"
         f"📂 {n + 1}/{max_abiertas} abiertas\nVer: /paper")
@@ -340,7 +361,14 @@ def _venta_parcial(conn, row, price: float, pct: float):
 
     txt_pnl = (f" · PnL del trozo {_usd_firmado(pnl_trozo)}"
                if pnl_trozo is not None else "")
-    _tg(f"✂️ *Venta parcial copiada* en *{row['symbol']}*: la ⭐ vendió "
+    try:
+        _rw = conn.execute("SELECT alias FROM wallets WHERE address=?",
+                           (row["wallet"],)).fetchone()
+        _nom = (_rw["alias"] if _rw and _rw["alias"]
+                else (row["wallet"] or "")[:8] + "…")
+    except Exception:
+        _nom = "la ⭐"
+    _tg(f"✂️ *Venta parcial copiada* en *{row['symbol']}*: *{_nom}* vendió "
         f"el {pct:.0f}% y el paper vende su {pct:.0f}%"
         f" (queda {nueva*100:.0f}% de la posición){txt_pnl}")
     print(f"✂️ Paper: venta parcial {pct:.0f}% en {row['symbol']} "

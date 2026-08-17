@@ -132,6 +132,11 @@ def _call_claude(prompt: str, model: str) -> dict | None:
             json={"model": model, "max_tokens": 300,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=60)
+        if r.status_code >= 400:
+            # El motivo exacto del rechazo viene en el CUERPO de la
+            # respuesta; raise_for_status solo dice "400 Client Error" y
+            # ya nos costo dias diagnosticar sonnet-5 por no verlo.
+            print(f"  · IA {model} HTTP {r.status_code}: {r.text[:300]}")
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
         text = text.replace("```json", "").replace("```", "").strip()
