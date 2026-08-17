@@ -151,6 +151,18 @@ def _build():
         # que las demas consultas leen. Mismo resultado, ~1/6 del costo.
         try:
             conn.execute("SET max_parallel_workers_per_gather = 0")
+            # MEMORIA en vez de DISCO (17/8/2026): los datos crecieron y
+            # los GROUP BY / medianas del build volvieron a derramar mas
+            # de 512 MB en archivos temporales, chocando con
+            # temp_file_limit: el grafo llevaba dias sin construirse
+            # (fallo contenido por el enfriamiento, pero fallo). work_mem
+            # deja que cada ordenamiento/hash use hasta 256 MB de RAM
+            # antes de tocar disco: mismo resultado exacto, con derrames
+            # que vuelven a caber bajo el tope. Es de la SESION (muere
+            # con esta conexion) y con el candado solo hay un build a la
+            # vez, asi que el pico de memoria queda acotado (~2-3 nodos
+            # x 256 MB en un contenedor con varios GB).
+            conn.execute("SET work_mem = '256MB'")
         except Exception:
             pass          # SQLite no lo tiene; alli tampoco hace falta
         conn.execute(f"CREATE TEMPORARY TABLE tmp_pares AS "
