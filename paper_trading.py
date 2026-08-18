@@ -37,6 +37,15 @@ from db import get_conn, get_setting
 HOUR = 3600
 
 
+def _g(conn, key: str, default):
+    """get_setting con tolerancia (el modulo ya importa db abajo)."""
+    try:
+        from db import get_setting
+        return get_setting(conn, key, default)
+    except Exception:
+        return default
+
+
 def _f(conn, key: str, default: float) -> float:
     try:
         return float(get_setting(conn, key, str(default)) or default)
@@ -178,17 +187,29 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
     # hasta este instante. Con el camino caliente deberia rondar 1-3 s;
     # por la via normal (analisis completo + IA) eran 5-15 s.
     demora = max(0.0, time.time() - (trade.get("ts") or time.time()))
+    # A/B de gestion de salidas: alterna reglas/ia por orden de llegada.
+    # Solo se asigna "ia" si el experimento esta encendido (/ialocal);
+    # apagado, todo es "reglas" y el comportamiento es el de siempre.
+    gestion = "reglas"
+    try:
+        if int(float(_g(conn, "ia_local_activa", "0") or 0)):
+            n_previas = conn.execute(
+                "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"]
+            gestion = "ia" if n_previas % 2 else "reglas"
+    except Exception:
+        pass
     conn.execute(
         """INSERT INTO paper_trades
            (signature, wallet, mint, symbol, stake_sol, stake_usd,
             entry_price, entry_ts, signal_score, status,
-            tokens_raw, slippage_entrada_pct, costos_usd, demora_s)
-           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?)""",
+            tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
+            gestion)
+           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?)""",
         (trade["signature"], trade["wallet"], trade["mint"], sym,
          stake, stake_usd, price, trade["ts"], score,
          str(cot["tokens_raw"]) if cot else None,
          cot.get("slippage_pct") if cot else None,
-         costo_entrada, round(demora, 2)))
+         costo_entrada, round(demora, 2), gestion))
     conn.commit()
     monto = (f"{_usd(stake_usd)} ({stake:.2f} SOL)" if stake_usd is not None
              else f"{stake:.2f} SOL")
@@ -425,7 +446,53 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             perfil = perfil_salida(conn, row["wallet"])
         except Exception:
             perfil = None
+
+        # ── Mitad "ia" del A/B: decide la IA local (con barandillas) ──
+        if _campo(row, "gestion") == "ia":
+            try:
+                from decision_ia import decidir_salida
+                pct_ahora = (price / row["entry_price"] - 1) * 100
+                d = decidir_salida(conn, {
+                    "pnl_actual_pct": round(pct_ahora, 1),
+                    "minutos_abierta": round(
+                        (time.time() - row["entry_ts"]) / 60),
+                    "perfil_billetera": perfil or "sin datos aun",
+                    "precio_entrada": row["entry_price"],
+                    "precio_ahora": price,
+                })
+                conn.execute(
+                    "UPDATE paper_trades SET decidido_por=? WHERE id=?",
+                    (d.get("decidido_por"), row["id"]))
+                conn.commit()
+                if d["salida"] == "holdear":
+                    hasta = int(time.time() + d["max_min"] * 60)
+                    conn.execute(
+                        "UPDATE paper_trades SET politica='holdear', "
+                        "precio_venta_lider=?, pico=?, hold_hasta=? "
+                        "WHERE id=?", (price, price, hasta, row["id"]))
+                    conn.commit()
+                    _tg(f"🤖 *IA local* en {row['symbol']}: la ⭐ vendió y "
+                        f"la IA decide holdear hasta {d['max_min']:.0f} min "
+                        f"con trailing. _{d.get('razon','')}_")
+                    print(f"🤖 Paper[ia]: hold {d['max_min']:.0f}min "
+                          f"en {row['symbol']}")
+                    return
+                # decidio vender (o fallback): cierre normal
+                _close(conn, row, price,
+                       "venta de la ⭐ (decisión IA)"
+                       if d.get("decidido_por") == "ia_local"
+                       else "venta de la ⭐", "🚪")
+                return
+            except Exception as e:
+                print(f"· Decisión IA falló ({e}); reglas de siempre")
+
         if perfil and perfil.get("clase") == "vende temprano":
+            try:
+                conn.execute("UPDATE paper_trades SET decidido_por='reglas' "
+                             "WHERE id=? AND decidido_por IS NULL",
+                             (row["id"],))
+            except Exception:
+                pass
             extra_min = _f(conn, "paper_hold_extra_min", 60.0)
             hasta = int(time.time() + extra_min * 60)
             conn.execute(
@@ -543,6 +610,10 @@ def resumen_text() -> str:
     demora = conn.execute(
         "SELECT AVG(demora_s) d, COUNT(demora_s) n FROM paper_trades "
         "WHERE demora_s IS NOT NULL").fetchone()
+    ab = conn.execute(
+        "SELECT gestion, COUNT(*) n, SUM(pnl_usd) pnl "
+        "FROM paper_trades WHERE status<>'abierta' AND gestion IS NOT NULL "
+        "GROUP BY gestion").fetchall()
     por_motivo = conn.execute(
         "SELECT exit_reason r, COUNT(*) n, SUM(pnl_sol) pnl, "
         "SUM(pnl_usd) pnl_usd "
@@ -592,6 +663,10 @@ def resumen_text() -> str:
         if demora and (demora["n"] or 0) > 0:
             out.append(f"⚡ Demora señal→copia: {demora['d']:.1f}s de media "
                        f"({demora['n']} medidas)")
+        if ab and len(ab) > 1:
+            trozos = [f"{r['gestion']}: {r['n']} ops "
+                      f"{_usd_firmado(r['pnl'] or 0)}" for r in ab]
+            out.append("🤖 A/B de salidas · " + "  vs  ".join(trozos))
     else:
         out.append("Aún no hay operaciones cerradas.")
     out.append("")

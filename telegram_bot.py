@@ -1590,6 +1590,53 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """IA local para salidas: /ialocal <url> · /ialocal on|off · /ialocal"""
+    from db import set_setting, get_setting
+    conn = get_conn()
+    try:
+        args = ctx.args or []
+        if args:
+            a = args[0].strip()
+            if a.lower() == "off":
+                set_setting(conn, "ia_local_activa", 0)
+                await update.message.reply_text(
+                    "🤖 IA local APAGADA: todo vuelve a reglas.")
+                return
+            if a.lower() == "on":
+                url = get_setting(conn, "local_ai_url", "") or ""
+                if not url:
+                    await update.message.reply_text(
+                        "Primero configura la URL: /ialocal https://…")
+                    return
+                set_setting(conn, "ia_local_activa", 1)
+                await update.message.reply_text(
+                    f"🤖 IA local ENCENDIDA · {url}\n"
+                    "Mitad de las posiciones nuevas serán gestionadas "
+                    "por la IA (A/B contra reglas).")
+                return
+            if a.startswith("http"):
+                set_setting(conn, "local_ai_url", a.rstrip("/"))
+                set_setting(conn, "ia_local_activa", 1)
+                await update.message.reply_text(
+                    f"🤖 URL guardada y experimento ENCENDIDO:\n{a}\n"
+                    "Si el túnel cambia de URL, repite /ialocal <url>.")
+                return
+            await update.message.reply_text(
+                "Uso: /ialocal <url> · /ialocal on · /ialocal off")
+            return
+        activa = get_setting(conn, "ia_local_activa", "0")
+        url = get_setting(conn, "local_ai_url", "") or "(sin URL)"
+        estado = "🟢 encendida" if str(activa) in ("1", "1.0") \
+            else "🔴 apagada"
+        await update.message.reply_text(
+            f"🤖 IA local: {estado}\nURL: {url}\n"
+            "Cambiar: /ialocal <url> · /ialocal on · /ialocal off")
+    finally:
+        conn.close()
+
+
+@solo_admin
 async def cmd_salidas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Deriva post-venta por billetera: ¿vende temprano o sale en la cima?"""
     from salidas import salidas_text, hold_report
@@ -1699,6 +1746,7 @@ def main():
     app.add_handler(CommandHandler("exportar", cmd_exportar))
     app.add_handler(CommandHandler("errores", cmd_errores))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
+    app.add_handler(CommandHandler("ialocal", cmd_ialocal))
     app.add_handler(CommandHandler("salidas", cmd_salidas))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))

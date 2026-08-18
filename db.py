@@ -506,7 +506,12 @@ def _preparar_pg(pg):
             # sigue viva (1.0 = entera) y PnL ya realizado por los trozos
             # vendidos. Si la ⭐ vende el 15%, el paper vende SU 15%.
             ("paper_trades", "fraccion_restante", "DOUBLE PRECISION"),
-            ("paper_trades", "pnl_realizado_usd", "DOUBLE PRECISION")]:
+            ("paper_trades", "pnl_realizado_usd", "DOUBLE PRECISION"),
+            # Experimento A/B de gestion de salidas: mitad "reglas", mitad
+            # "ia" (la IA local del dueño). decidido_por registra quien
+            # tomo la decision REAL en la salida (con fallback incluido).
+            ("paper_trades", "gestion", "TEXT"),
+            ("paper_trades", "decidido_por", "TEXT")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -563,7 +568,8 @@ def _preparar_sqlite(conn):
                      ("costos_usd", "REAL"), ("usd_salida_real", "REAL"),
                      ("pnl_usd_neto", "REAL"), ("demora_s", "REAL"),
                      ("fraccion_restante", "REAL"),
-                     ("pnl_realizado_usd", "REAL")]:
+                     ("pnl_realizado_usd", "REAL"),
+                     ("gestion", "TEXT"), ("decidido_por", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
