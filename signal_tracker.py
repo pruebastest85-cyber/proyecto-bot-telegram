@@ -108,22 +108,14 @@ def _alert_milestone(conn, s, pct: float, price: float,
     if mult < MIN_MULTIPLE:
         return
 
-    # Solo el top del ranking manda tarjeta. Si la señal la dio una ⭐
-    # que ya no está entre las mejores, se sigue midiendo pero no llena
-    # el chat. Conjunto vacío = no se pudo calcular → no se filtra.
-    # El múltiplo se marca igual al salir, para no repetir este aviso en
-    # cada vuelta del job.
-    try:
-        from db import top_addresses
-        _top = top_addresses(conn)
-        if _top and s["wallet"] and s["wallet"] not in _top:
-            print(f"  🔇 x{mult} de {s['mint'][:8]}… sin tarjeta: "
-                  f"la billetera está fuera del top")
-            set_setting(conn, f"mult_alert:{s['mint']}", mult)
-            return
-    except Exception as e:
-        print(f"· Filtro de top falló ({e}); mando la tarjeta igual")
-
+    # El candado va PRIMERO y es MONOTONICO: el marcador del token solo
+    # puede subir. Antes el filtro de top (mas abajo) sobreescribia el
+    # marcador con CUALQUIER multiplo, incluso menor: si la "primera ⭐"
+    # del token cambiaba (una promocion o degradacion reordena quien
+    # califica como primera), la base cambiaba, un multiplo chico de una
+    # billetera fuera del top PISABA el marcador hacia abajo... y el
+    # siguiente escalon intermedio re-alertaba como nuevo. Caso real:
+    # BOLLOCKS aviso x42 y horas despues "x16" (18/8/2026).
     key = f"mult_alert:{s['mint']}"
     last = 0
     try:
@@ -131,7 +123,21 @@ def _alert_milestone(conn, s, pct: float, price: float,
     except (TypeError, ValueError):
         last = 0
     if mult <= last:
-        return                        # ese múltiplo ya se avisó
+        return                        # ese escalón ya sonó (o la escalera va más arriba)
+
+    # Solo el top del ranking manda tarjeta. Si la señal la dio una ⭐
+    # fuera de las mejores, se marca el escalón (solo hacia ARRIBA:
+    # mult > last garantizado por el candado de arriba) y se silencia.
+    try:
+        from db import top_addresses
+        _top = top_addresses(conn)
+        if _top and s["wallet"] and s["wallet"] not in _top:
+            print(f"  🔇 x{mult} de {s['mint'][:8]}… sin tarjeta: "
+                  f"la billetera está fuera del top")
+            set_setting(conn, key, mult)
+            return
+    except Exception as e:
+        print(f"· Filtro de top falló ({e}); mando la tarjeta igual")
 
     try:
         from realtime import tg_send
