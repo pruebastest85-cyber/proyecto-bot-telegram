@@ -37,19 +37,28 @@ def posicion(conn, address: str, tope: int = 200):
     if not address:
         return None
     try:
+        import time as _t
+        corte = int(_t.time()) - 7 * 86400
         rows = conn.execute(
-            """SELECT address FROM wallets WHERE is_bot = 0
-               ORDER BY is_tracked DESC,
+            """SELECT w.address FROM wallets w
+               LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
+                          GROUP BY wallet) actividad
+                    ON actividad.wallet = w.address
+               WHERE w.is_bot = 0
+               ORDER BY w.is_tracked DESC,
                         -- Debe ser IDENTICO al de db.top_wallets (ver alli
                         -- el porque): si divergen, /top y la posicion que
                         -- se muestra en las tarjetas dejan de coincidir.
-                        CASE WHEN pnl_total IS NOT NULL AND pnl_total < 0
+                        CASE WHEN w.pnl_total IS NOT NULL
+                                  AND w.pnl_total < 0
                              THEN 1 ELSE 0 END,
-                        CASE WHEN wallet_score IS NULL THEN 1 ELSE 0 END,
-                        wallet_score DESC,
-                        COALESCE(pnl_total, -1e9) DESC,
-                        score DESC
-               LIMIT ?""", (tope,)).fetchall()
+                        CASE WHEN COALESCE(actividad.ult, 0) < ?
+                             THEN 1 ELSE 0 END,
+                        CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
+                        w.wallet_score DESC,
+                        COALESCE(w.pnl_total, -1e9) DESC,
+                        w.score DESC
+               LIMIT ?""", (corte, tope)).fetchall()
         for i, r in enumerate(rows, 1):
             if r["address"] == address:
                 return i

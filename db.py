@@ -900,11 +900,26 @@ def top_wallets(conn, limit=20):
     # Primero las ⭐ rastreadas, ordenadas por su calidad real (Wallet Score
     # 0-100 de la IA); luego el resto de candidatas por el score de
     # descubrimiento. Así las mejores probadas quedan siempre arriba.
+    #
+    # NIVEL DE ACTIVIDAD (18/8/2026): una ⭐ sin operar hace 7 dias se
+    # hunde, igual que las perdedoras. Sin esto, las re-evaluaciones
+    # fueron llenando el top de billeteras con scores gloriosos pero
+    # RETIRADAS: se llego a un top 30 con 18 muertas de 7+ dias, cero
+    # compras copiables en 24 h y el copy trading siguiendo fantasmas.
+    # La actividad sale de positions.last_ts (se actualiza en cada
+    # operacion vigilada; la tabla es chica y el join, barato).
+    import time as _t
+    corte = int(_t.time()) - 7 * 86400
     return conn.execute(
-        """SELECT address, winning_tokens_count, total_buys_sol, score, is_tracked,
-                  ai_class, alias, pnl_30d, pnl_total, wallet_score
-           FROM wallets WHERE is_bot = 0
-           ORDER BY is_tracked DESC,
+        """SELECT w.address, w.winning_tokens_count, w.total_buys_sol,
+                  w.score, w.is_tracked, w.ai_class, w.alias, w.pnl_30d,
+                  w.pnl_total, w.wallet_score
+           FROM wallets w
+           LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
+                      GROUP BY wallet) actividad
+                ON actividad.wallet = w.address
+           WHERE w.is_bot = 0
+           ORDER BY w.is_tracked DESC,
                     -- Una ⭐ que PIERDE dinero no puede ocupar sitio en el
                     -- top que alimenta las alertas y el copytrading. El
                     -- wallet_score solo da 30 de 100 puntos al PnL, asi que
@@ -913,14 +928,16 @@ def top_wallets(conn, limit=20):
                     -- 2 en perdidas dentro del top 15 (una a -33,6 SOL) y
                     -- 2 con mas de +100 SOL fuera. Se usa pnl_total: solo
                     -- lo REALIZADO, no lo que aun tiene en cartera.
-                    CASE WHEN pnl_total IS NOT NULL AND pnl_total < 0
+                    CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
                          THEN 1 ELSE 0 END,
-                    CASE WHEN wallet_score IS NULL THEN 1 ELSE 0 END,
-                    wallet_score DESC,
-                    COALESCE(pnl_total, -1e9) DESC,
-                    score DESC
+                    CASE WHEN COALESCE(actividad.ult, 0) < ?
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
+                    w.wallet_score DESC,
+                    COALESCE(w.pnl_total, -1e9) DESC,
+                    w.score DESC
            LIMIT ?""",
-        (limit,),
+        (corte, limit),
     ).fetchall()
 
 
