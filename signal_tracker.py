@@ -68,29 +68,9 @@ def _price_mc(mint: str):
 
 
 def _price(mint: str) -> float | None:
-    """Precio actual en USD según DexScreener."""
-    try:
-        r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
-                         timeout=15)
-        _api_rec("dexscreener")
-        pairs = (r.json() or {}).get("pairs") or []
-        # Par de MAYOR liquidez: pairs[0] puede ser un pool minusculo con
-        # precio distorsionado.
-        best_px, best_liq = None, -1.0
-        for p in pairs:
-            try:
-                px = float(p.get("priceUsd") or 0)
-            except (TypeError, ValueError):
-                continue
-            if px <= 0:
-                continue
-            liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
-            if liq > best_liq:
-                best_liq, best_px = liq, px
-        return best_px
-    except (requests.RequestException, ValueError, TypeError):
-        pass
-    return None
+    """Precio actual: el mismo dato de _price_mc, tirando el MC. Un solo
+    sitio decide el criterio del par (mejor liquidez)."""
+    return _price_mc(mint)[0]
 
 
 def _alert_milestone(conn, s, pct: float, price: float,
@@ -104,6 +84,34 @@ def _alert_milestone(conn, s, pct: float, price: float,
     base = s["price_usd"]
     if not base or base <= 0:
         return
+    # ── Base ANCLADA por token (18/8/2026) ────────────────────────────
+    # "Quien fue la primera ⭐" se recalcula en cada pasada, y el ranking
+    # rota a diario con las re-evaluaciones: si la primera cambia, la
+    # base cambia y la escalera salta (BOLLOCKS: x42 y luego "x16"). El
+    # candado monotonico evita repetir tarjetas, pero con base nueva mas
+    # cara el token quedaria MUDO para siempre (x43 desde una base 2,6
+    # veces mas cara ≈ nunca). Solucion: la PRIMERA vez que un token
+    # alcanza un multiplo, su base (precio, billetera, ts, mc) queda
+    # ANCLADA en settings y toda la escalera futura se mide contra ella,
+    # cambie quien cambie en el ranking. Un narrador, una escalera.
+    w_base, ts_base, mc_base = s["wallet"], s["ts"], None
+    try:
+        mc_base = s["mc"]
+    except Exception:
+        pass
+    key_base = f"mult_base:{s['mint']}"
+    try:
+        import json as _json
+        _raw = get_setting(conn, key_base, None)
+        if _raw:
+            _pin = _json.loads(_raw)
+            if _pin.get("price"):
+                base = float(_pin["price"])
+                w_base = _pin.get("wallet") or w_base
+                ts_base = _pin.get("ts") or ts_base
+                mc_base = _pin.get("mc", mc_base)
+    except Exception:
+        pass
     mult = int(price / base)          # 2 = x2 (doble), 3 = x3, …
     if mult < MIN_MULTIPLE:
         return
@@ -125,13 +133,23 @@ def _alert_milestone(conn, s, pct: float, price: float,
     if mult <= last:
         return                        # ese escalón ya sonó (o la escalera va más arriba)
 
+    if last == 0:
+        # primer escalón del token: anclar la base para siempre
+        try:
+            import json as _json
+            set_setting(conn, key_base, _json.dumps(
+                {"price": base, "wallet": w_base, "ts": ts_base,
+                 "mc": mc_base}))
+        except Exception:
+            pass
+
     # Solo el top del ranking manda tarjeta. Si la señal la dio una ⭐
     # fuera de las mejores, se marca el escalón (solo hacia ARRIBA:
     # mult > last garantizado por el candado de arriba) y se silencia.
     try:
         from db import top_addresses
         _top = top_addresses(conn)
-        if _top and s["wallet"] and s["wallet"] not in _top:
+        if _top and w_base and w_base not in _top:
             print(f"  🔇 x{mult} de {s['mint'][:8]}… sin tarjeta: "
                   f"la billetera está fuera del top")
             set_setting(conn, key, mult)
@@ -147,12 +165,12 @@ def _alert_milestone(conn, s, pct: float, price: float,
     # Nombre SIEMPRE legible (los alias son deterministas) + posición en /top
     try:
         from wallet_ident import identidad
-        _ident = identidad(conn, s["wallet"])
+        _ident = identidad(conn, w_base)
     except Exception:
-        _ident = {"nombre": f"{s['wallet'][:8]}…", "pos": None}
+        _ident = {"nombre": f"{w_base[:8]}…", "pos": None}
     alias = _ident["nombre"]
     _pos = _ident.get("pos")
-    hace = (time.time() - s["ts"]) / 3600
+    hace = (time.time() - ts_base) / 3600
     from card_image import _fmt_price, _ago, _fmt_mc
     simbolo = s["symbol"] or s["mint"][:8]
     subida = pct if pct > 0 else (mult - 1) * 100
@@ -161,10 +179,7 @@ def _alert_milestone(conn, s, pct: float, price: float,
     # falsas: si el suministro cambia —lo normal al migrar un token de
     # pump.fun— el MC NO escala con el precio. Se llegó a anunciar
     # "MC $51,5M" en un token que nunca estuvo cerca de esa cifra.
-    try:
-        mc0 = s["mc"]
-    except Exception:
-        mc0 = None
+    mc0 = mc_base
     ratio = (price / base) if base else mult
     mc1 = mc_actual                      # dato real, no extrapolado
 
