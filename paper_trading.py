@@ -246,28 +246,46 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
         f"📂 {n + 1}/{max_abiertas} abiertas\nVer: /paper")
 
     # ── Filtro de entrada IA (modo SOMBRA, pedido del 17/8) ──────────
-    # DESPUES de abrir, para no frenar el camino caliente: la IA opina si
-    # esta compra valia la pena. La posicion corre igual (es simulada);
-    # el veredicto queda guardado y /paper mide cuanto habria ahorrado
-    # rechazar. Si la IA no esta disponible, no viaja veredicto y ya.
+    # La IA opina si esta compra valia la pena; la posicion corre igual
+    # (es simulada) y /paper mide cuanto habria ahorrado rechazar.
+    # EN HILO DE FONDO (arreglo del mismo dia): _proc procesa las
+    # transacciones en bucle, y una consulta de hasta 8 s aqui retenia a
+    # la SIGUIENTE señal del lote — que si es camino caliente. El hilo
+    # abre su propia conexion (las conexiones no se comparten entre
+    # hilos) y muere solo. Si la IA no esta, no viaja veredicto y ya.
     try:
         if int(float(_g(conn, "ia_local_activa", "0") or 0)):
-            from decision_ia import decidir_entrada
-            v = decidir_entrada(conn, trade, token)
-            if v:
-                conn.execute(
-                    "UPDATE paper_trades SET ia_entrada=?, "
-                    "ia_entrada_razon=? WHERE signature=?",
-                    (v["entrada"], v.get("razon", ""),
-                     trade["signature"]))
-                conn.commit()
-                if v["entrada"] == "rechazar":
-                    _tg(f"🚫 *La IA habría rechazado* esta compra en "
-                        f"{sym}: _{v.get('razon','')}_\n"
-                        f"(la posición corre igual: al cierre sabremos "
-                        f"quién tenía razón)")
+            import threading as _th
+            _tr, _tok, _sym = dict(trade), dict(token or {}), sym
+
+            def _veredicto_en_fondo():
+                try:
+                    from decision_ia import decidir_entrada
+                    from db import get_conn as _gc
+                    c2 = _gc()
+                    try:
+                        v = decidir_entrada(c2, _tr, _tok)
+                        if v:
+                            c2.execute(
+                                "UPDATE paper_trades SET ia_entrada=?, "
+                                "ia_entrada_razon=? WHERE signature=?",
+                                (v["entrada"], v.get("razon", ""),
+                                 _tr["signature"]))
+                            c2.commit()
+                            if v["entrada"] == "rechazar":
+                                _tg(f"🚫 *La IA habría rechazado* esta "
+                                    f"compra en {_sym}: "
+                                    f"_{v.get('razon','')}_\n"
+                                    f"(la posición corre igual: al cierre "
+                                    f"sabremos quién tenía razón)")
+                    finally:
+                        c2.close()
+                except Exception as e:
+                    print(f"· Filtro de entrada IA falló: {e}")
+
+            _th.Thread(target=_veredicto_en_fondo, daemon=True).start()
     except Exception as e:
-        print(f"· Filtro de entrada IA falló: {e}")
+        print(f"· Filtro de entrada IA no arrancó: {e}")
     return True
 
 
