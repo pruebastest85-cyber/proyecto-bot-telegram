@@ -22,7 +22,12 @@ import os
 
 import requests
 
-TIMEOUT = 15          # la decision es en caliente: si tarda mas, reglas
+# 8 s: un Qwen MoE local responde 120 tokens en 2-4 s; el margen cubre
+# tunel y GPU ocupada (ComfyUI). No mas: esta llamada corre en el hilo del
+# webhook y mientras espera, esa entrega no procesa nada — el camino
+# caliente se construyo para bajar de 5-15 s a 1-3 s y no vamos a
+# devolverle la lentitud por la puerta de atras.
+TIMEOUT = 8
 MAX_HOLD_MIN = 120    # tope duro al hold que la IA puede pedir
 MIN_HOLD_MIN = 5
 
@@ -46,7 +51,10 @@ def _modelo(conn) -> str:
             m = (get_setting(conn, "local_ai_model", "") or "").strip()
         except Exception:
             m = ""
-    return m or "qwen"
+    # Identificador REAL del modelo en el LM Studio del dueño (leido de
+    # su /v1/models el 17/8/2026). Cambiable sin codigo con el setting
+    # "local_ai_model" si algun dia carga otro.
+    return m or "qwen3.6-35b-a3b"
 
 
 def decidir_salida(conn, contexto: dict) -> dict:
