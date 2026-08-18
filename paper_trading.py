@@ -244,6 +244,30 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
         f"💵 Monto: *{monto}*\n"
         f"🪙 Token: *{sym}*  ·  entrada ${_precio(price)}{extra_cot}\n"
         f"📂 {n + 1}/{max_abiertas} abiertas\nVer: /paper")
+
+    # ── Filtro de entrada IA (modo SOMBRA, pedido del 17/8) ──────────
+    # DESPUES de abrir, para no frenar el camino caliente: la IA opina si
+    # esta compra valia la pena. La posicion corre igual (es simulada);
+    # el veredicto queda guardado y /paper mide cuanto habria ahorrado
+    # rechazar. Si la IA no esta disponible, no viaja veredicto y ya.
+    try:
+        if int(float(_g(conn, "ia_local_activa", "0") or 0)):
+            from decision_ia import decidir_entrada
+            v = decidir_entrada(conn, trade, token)
+            if v:
+                conn.execute(
+                    "UPDATE paper_trades SET ia_entrada=?, "
+                    "ia_entrada_razon=? WHERE signature=?",
+                    (v["entrada"], v.get("razon", ""),
+                     trade["signature"]))
+                conn.commit()
+                if v["entrada"] == "rechazar":
+                    _tg(f"🚫 *La IA habría rechazado* esta compra en "
+                        f"{sym}: _{v.get('razon','')}_\n"
+                        f"(la posición corre igual: al cierre sabremos "
+                        f"quién tenía razón)")
+    except Exception as e:
+        print(f"· Filtro de entrada IA falló: {e}")
     return True
 
 
@@ -450,16 +474,9 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         # ── Mitad "ia" del A/B: decide la IA local (con barandillas) ──
         if _campo(row, "gestion") == "ia":
             try:
-                from decision_ia import decidir_salida
-                pct_ahora = (price / row["entry_price"] - 1) * 100
-                d = decidir_salida(conn, {
-                    "pnl_actual_pct": round(pct_ahora, 1),
-                    "minutos_abierta": round(
-                        (time.time() - row["entry_ts"]) / 60),
-                    "perfil_billetera": perfil or "sin datos aun",
-                    "precio_entrada": row["entry_price"],
-                    "precio_ahora": price,
-                })
+                from decision_ia import decidir_salida, armar_contexto
+                d = decidir_salida(
+                    conn, armar_contexto(conn, row, price, perfil, token))
                 conn.execute(
                     "UPDATE paper_trades SET decidido_por=? WHERE id=?",
                     (d.get("decidido_por"), row["id"]))
@@ -614,6 +631,10 @@ def resumen_text() -> str:
         "SELECT gestion, COUNT(*) n, SUM(pnl_usd) pnl "
         "FROM paper_trades WHERE status<>'abierta' AND gestion IS NOT NULL "
         "GROUP BY gestion").fetchall()
+    filtro = conn.execute(
+        "SELECT ia_entrada, COUNT(*) n, SUM(pnl_usd) pnl "
+        "FROM paper_trades WHERE status<>'abierta' "
+        "AND ia_entrada IS NOT NULL GROUP BY ia_entrada").fetchall()
     por_motivo = conn.execute(
         "SELECT exit_reason r, COUNT(*) n, SUM(pnl_sol) pnl, "
         "SUM(pnl_usd) pnl_usd "
@@ -667,6 +688,22 @@ def resumen_text() -> str:
             trozos = [f"{r['gestion']}: {r['n']} ops "
                       f"{_usd_firmado(r['pnl'] or 0)}" for r in ab]
             out.append("🤖 A/B de salidas · " + "  vs  ".join(trozos))
+        if filtro:
+            fmap = {r["ia_entrada"]: r for r in filtro}
+            rech = fmap.get("rechazar")
+            cop = fmap.get("copiar")
+            if rech or cop:
+                linea = "🚪 Filtro de entrada IA · "
+                if cop:
+                    linea += (f"copiaría: {cop['n']} "
+                              f"({_usd_firmado(cop['pnl'] or 0)})")
+                if rech:
+                    linea += (f"  ·  rechazaría: {rech['n']} "
+                              f"({_usd_firmado(rech['pnl'] or 0)})")
+                out.append(linea)
+                if rech and (rech["pnl"] or 0) < 0:
+                    out.append(f"   → rechazar habría ahorrado "
+                               f"{_usd(-(rech['pnl'] or 0))}")
     else:
         out.append("Aún no hay operaciones cerradas.")
     out.append("")

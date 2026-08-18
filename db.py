@@ -511,7 +511,14 @@ def _preparar_pg(pg):
             # "ia" (la IA local del dueño). decidido_por registra quien
             # tomo la decision REAL en la salida (con fallback incluido).
             ("paper_trades", "gestion", "TEXT"),
-            ("paper_trades", "decidido_por", "TEXT")]:
+            ("paper_trades", "decidido_por", "TEXT"),
+            # Filtro de entrada de la IA local (sombra): opina en CADA
+            # compra copiada — "copiar" o "rechazar" — pero la posicion se
+            # abre igual (es simulada). Al cierre se mide cuanto habria
+            # ahorrado rechazar. Si el numero da, el executor real la
+            # usara como puerta de verdad.
+            ("paper_trades", "ia_entrada", "TEXT"),
+            ("paper_trades", "ia_entrada_razon", "TEXT")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -569,7 +576,8 @@ def _preparar_sqlite(conn):
                      ("pnl_usd_neto", "REAL"), ("demora_s", "REAL"),
                      ("fraccion_restante", "REAL"),
                      ("pnl_realizado_usd", "REAL"),
-                     ("gestion", "TEXT"), ("decidido_por", "TEXT")]:
+                     ("gestion", "TEXT"), ("decidido_por", "TEXT"),
+                     ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
