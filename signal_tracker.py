@@ -387,6 +387,18 @@ def track_outcomes() -> int:
     def _px(mint):
         return _px_mc(mint)[0]
 
+    # ── Fase A: TODA la red primero (18/8/2026) ─────────────────────────
+    # Antes el primer UPDATE abria la transaccion de escritura y luego el
+    # bucle seguia descargando precios (con pausa entre cada uno): el
+    # candado de escritura quedaba retenido MINUTOS y el webhook chocaba
+    # con "database is locked" en el SQLite local. Ahora se llena la cache
+    # de precios sin ninguna transaccion abierta, y la fase de escritura
+    # dura milisegundos. En Postgres no cambia nada.
+    for _m in {s["mint"] for s in
+               list(pend) + list(pend_ventas) + list(recent)}:
+        _px_mc(_m)
+
+    # ── Fase B: escritura rapida desde la cache ─────────────────────────
     updated = 0
     for s in list(pend) + list(pend_ventas):
         base = s["price_usd"]
@@ -405,6 +417,7 @@ def track_outcomes() -> int:
                 "UPDATE signals SET price_24h=?, chg_24h=? WHERE signature=?",
                 (p, pct, s["signature"]))
             updated += 1
+    conn.commit()   # mediciones guardadas ya: candado liberado al instante
     _ya_visto = set()
     for s in recent:
         # empate de ts en el mismo mint: solo una base por token
@@ -417,7 +430,9 @@ def track_outcomes() -> int:
             continue
         pct = (p / base - 1) * 100
         _alert_milestone(conn, s, pct, p, mc_actual=mc_now)
-    conn.commit()
+        # La tarjeta manda un mensaje a Telegram (red): commit por hito
+        # para no retener el candado de escritura durante el envio.
+        conn.commit()
     _check_streaks(conn)
     _auto_threshold(conn)
     conn.close()
