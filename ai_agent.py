@@ -5,10 +5,15 @@ La IA entiende la intención y usa herramientas:
   - Lectura (consultar base, perfilar billetera): se ejecutan directo.
   - Modificación (descartar, rastrear, correr ciclo): la IA la propone
     y el bot pide confirmación con botones antes de ejecutar.
+
+Desde el 18/8/2026 el agente habla PRIMERO con la IA local (LM Studio,
+formato OpenAI de tools) y usa la nube de Claude solo como respaldo,
+siguiendo el setting "ia_proveedor" igual que ia_puente.
 """
 
 import json
 import os
+import re
 
 import requests
 
@@ -22,17 +27,13 @@ TOOLS = [
     {"name": "consultar_base",
      "description": ("Lee el snapshot de la base de datos: top billeteras "
                      "(alias, scores, PnL, clase), señales recientes con "
-                     "resultados 1h/24h, POSICIONES (qué tiene cada billetera, "
-                     "invertido, profit realizado, compras/ventas) y totales "
-                     "del sistema. Úsala para cualquier pregunta sobre los "
-                     "datos, incluido cuánto tiene o cuánto ganó una billetera."),
+                     "resultados 1h/24h y totales del sistema. Úsala para "
+                     "cualquier pregunta sobre los datos."),
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "perfil_billetera",
      "description": ("Investiga a fondo una billetera on-chain (~1 min): "
-                     "actividad, PnL, win rate, retención, huellas de bot, "
-                     "Wallet Score 0-100 y sus POSICIONES seguidas por el "
-                     "sistema (tokens que tiene ahora, SOL invertido, profit "
-                     "realizado y nº de compras/ventas de cada token)."),
+                     "actividad, PnL, win rate, retención, huellas de bot "
+                     "y Wallet Score 0-100."),
      "input_schema": {"type": "object", "properties": {
          "address": {"type": "string", "description": "dirección Solana"}},
          "required": ["address"]}},
@@ -62,6 +63,13 @@ TOOLS = [
          "required": ["valor"]}},
 ]
 
+# Mismas herramientas en el formato OpenAI que habla LM Studio.
+TOOLS_OPENAI = [{"type": "function",
+                 "function": {"name": t["name"],
+                              "description": t["description"],
+                              "parameters": t["input_schema"]}}
+                for t in TOOLS]
+
 MODIFYING = {"descartar_billetera", "rastrear_billetera", "correr_ciclo",
              "cambiar_umbral_senal"}
 
@@ -71,19 +79,12 @@ SYSTEM = (
     "últimos mensajes de la conversación. Responde en español, breve "
     "y directo, sin markdown pesado. Abrevia direcciones a 8 caracteres al "
     "mencionarlas (pero pasa la dirección COMPLETA a las herramientas). "
-    "Usa las herramientas cuando haga falta; para preguntas de datos "
-    "(incluido cuánto tiene o cuánto profit hizo una billetera) usa "
-    "consultar_base, y perfil_billetera si preguntan por una dirección "
-    "concreta. Para acciones que modifican, invoca la herramienta "
-    "directamente: el sistema le pedirá confirmación al usuario, no tú. "
-    "REGLAS DE HONESTIDAD: nunca inventes cifras ni conceptos que no "
-    "estén en los datos de las herramientas. El pnl de una billetera es "
-    "SU ganancia on-chain, no la del dueño; las ganancias del dueño son "
-    "SOLO las del bloque paper_trading (en dólares). Si te preguntan "
-    "algo que no está en los datos, dilo claro y sugiere el comando "
-    "exacto (/paper, /salidas, /top, /status) en vez de improvisar.")
+    "Usa las herramientas cuando haga falta; para preguntas de datos usa "
+    "consultar_base. Para acciones que modifican, invoca la herramienta "
+    "directamente: el sistema le pedirá confirmación al usuario, no tú.")
 
 HISTORY_TURNS = 12   # mensajes de memoria (6 intercambios)
+MAX_PASOS = 4        # iteraciones máximas del loop de herramientas
 
 
 def _load_history(conn) -> list[dict]:
@@ -118,19 +119,17 @@ def _exec_read(name: str, args: dict) -> str:
         if name == "consultar_base":
             from ai_chat import _snapshot
             return json.dumps(_snapshot(), ensure_ascii=False,
-                              default=str)[:8000]
+                              default=str)[:7000]
         if name == "perfil_billetera":
             from wallet_profiler import profile_wallet
             from wallet_score import compute_score
             from signal_tracker import wallet_track_record
-            from db import wallet_positions_summary
             addr = (args.get("address") or "").strip()
             p = profile_wallet(addr)
             if not p["tx_sampled"]:
                 return "Sin transacciones recuperadas para esa dirección."
             conn = get_conn()
             tr = wallet_track_record(conn, addr)
-            posiciones = wallet_positions_summary(conn, addr)
             conn.close()
             s = compute_score(p, tr)
             comp = {"wallet_score": s,
@@ -143,12 +142,105 @@ def _exec_read(name: str, args: dict) -> str:
                     "posible_bot": p["possible_bot"],
                     "flips_1min_pct": p.get("flips_1min_pct"),
                     "horas_activas_24": p.get("active_hours_24"),
-                    "track_record": tr,
-                    "posiciones_seguidas": posiciones}
+                    "track_record": tr}
             return json.dumps(comp, ensure_ascii=False, default=str)
     except Exception as e:
         return f"Error ejecutando {name}: {e}"
     return "Herramienta desconocida."
+
+
+def _sin_think(texto: str) -> str:
+    """Quita bloques <think> que algunos modelos locales incluyen."""
+    return re.sub(r"<think>.*?</think>", "", texto or "", flags=re.S).strip()
+
+
+def _chat_local(messages: list[dict]):
+    """Loop del agente contra la IA local (formato OpenAI de tools).
+
+    Devuelve (respuesta, accion) si la local respondió, o None si no está
+    disponible (para que el llamador pruebe la nube)."""
+    try:
+        from decision_ia import _url, _modelo
+        conn = get_conn()
+        try:
+            url, modelo = _url(conn), _modelo(conn)
+        finally:
+            conn.close()
+        if not url:
+            return None
+        msgs = [{"role": "system", "content": SYSTEM}] + messages
+        for _ in range(MAX_PASOS):
+            r = requests.post(
+                f"{url}/v1/chat/completions",
+                json={"model": modelo, "temperature": 0.3,
+                      "max_tokens": 700, "messages": msgs,
+                      "tools": TOOLS_OPENAI},
+                timeout=90)
+            if r.status_code >= 400:
+                print(f"· Agente local HTTP {r.status_code}: {r.text[:200]}")
+                return None
+            m = r.json()["choices"][0]["message"]
+            text = _sin_think(m.get("content"))
+            tcs = m.get("tool_calls") or []
+            if not tcs:
+                return (text or "No entendí, ¿puedes reformular?"), None
+            tc = tcs[0]
+            name = tc.get("function", {}).get("name", "")
+            raw = tc.get("function", {}).get("arguments") or "{}"
+            try:
+                args = raw if isinstance(raw, dict) else json.loads(raw)
+            except json.JSONDecodeError:
+                args = {}
+            if name in MODIFYING:
+                return text, {"tool": name, "args": args}
+            resultado = _exec_read(name, args)
+            msgs.append({"role": "assistant", "content": m.get("content"),
+                         "tool_calls": tcs})
+            msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                         "content": resultado})
+        return "Necesité demasiados pasos; intenta ser más específico.", None
+    except Exception as e:
+        print(f"· Agente local no disponible: {e}")
+        return None
+
+
+def _chat_nube(messages: list[dict]):
+    """Loop del agente contra la API de Claude (modo viejo)."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        msgs = list(messages)
+        for _ in range(MAX_PASOS):
+            r = requests.post(
+                API_URL,
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": MODEL, "max_tokens": 700, "system": SYSTEM,
+                      "tools": TOOLS, "messages": msgs},
+                timeout=90)
+            if r.status_code >= 400:
+                print(f"· Agente nube HTTP {r.status_code}: {r.text[:200]}")
+                return None
+            data = r.json()
+            content = data.get("content", [])
+            text = "".join(b.get("text", "") for b in content
+                           if b.get("type") == "text").strip()
+            tool_calls = [b for b in content if b.get("type") == "tool_use"]
+            if not tool_calls:
+                return (text or "No entendí, ¿puedes reformular?"), None
+            tc = tool_calls[0]
+            if tc["name"] in MODIFYING:
+                return text, {"tool": tc["name"], "args": tc.get("input", {})}
+            resultado = _exec_read(tc["name"], tc.get("input", {}))
+            msgs.append({"role": "assistant", "content": content})
+            msgs.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tc["id"],
+                 "content": resultado}]})
+        return "Necesité demasiados pasos; intenta ser más específico.", None
+    except Exception as e:
+        print(f"· Agente nube no disponible: {e}")
+        return None
 
 
 def chat(user_text: str):
@@ -157,8 +249,6 @@ def chat(user_text: str):
     accion_pendiente es None o {"tool": ..., "args": {...}} si la IA quiere
     ejecutar una acción que modifica y hay que confirmar.
     """
-    if not ANTHROPIC_API_KEY:
-        return "Falta ANTHROPIC_API_KEY para el chat.", None
     if user_text.lower().strip() in ("olvida", "olvida todo", "reset",
                                      "borra la conversacion",
                                      "borra la conversación"):
@@ -169,48 +259,30 @@ def chat(user_text: str):
         return "🧹 Memoria de conversación borrada. Empezamos de cero.", None
     conn = get_conn()
     history = _load_history(conn)
+    from ia_puente import _setting
+    orden = str(_setting("ia_proveedor", "local_primero", conn)
+                or "local_primero")
     conn.close()
     messages = history + [{"role": "user", "content": user_text}]
-    try:
-        for _ in range(4):
-            r = requests.post(
-                API_URL,
-                headers={"x-api-key": ANTHROPIC_API_KEY,
-                         "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": MODEL, "max_tokens": 700, "system": SYSTEM,
-                      "tools": TOOLS, "messages": messages},
-                timeout=90)
-            r.raise_for_status()
-            data = r.json()
-            content = data.get("content", [])
-            text = "".join(b.get("text", "") for b in content
-                           if b.get("type") == "text").strip()
-            tool_calls = [b for b in content if b.get("type") == "tool_use"]
-            if not tool_calls:
-                respuesta = text or "No entendí, ¿puedes reformular?"
-                _save_turn(user_text, respuesta)
-                return respuesta, None
 
-            mod = next((t for t in tool_calls if t["name"] in MODIFYING),
-                       None)
-            if mod:
+    if orden == "nube":
+        cadena = (_chat_nube, _chat_local)
+    elif orden == "local":
+        cadena = (_chat_local,)
+    else:                                   # local_primero
+        cadena = (_chat_local, _chat_nube)
+    for intento in cadena:
+        res = intento(messages)
+        if res is not None:
+            respuesta, accion = res
+            if accion is None:
+                _save_turn(user_text, respuesta)
+            else:
                 _save_turn(user_text,
-                           text or f"Propuse ejecutar {mod['name']}")
-                return text, {"tool": mod["name"],
-                              "args": mod.get("input", {})}
-            # Responder TODOS los tool_use: si falta el tool_result de
-            # alguno, la API devuelve 400 y el chat entero falla.
-            messages.append({"role": "assistant", "content": content})
-            messages.append({"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": t["id"],
-                 "content": _exec_read(t["name"], t.get("input", {}))}
-                for t in tool_calls]})
-        respuesta = "Necesité demasiados pasos; intenta ser más específico."
-        _save_turn(user_text, respuesta)
-        return respuesta, None
-    except Exception as e:
-        return f"Error en el chat: {e}", None
+                           respuesta or f"Propuse ejecutar {accion['tool']}")
+            return respuesta, accion
+    return ("Ninguna IA respondió: revisa que LM Studio esté corriendo "
+            "(/ialocal <url>) o configura ANTHROPIC_API_KEY."), None
 
 
 def describe_action(action: dict) -> str:
