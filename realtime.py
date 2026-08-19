@@ -514,7 +514,19 @@ def process_transactions(txs: list[dict]):
     # que agotaba el cupo de Postgres.
     conn = get_conn()
     try:
-        _proc(txs, conn)
+        try:
+            _proc(txs, conn)
+        except Exception as e:
+            # SQLite local (18/8): si otro trabajo retuvo la escritura mas
+            # de la cuenta, reintentamos UNA vez en vez de perder el lote.
+            # Es seguro re-procesar: el INSERT OR IGNORE por firma hace que
+            # lo ya registrado se salte solo.
+            if "locked" not in str(e).lower():
+                raise
+            print("· Base ocupada; reintento el lote en 3 s")
+            import time as _t
+            _t.sleep(3)
+            _proc(txs, conn)
     finally:
         conn.close()
 

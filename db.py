@@ -533,7 +533,7 @@ def _preparar_sqlite(conn):
         # WAL + busy_timeout: evita "database is locked" con los hilos del
         # webhook y los jobs periodicos escribiendo a la vez.
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
     except sqlite3.OperationalError:
         pass
     conn.executescript(SCHEMA)
@@ -621,7 +621,7 @@ def get_conn():
         # WAL y busy_timeout son ajustes POR CONEXION, no del esquema: estos
         # si tienen que aplicarse siempre.
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
     except sqlite3.OperationalError:
         pass
     if not _ESQUEMA_LISTO:
