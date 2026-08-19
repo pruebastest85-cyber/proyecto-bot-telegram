@@ -40,7 +40,7 @@ def _setting(key: str, default, conn=None):
 
 
 def _local(prompt: str, system: str | None, max_tokens: int,
-           timeout: int, conn=None) -> str | None:
+           timeout: int, conn=None, _reintento: bool = False) -> str | None:
     try:
         from decision_ia import _url, _modelo
         if conn is not None:
@@ -72,9 +72,17 @@ def _local(prompt: str, system: str | None, max_tokens: int,
         eleccion = r.json()["choices"][0]
         texto = ((eleccion.get("message") or {}).get("content") or "").strip()
         if not texto:
-            print("· IA local respondio VACIO (finish="
-                  f"{eleccion.get('finish_reason')}): el razonamiento se "
-                  "comio el tope de tokens")
+            fin = eleccion.get("finish_reason")
+            # Variantes pensantes de Qwen que IGNORAN /no_think (18/8, se
+            # vio en vivo: reasoning_tokens 499 de 500): un solo reintento
+            # con presupuesto grande deja al modelo terminar de pensar y
+            # escribir. Lento pero con respuesta > rapido pero vacio.
+            if fin == "length" and not _reintento:
+                print("· IA local: el razonamiento se comio el tope; "
+                      "reintento con presupuesto grande")
+                return _local(prompt, system, max_tokens + 2000,
+                              max(timeout, 120), conn, _reintento=True)
+            print(f"· IA local respondio VACIO (finish={fin})")
             return None
         return texto
     except Exception as e:
