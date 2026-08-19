@@ -606,24 +606,21 @@ def _proc(txs: list[dict], conn):
                             conn, "consenso_copia_n", "3") or 3))
                         if _n_min > 0:
                             _since = trade["ts"] - CONSENSUS_WINDOW_MIN * 60
-                            _nc = conn.execute(
-                                "SELECT COUNT(DISTINCT s.wallet) c "
+                            # Una sola consulta para conteo Y lider (el
+                            # hilo del webhook no esta para escaneos
+                            # dobles): compradores ⭐ ordenados por su
+                            # primera entrada — el primero es la lider.
+                            _mana = conn.execute(
+                                "SELECT s.wallet, MIN(s.ts) t0 "
                                 "FROM signals s JOIN wallets w "
                                 "ON w.address=s.wallet AND w.is_tracked=1 "
                                 "WHERE s.mint=? AND s.ts>=? "
-                                "AND s.side='compra'",
-                                (trade["mint"], _since)).fetchone()["c"]
-                            if _nc >= _n_min:
-                                _lid = conn.execute(
-                                    "SELECT s.wallet FROM signals s "
-                                    "JOIN wallets w ON w.address=s.wallet "
-                                    "AND w.is_tracked=1 WHERE s.mint=? "
-                                    "AND s.ts>=? AND s.side='compra' "
-                                    "ORDER BY s.ts ASC LIMIT 1",
-                                    (trade["mint"], _since)).fetchone()
+                                "AND s.side='compra' "
+                                "GROUP BY s.wallet ORDER BY t0 ASC",
+                                (trade["mint"], _since)).fetchall()
+                            if len(_mana) >= _n_min:
                                 _t_lider = dict(trade)
-                                if _lid:
-                                    _t_lider["wallet"] = _lid["wallet"]
+                                _t_lider["wallet"] = _mana[0]["wallet"]
                                 _accion = ("abrir", _t_lider, "consenso")
                     else:
                         # Venta: se sigue si es del top O si esta billetera

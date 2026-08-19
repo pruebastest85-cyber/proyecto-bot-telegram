@@ -477,7 +477,29 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         return
     if row["wallet"] and trade.get("wallet") \
             and row["wallet"] != trade["wallet"]:
-        return
+        # SALIDA DE MANADA CON QUORUM (19/8): en posiciones por CONSENSO
+        # la lider manda sola (flujo normal), pero si ella se duerme, la
+        # manada puede sacarte SOLO con quorum: hacen falta al menos
+        # `consenso_salida_n` (2) ⭐ DISTINTAS vendiendo este token desde
+        # la entrada. Una sola mano debil que compro tarde y salio sin
+        # ganancia no arrastra la posicion. Para las posiciones clasicas
+        # del top se mantiene la regla: solo quien abrio.
+        try:
+            if _campo(row, "origen") != "consenso":
+                return
+            quorum = int(_f(conn, "consenso_salida_n", 2))
+            vendedoras = conn.execute(
+                "SELECT COUNT(DISTINCT s.wallet) c FROM signals s "
+                "JOIN wallets w ON w.address=s.wallet AND w.is_tracked=1 "
+                "WHERE s.mint=? AND s.side='venta' AND s.ts>=?",
+                (trade["mint"], row["entry_ts"] or 0)).fetchone()["c"]
+            if vendedoras < max(1, quorum):
+                return
+            print(f"🤝 Salida de manada: {vendedoras} ⭐ vendieron "
+                  f"{_campo(row, 'symbol') or trade['mint'][:8]} "
+                  f"(quórum {quorum})")
+        except Exception:
+            return
     price = token.get("price")
     if not price or price <= 0:
         return
@@ -732,6 +754,29 @@ def resumen_text() -> str:
             trozos = [f"{r['gestion']}: {r['n']} ops "
                       f"{_usd_firmado(r['pnl'] or 0)}" for r in ab]
             out.append("🤖 A/B de salidas · " + "  vs  ".join(trozos))
+        # ¿El consenso gana o pierde frente a la copia clasica del top?
+        # (19/8) La columna origen existe justamente para contestar esto.
+        try:
+            org = conn.execute(
+                "SELECT COALESCE(origen,'top') o, COUNT(*) n, "
+                "SUM(pnl_usd) pnl, "
+                "SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END) wins "
+                "FROM paper_trades WHERE status<>'abierta' "
+                "GROUP BY COALESCE(origen,'top')").fetchall()
+            omap = {r["o"]: r for r in org}
+            if "consenso" in omap:
+                trozos_o = []
+                for o in ("top", "consenso"):
+                    r = omap.get(o)
+                    if r and r["n"]:
+                        trozos_o.append(
+                            f"{o}: {r['n']} ops "
+                            f"{_usd_firmado(r['pnl'] or 0)} "
+                            f"(wr {100*(r['wins'] or 0)/r['n']:.0f}%)")
+                if trozos_o:
+                    out.append("🤝 Origen · " + "  vs  ".join(trozos_o))
+        except Exception:
+            pass
         if filtro:
             fmap = {r["ia_entrada"]: r for r in filtro}
             rech = fmap.get("rechazar")
