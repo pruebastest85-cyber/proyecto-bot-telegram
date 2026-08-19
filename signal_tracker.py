@@ -266,6 +266,12 @@ def _check_streaks(conn):
 def _auto_threshold(conn):
     """Umbral que aprende: elige el min_signal_score que maximiza el
     win rate histórico a 24h (manteniendo un mínimo de señales)."""
+    # EL AJUSTE MANUAL MANDA (19/8): si el dueño fijo el umbral por el
+    # agente, este auto-ajuste queda apagado — antes le pisaba el valor
+    # a los 15 minutos y parecia que "no se guardaba".
+    from db import get_setting as _gs
+    if str(_gs(conn, "umbral_manual", "0") or "0") == "1":
+        return
     rows = conn.execute(
         "SELECT signal_score, chg_24h FROM signals "
         "WHERE side='compra' AND chg_24h IS NOT NULL "

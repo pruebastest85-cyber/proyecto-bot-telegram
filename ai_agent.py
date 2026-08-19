@@ -56,8 +56,9 @@ TOOLS = [
     {"name": "cambiar_umbral_senal",
      "description": ("Cambia el umbral mínimo del score de señal (0-100). "
                      "Señales de compra con score menor no alertan (pero sí "
-                     "se registran y miden). 0 = alertar todo. Requiere "
-                     "confirmación del usuario."),
+                     "se registran y miden). 0 = alertar todo. Fijarlo a "
+                     "mano APAGA el auto-ajuste; -1 = volver al modo "
+                     "automático. Requiere confirmación del usuario."),
      "input_schema": {"type": "object", "properties": {
          "valor": {"type": "number", "description": "umbral 0-100"}},
          "required": ["valor"]}},
@@ -172,16 +173,19 @@ def _chat_local(messages: list[dict]):
         # gasta el max_tokens pensando y el chat "no contesta" (18/8).
         msgs = [{"role": "system", "content": SYSTEM + "\n/no_think"}] \
             + messages
+        sin_tope = False   # se enciende si el razonamiento se come el tope
         for _ in range(MAX_PASOS):
-            r = requests.post(
-                f"{url}/v1/chat/completions",
-                json={"model": modelo, "temperature": 0.3,
-                      # +200 de colchon por si el modelo ignora /no_think
-                      # y razona igual (mismo criterio que ia_puente).
-                      "max_tokens": 900, "messages": msgs,
+            cuerpo = {"model": modelo, "temperature": 0.3,
+                      "messages": msgs,
                       "chat_template_kwargs": {"enable_thinking": False},
-                      "tools": TOOLS_OPENAI},
-                timeout=90)
+                      "tools": TOOLS_OPENAI}
+            if not sin_tope:
+                # +200 de colchon por si el modelo ignora /no_think
+                # y razona igual (mismo criterio que ia_puente).
+                cuerpo["max_tokens"] = 900
+            r = requests.post(
+                f"{url}/v1/chat/completions", json=cuerpo,
+                timeout=150 if sin_tope else 90)
             if r.status_code >= 400:
                 print(f"· Agente local HTTP {r.status_code}: {r.text[:200]}")
                 return None
@@ -191,10 +195,18 @@ def _chat_local(messages: list[dict]):
             tcs = m.get("tool_calls") or []
             if not tcs:
                 if not text:
-                    # Vacio = fallo del modelo (razonamiento comido), no
-                    # "no entendi": devolver None deja caer a la nube.
-                    print("· Agente local respondio VACIO (finish="
-                          f"{eleccion.get('finish_reason')})")
+                    fin = eleccion.get("finish_reason")
+                    if fin == "length" and not sin_tope:
+                        # Mismo remedio que el puente (19/8): el modelo
+                        # pensante ignora los apagadores — reintento sin
+                        # tope de tokens; el limite real es el timeout.
+                        print("· Agente local: razonamiento comio el "
+                              "tope; reintento SIN tope de tokens")
+                        sin_tope = True
+                        continue
+                    # Vacio = fallo del modelo, no "no entendi":
+                    # devolver None deja caer a la nube.
+                    print(f"· Agente local respondio VACIO (finish={fin})")
                     return None
                 return text, None
             tc = tcs[0]
@@ -329,12 +341,24 @@ def execute_action(action: dict) -> str:
             return run_full_cycle()
         if tool == "cambiar_umbral_senal":
             from db import set_setting
-            v = max(0, min(100, float(args.get("valor", 0))))
+            v_raw = float(args.get("valor", 0))
+            if v_raw < 0:
+                conn = get_conn()
+                set_setting(conn, "umbral_manual", "0")
+                conn.close()
+                return ("🎚️ Auto-ajuste del umbral reactivado: volverá a "
+                        "optimizarse solo con el historial medido.")
+            v = max(0, min(100, v_raw))
             conn = get_conn()
             set_setting(conn, "min_signal_score", v)
+            # El ajuste MANUAL manda (19/8): sin esta marca, el auto-
+            # ajustador de signal_tracker lo pisaba a los 15 minutos.
+            set_setting(conn, "umbral_manual", "1")
             conn.close()
-            return (f"🎯 Umbral fijado en {v:.0f}/100. Señales de compra "
-                    f"con score menor quedarán silenciadas.")
+            return (f"🎯 Umbral fijado en {v:.0f}/100 (modo manual: el "
+                    f"auto-ajuste queda apagado; di «umbral automático» "
+                    f"para reactivarlo). Señales de compra con score "
+                    f"menor quedarán silenciadas.")
     except Exception as e:
         return f"Error ejecutando la acción: {e}"
     return "Acción desconocida."
