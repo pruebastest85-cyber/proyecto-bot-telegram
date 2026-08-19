@@ -195,7 +195,14 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
         if r.status_code >= 400:
             print(f"· IA entrada HTTP {r.status_code}: {r.text[:200]}")
             return None
-        texto = (r.json()["choices"][0]["message"]["content"] or "")
+        eleccion = r.json()["choices"][0]
+        texto = ((eleccion.get("message") or {}).get("content") or "")
+        if not texto.strip():
+            # Mismo sintoma que el 18/8: el razonamiento se comio el tope
+            # y el texto llego vacio — que se vea, no que parezca JSON malo.
+            print("· IA entrada respondio VACIO (finish="
+                  f"{eleccion.get('finish_reason')})")
+            return None
         t = texto.replace("```json", "").replace("```", "").strip()
         try:
             v = json.loads(t)
@@ -249,7 +256,15 @@ def decidir_salida(conn, contexto: dict) -> dict:
             print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
             return {"salida": "vender",
                     "decidido_por": f"reglas_fallback:http_{r.status_code}"}
-        texto = (r.json()["choices"][0]["message"]["content"] or "")
+        eleccion = r.json()["choices"][0]
+        texto = ((eleccion.get("message") or {}).get("content") or "")
+        if not texto.strip():
+            # Vacio con HTTP 200 = razonamiento comido (18/8). Registrado
+            # con nombre propio para que el A/B no lo disfrace de otra cosa.
+            print("· IA local respondio VACIO (finish="
+                  f"{eleccion.get('finish_reason')})")
+            return {"salida": "vender",
+                    "decidido_por": "reglas_fallback:respuesta_vacia"}
     except Exception as e:
         print(f"· IA local inalcanzable: {e}")
         return {"salida": "vender",
