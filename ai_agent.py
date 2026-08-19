@@ -179,6 +179,7 @@ def _chat_local(messages: list[dict]):
                       # +200 de colchon por si el modelo ignora /no_think
                       # y razona igual (mismo criterio que ia_puente).
                       "max_tokens": 900, "messages": msgs,
+                      "chat_template_kwargs": {"enable_thinking": False},
                       "tools": TOOLS_OPENAI},
                 timeout=90)
             if r.status_code >= 400:

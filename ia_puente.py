@@ -64,7 +64,10 @@ def _local(prompt: str, system: str | None, max_tokens: int,
         r = requests.post(
             f"{url}/v1/chat/completions",
             json={"model": modelo, "temperature": 0.3,
-                  "max_tokens": max_tokens + 200, "messages": msgs},
+                  "max_tokens": max_tokens + 200, "messages": msgs,
+                  # Apagado "de verdad" del razonamiento via plantilla de
+                  # chat; los servidores que no lo entienden lo ignoran.
+                  "chat_template_kwargs": {"enable_thinking": False}},
             timeout=timeout)
         if r.status_code >= 400:
             print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
@@ -77,7 +80,10 @@ def _local(prompt: str, system: str | None, max_tokens: int,
             # vio en vivo: reasoning_tokens 499 de 500): un solo reintento
             # con presupuesto grande deja al modelo terminar de pensar y
             # escribir. Lento pero con respuesta > rapido pero vacio.
-            if fin == "length" and not _reintento:
+            # Solo reintentar cuando el llamador ya venia con paciencia
+            # (jobs periodicos): el hilo del webhook llama con timeout=25
+            # y no debe quedarse 2 minutos esperando (hallazgo 18/8).
+            if fin == "length" and not _reintento and timeout >= 60:
                 print("· IA local: el razonamiento se comio el tope; "
                       "reintento con presupuesto grande")
                 return _local(prompt, system, max_tokens + 2000,

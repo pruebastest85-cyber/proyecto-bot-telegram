@@ -181,37 +181,20 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
         "copiar esta compra o era una mala señal? Datos:\n"
         + json.dumps(ctx, ensure_ascii=False, default=str)
         + "\n\nResponde SOLO este JSON, sin nada mas:\n"
-        '{"entrada":"copiar"} o {"entrada":"rechazar","razon":"una frase"}'
-        "\n/no_think")
+        '{"entrada":"copiar"} o {"entrada":"rechazar","razon":"una frase"}')
     try:
-        r = requests.post(
-            f"{url}/v1/chat/completions",
-            json={"model": _modelo(conn), "temperature": 0.2,
-                  # /no_think apaga el razonamiento de Qwen; el colchon de
-                  # tokens cubre a los modelos que lo ignoren (18/8).
-                  "max_tokens": 300,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=TIMEOUT_ENTRADA)
-        if r.status_code >= 400:
-            print(f"· IA entrada HTTP {r.status_code}: {r.text[:200]}")
+        # Via el puente (19/8): hereda el /no_think, el apagado por
+        # plantilla y el reintento anti-razonamiento. Corre en hilo de
+        # fondo y en modo sombra: sus 60 s de paciencia no frenan nada.
+        from ia_puente import completar_ex, extraer_json
+        texto, _prov = completar_ex(prompt, max_tokens=300, timeout=60,
+                                    conn=conn)
+        if not texto:
             return None
-        eleccion = r.json()["choices"][0]
-        texto = ((eleccion.get("message") or {}).get("content") or "")
-        if not texto.strip():
-            # Mismo sintoma que el 18/8: el razonamiento se comio el tope
-            # y el texto llego vacio — que se vea, no que parezca JSON malo.
-            print("· IA entrada respondio VACIO (finish="
-                  f"{eleccion.get('finish_reason')})")
+        v = extraer_json(texto)
+        if v is None:
+            print(f"· IA entrada sin JSON: {texto[:120]}")
             return None
-        t = texto.replace("```json", "").replace("```", "").strip()
-        try:
-            v = json.loads(t)
-        except json.JSONDecodeError:
-            import re
-            m = re.search(r"\{.*\}", t, flags=re.S)
-            if not m:
-                raise
-            v = json.loads(m.group(0))
         e = str(v.get("entrada", "")).lower().strip()
         if e in ("copiar", "rechazar"):
             return {"entrada": e, "razon": str(v.get("razon", ""))[:120]}
@@ -248,8 +231,10 @@ def decidir_salida(conn, contexto: dict) -> dict:
             f"{url}/v1/chat/completions",
             json={"model": _modelo(conn), "temperature": 0.2,
                   # /no_think apaga el razonamiento de Qwen; el colchon de
-                  # tokens cubre a los modelos que lo ignoren (18/8).
+                  # tokens cubre a los modelos que lo ignoren (18/8) y el
+                  # apagado por plantilla remata a los que ignoran ambos.
                   "max_tokens": 320,
+                  "chat_template_kwargs": {"enable_thinking": False},
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=TIMEOUT)
         if r.status_code >= 400:
