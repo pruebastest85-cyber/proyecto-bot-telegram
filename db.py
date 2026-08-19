@@ -798,7 +798,8 @@ def save_winning_token(conn, token: dict) -> bool:
             "SELECT detected_at FROM winning_tokens WHERE mint=?",
             (token["mint"],)).fetchone()
         try:
-            det = datetime.fromisoformat(row["detected_at"])                 if row and row["detected_at"] else None
+            det = (datetime.fromisoformat(row["detected_at"])
+                   if row and row["detected_at"] else None)
             if det is not None and det.tzinfo is None:
                 det = det.replace(tzinfo=timezone.utc)
             if det and (datetime.now(timezone.utc) - det).days >= 7:

@@ -529,6 +529,18 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
     price = token.get("price")
     if not price or price <= 0:
         return
+    # La firma se graba AQUI, en cuanto la decision de actuar esta tomada
+    # (19/8): el "return por precio ausente" de arriba es transitorio y SI
+    # se quiere reintentar; de aqui en adelante, todo pase repetido del
+    # mismo evento (caliente + via normal) debe morir en la guardia. Sin
+    # esto, los caminos de HOLD se ejecutaban dos veces: doble UPDATE de
+    # politica (reloj reiniciado), pico pisado, DOBLE consulta a la IA de
+    # salida (8 s cada una, respuestas que podian no coincidir) y doble 🕐.
+    if _firma:
+        conn.execute(
+            "UPDATE paper_trades SET ultima_venta_sig=? WHERE id=?",
+            (_firma, row["id"]))
+        conn.commit()
 
     # ── Espejo proporcional (implementado a pedido, 13/8/2026) ────────
     # Antes: venta <50% se ignoraba y >=50% cerraba TODO. Ahora el paper
