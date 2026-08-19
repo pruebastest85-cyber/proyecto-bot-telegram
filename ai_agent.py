@@ -168,7 +168,10 @@ def _chat_local(messages: list[dict]):
             conn.close()
         if not url:
             return None
-        msgs = [{"role": "system", "content": SYSTEM}] + messages
+        # /no_think: apaga el razonamiento de Qwen — sin el, el modelo se
+        # gasta el max_tokens pensando y el chat "no contesta" (18/8).
+        msgs = [{"role": "system", "content": SYSTEM + "\n/no_think"}] \
+            + messages
         for _ in range(MAX_PASOS):
             r = requests.post(
                 f"{url}/v1/chat/completions",

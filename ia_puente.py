@@ -54,18 +54,29 @@ def _local(prompt: str, system: str | None, max_tokens: int,
                 c.close()
         if not url:
             return None
+        # Qwen 3.x es un modelo PENSANTE: sin el interruptor /no_think se
+        # gasta el max_tokens razonando y el texto visible llega vacio con
+        # HTTP 200 — el "Sin IA" silencioso del 18/8. /no_think apaga el
+        # razonamiento (respuesta directa y rapida) y el colchon de tokens
+        # cubre a los modelos que lo ignoren.
         msgs = ([{"role": "system", "content": system}] if system else []) \
-            + [{"role": "user", "content": prompt}]
+            + [{"role": "user", "content": prompt + "\n/no_think"}]
         r = requests.post(
             f"{url}/v1/chat/completions",
             json={"model": modelo, "temperature": 0.3,
-                  "max_tokens": max_tokens, "messages": msgs},
+                  "max_tokens": max_tokens + 200, "messages": msgs},
             timeout=timeout)
         if r.status_code >= 400:
             print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
             return None
-        return (r.json()["choices"][0]["message"]["content"] or "").strip() \
-            or None
+        eleccion = r.json()["choices"][0]
+        texto = ((eleccion.get("message") or {}).get("content") or "").strip()
+        if not texto:
+            print("· IA local respondio VACIO (finish="
+                  f"{eleccion.get('finish_reason')}): el razonamiento se "
+                  "comio el tope de tokens")
+            return None
+        return texto
     except Exception as e:
         print(f"· IA local no disponible: {e}")
         return None

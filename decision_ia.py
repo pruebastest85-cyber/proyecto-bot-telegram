@@ -177,12 +177,15 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
         "copiar esta compra o era una mala señal? Datos:\n"
         + json.dumps(ctx, ensure_ascii=False, default=str)
         + "\n\nResponde SOLO este JSON, sin nada mas:\n"
-        '{"entrada":"copiar"} o {"entrada":"rechazar","razon":"una frase"}')
+        '{"entrada":"copiar"} o {"entrada":"rechazar","razon":"una frase"}'
+        "\n/no_think")
     try:
         r = requests.post(
             f"{url}/v1/chat/completions",
             json={"model": _modelo(conn), "temperature": 0.2,
-                  "max_tokens": 100,
+                  # /no_think apaga el razonamiento de Qwen; el colchon de
+                  # tokens cubre a los modelos que lo ignoren (18/8).
+                  "max_tokens": 300,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=TIMEOUT)
         if r.status_code >= 400:
@@ -227,12 +230,15 @@ def decidir_salida(conn, contexto: dict) -> dict:
         + json.dumps(contexto, ensure_ascii=False, default=str)
         + "\n\nResponde SOLO este JSON, sin nada mas:\n"
         '{"salida":"vender"} o {"salida":"holdear","max_min":<5-120>,'
-        '"razon":"una frase"}')
+        '"razon":"una frase"}'
+        "\n/no_think")
     try:
         r = requests.post(
             f"{url}/v1/chat/completions",
             json={"model": _modelo(conn), "temperature": 0.2,
-                  "max_tokens": 120,
+                  # /no_think apaga el razonamiento de Qwen; el colchon de
+                  # tokens cubre a los modelos que lo ignoren (18/8).
+                  "max_tokens": 320,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=TIMEOUT)
         if r.status_code >= 400:
