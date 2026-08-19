@@ -908,8 +908,17 @@ def top_wallets(conn, limit=20):
     # compras copiables en 24 h y el copy trading siguiendo fantasmas.
     # La actividad sale de positions.last_ts (se actualiza en cada
     # operacion vigilada; la tabla es chica y el join, barato).
+    #
+    # CORTE A 48 H (19/8/2026): con 7 dias el top quedaba "vivo en papel
+    # pero dormido en la practica" — se midio un top 30 con 22 billeteras
+    # sin operar en 24 h y 9 estrellas activas ese dia FUERA del top. Las
+    # de score alto que operan una vez por semana tapaban a las diarias.
+    # Ajustable sin codigo con TOP_ACTIVITY_HOURS. Espejo obligatorio en
+    # wallet_ident.posicion().
     import time as _t
-    corte = int(_t.time()) - 7 * 86400
+    import os as _os
+    _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
+    corte = int(_t.time()) - int(_horas * 3600)
     return conn.execute(
         """SELECT w.address, w.winning_tokens_count, w.total_buys_sol,
                   w.score, w.is_tracked, w.ai_class, w.alias, w.pnl_30d,

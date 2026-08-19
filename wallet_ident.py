@@ -38,7 +38,11 @@ def posicion(conn, address: str, tope: int = 200):
         return None
     try:
         import time as _t
-        corte = int(_t.time()) - 7 * 86400
+        import os as _os
+        # ESPEJO de db.top_wallets (19/8): mismo corte de actividad de
+        # 48 h, ajustable con TOP_ACTIVITY_HOURS. Si cambia alla, aqui.
+        _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
+        corte = int(_t.time()) - int(_horas * 3600)
         rows = conn.execute(
             """SELECT w.address FROM wallets w
                LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
