@@ -507,10 +507,11 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             print(f"🤝 Salida de manada: {vendedoras} ⭐ de la manada "
                   f"vendieron {_campo(row, 'symbol') or trade['mint'][:8]} "
                   f"(quórum {quorum})")
-            # Cierre por quorum = TOTAL: la fraccion vendida de un
-            # miembro cualquiera no es la de la lider; sin pos, el flujo
-            # sigue por la decision de cierre total (IA/reglas, con
-            # TP/SL supremos como siempre).
+            # Quorum cumplido = señal de salida TOTAL (nada de espejo
+            # parcial: la fraccion de un miembro cualquiera no es la de
+            # la lider). OJO deliberado: pasa por la decision de cierre
+            # normal — IA/reglas pueden holdear con trailing si el perfil
+            # lo amerita, y TP/SL siguen supremos. No siempre vende YA.
             pos = None
         except Exception:
             return

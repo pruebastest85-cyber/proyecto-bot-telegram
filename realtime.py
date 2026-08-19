@@ -626,9 +626,15 @@ def _proc(txs: list[dict], conn):
                         # Venta: se sigue si es del top O si esta billetera
                         # es quien ABRIO una posicion viva (p. ej. la lider
                         # de un consenso fuera del top).
+                        # Entra tambien si hay posicion de CONSENSO viva
+                        # en este mint (la abrio la lider, pero cualquier
+                        # ⭐ de la manada debe poder llegar al quorum de
+                        # salida en paper_trading — hallazgo 19/8: sin
+                        # este OR, el quorum era codigo muerto).
                         _sigue = en_top or conn.execute(
                             "SELECT 1 FROM paper_trades WHERE mint=? "
-                            "AND wallet=? AND status='abierta'",
+                            "AND status='abierta' AND (wallet=? "
+                            "OR origen='consenso')",
                             (trade["mint"], trade["wallet"])).fetchone()
                         if _sigue:
                             _accion = ("cerrar", trade, None)
@@ -748,10 +754,23 @@ def _proc(txs: list[dict], conn):
             _cerrar_huerfana = False
             if not es_compra:
                 try:
-                    _cerrar_huerfana = conn.execute(
-                        "SELECT 1 FROM paper_trades WHERE wallet=? AND mint=? "
-                        "AND status='abierta' LIMIT 1",
-                        (trade["wallet"], trade["mint"])).fetchone() is not None
+                    if es_star:
+                        # Una ⭐ fuera del top tambien entra si hay una
+                        # posicion de CONSENSO viva en el mint: el quorum
+                        # de salida (paper_trading) decide si cierra.
+                        # Sin este OR el quorum era codigo muerto (19/8).
+                        _cerrar_huerfana = conn.execute(
+                            "SELECT 1 FROM paper_trades WHERE mint=? "
+                            "AND status='abierta' AND (wallet=? "
+                            "OR origen='consenso') LIMIT 1",
+                            (trade["mint"],
+                             trade["wallet"])).fetchone() is not None
+                    else:
+                        _cerrar_huerfana = conn.execute(
+                            "SELECT 1 FROM paper_trades WHERE wallet=? "
+                            "AND mint=? AND status='abierta' LIMIT 1",
+                            (trade["wallet"],
+                             trade["mint"])).fetchone() is not None
                 except Exception:
                     _cerrar_huerfana = False       # tabla aún sin crear
             if not _cerrar_huerfana:
@@ -762,7 +781,7 @@ def _proc(txs: list[dict], conn):
             motivo_h = ("ya no es ⭐" if not es_star
                         else "salió del top")
             print(f"🧪 Paper: {trade['wallet'][:8]}… {motivo_h} pero vendió "
-                  f"{t['symbol']}; cierro su posición simulada")
+                  f"{t['symbol']}; evalúo el cierre de la simulada")
             try:
                 import paper_trading
                 paper_trading.close_on_wallet_sell(
