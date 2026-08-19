@@ -23,6 +23,13 @@ import requests
 NUBE_URL = "https://api.anthropic.com/v1/messages"
 NUBE_MODELO = "claude-haiku-4-5-20251001"
 
+# Se aprende en caliente (19/8): True cuando el modelo local demostro ser
+# PENSANTE e ignorar los apagadores. A partir de ahi todas las llamadas
+# van directo SIN tope de tokens — sin quemar un primer intento condenado
+# en cada evaluacion. Se resetea al reiniciar el proceso (si cambias de
+# modelo, se re-aprende solo).
+_MODELO_PENSANTE = False
+
 
 def _setting(key: str, default, conn=None):
     try:
@@ -41,6 +48,7 @@ def _setting(key: str, default, conn=None):
 
 def _local(prompt: str, system: str | None, max_tokens: int,
            timeout: int, conn=None, _reintento: bool = False) -> str | None:
+    global _MODELO_PENSANTE
     try:
         from decision_ia import _url, _modelo
         if conn is not None:
@@ -57,15 +65,15 @@ def _local(prompt: str, system: str | None, max_tokens: int,
         # Qwen 3.x es un modelo PENSANTE: sin el interruptor /no_think se
         # gasta el max_tokens razonando y el texto visible llega vacio con
         # HTTP 200 — el "Sin IA" silencioso del 18/8. /no_think apaga el
-        # razonamiento (respuesta directa y rapida) y el colchon de tokens
-        # cubre a los modelos que lo ignoren.
+        # razonamiento en los modelos que lo honran; a los que lo ignoran
+        # los cubre el reintento SIN tope (y _MODELO_PENSANTE lo recuerda).
         msgs = ([{"role": "system", "content": system}] if system else []) \
             + [{"role": "user", "content": prompt + "\n/no_think"}]
         cuerpo = {"model": modelo, "temperature": 0.3, "messages": msgs,
                   # Apagado "de verdad" del razonamiento via plantilla de
                   # chat; los servidores que no lo entienden lo ignoran.
                   "chat_template_kwargs": {"enable_thinking": False}}
-        if not _reintento:
+        if not _reintento and not _MODELO_PENSANTE:
             cuerpo["max_tokens"] = max_tokens + 200
         # En el reintento va SIN tope de tokens (19/8): el modelo pensante
         # razona lo que necesite y termina solo; el limite real que nos
@@ -87,6 +95,10 @@ def _local(prompt: str, system: str | None, max_tokens: int,
             # (jobs periodicos): el hilo del webhook llama con timeout=25
             # y no debe quedarse 2 minutos esperando (hallazgo 18/8).
             if fin == "length" and not _reintento and timeout >= 60:
+                if not _MODELO_PENSANTE:
+                    _MODELO_PENSANTE = True
+                    print("· IA local: modelo PENSANTE detectado — de aqui "
+                          "en adelante todas las llamadas van sin tope")
                 print("· IA local: el razonamiento se comio el tope; "
                       "reintento SIN tope de tokens")
                 return _local(prompt, system, max_tokens,
