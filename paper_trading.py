@@ -488,16 +488,30 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             if _campo(row, "origen") != "consenso":
                 return
             quorum = int(_f(conn, "consenso_salida_n", 2))
+            ent = row["entry_ts"] or 0
+            # Solo cuentan vendedoras que ESTUVIERON en la manada
+            # compradora (compraron el mint en la ventana de consenso,
+            # 45 min = la CONSENSUS_WINDOW_MIN de realtime, antes de la
+            # entrada). Una ⭐ ajena que liquida una bolsa vieja no suma.
             vendedoras = conn.execute(
                 "SELECT COUNT(DISTINCT s.wallet) c FROM signals s "
                 "JOIN wallets w ON w.address=s.wallet AND w.is_tracked=1 "
-                "WHERE s.mint=? AND s.side='venta' AND s.ts>=?",
-                (trade["mint"], row["entry_ts"] or 0)).fetchone()["c"]
+                "WHERE s.mint=? AND s.side='venta' AND s.ts>=? "
+                "AND s.wallet IN (SELECT s2.wallet FROM signals s2 "
+                "  WHERE s2.mint=? AND s2.side='compra' "
+                "  AND s2.ts BETWEEN ? AND ?)",
+                (trade["mint"], ent, trade["mint"],
+                 ent - 45 * 60, ent)).fetchone()["c"]
             if vendedoras < max(1, quorum):
                 return
-            print(f"🤝 Salida de manada: {vendedoras} ⭐ vendieron "
-                  f"{_campo(row, 'symbol') or trade['mint'][:8]} "
+            print(f"🤝 Salida de manada: {vendedoras} ⭐ de la manada "
+                  f"vendieron {_campo(row, 'symbol') or trade['mint'][:8]} "
                   f"(quórum {quorum})")
+            # Cierre por quorum = TOTAL: la fraccion vendida de un
+            # miembro cualquiera no es la de la lider; sin pos, el flujo
+            # sigue por la decision de cierre total (IA/reglas, con
+            # TP/SL supremos como siempre).
+            pos = None
         except Exception:
             return
     price = token.get("price")
@@ -706,6 +720,19 @@ def resumen_text() -> str:
         "SUM(pnl_usd) pnl_usd "
         "FROM paper_trades WHERE status='cerrada' "
         "GROUP BY exit_reason ORDER BY n DESC").fetchall()
+    # Top vs consenso: consultado ANTES del close (la v1 de este bloque
+    # quedo despues del conn.close() y el except se comio el error en
+    # silencio — leccion repetida: los except anchos imprimen SIEMPRE).
+    try:
+        org = conn.execute(
+            "SELECT COALESCE(origen,'top') o, COUNT(*) n, "
+            "SUM(pnl_usd) pnl, "
+            "SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END) wins "
+            "FROM paper_trades WHERE status<>'abierta' "
+            "GROUP BY COALESCE(origen,'top')").fetchall()
+    except Exception as e:
+        print(f"· Resumen origen falló: {e}")
+        org = []
     conn.close()
 
     out = [f"🧪 *Paper trading*  ·  {estado}",
@@ -756,13 +783,8 @@ def resumen_text() -> str:
             out.append("🤖 A/B de salidas · " + "  vs  ".join(trozos))
         # ¿El consenso gana o pierde frente a la copia clasica del top?
         # (19/8) La columna origen existe justamente para contestar esto.
+        # (la consulta corre arriba, ANTES del conn.close()).
         try:
-            org = conn.execute(
-                "SELECT COALESCE(origen,'top') o, COUNT(*) n, "
-                "SUM(pnl_usd) pnl, "
-                "SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END) wins "
-                "FROM paper_trades WHERE status<>'abierta' "
-                "GROUP BY COALESCE(origen,'top')").fetchall()
             omap = {r["o"]: r for r in org}
             if "consenso" in omap:
                 trozos_o = []
@@ -775,8 +797,8 @@ def resumen_text() -> str:
                             f"(wr {100*(r['wins'] or 0)/r['n']:.0f}%)")
                 if trozos_o:
                     out.append("🤝 Origen · " + "  vs  ".join(trozos_o))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"· Resumen origen (formato) falló: {e}")
         if filtro:
             fmap = {r["ia_entrada"]: r for r in filtro}
             rech = fmap.get("rechazar")
