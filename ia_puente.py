@@ -61,14 +61,17 @@ def _local(prompt: str, system: str | None, max_tokens: int,
         # cubre a los modelos que lo ignoren.
         msgs = ([{"role": "system", "content": system}] if system else []) \
             + [{"role": "user", "content": prompt + "\n/no_think"}]
-        r = requests.post(
-            f"{url}/v1/chat/completions",
-            json={"model": modelo, "temperature": 0.3,
-                  "max_tokens": max_tokens + 200, "messages": msgs,
+        cuerpo = {"model": modelo, "temperature": 0.3, "messages": msgs,
                   # Apagado "de verdad" del razonamiento via plantilla de
                   # chat; los servidores que no lo entienden lo ignoran.
-                  "chat_template_kwargs": {"enable_thinking": False}},
-            timeout=timeout)
+                  "chat_template_kwargs": {"enable_thinking": False}}
+        if not _reintento:
+            cuerpo["max_tokens"] = max_tokens + 200
+        # En el reintento va SIN tope de tokens (19/8): el modelo pensante
+        # razona lo que necesite y termina solo; el limite real que nos
+        # protege es el timeout, no el contador.
+        r = requests.post(
+            f"{url}/v1/chat/completions", json=cuerpo, timeout=timeout)
         if r.status_code >= 400:
             print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
             return None
@@ -85,8 +88,8 @@ def _local(prompt: str, system: str | None, max_tokens: int,
             # y no debe quedarse 2 minutos esperando (hallazgo 18/8).
             if fin == "length" and not _reintento and timeout >= 60:
                 print("· IA local: el razonamiento se comio el tope; "
-                      "reintento con presupuesto grande")
-                return _local(prompt, system, max_tokens + 2000,
+                      "reintento SIN tope de tokens")
+                return _local(prompt, system, max_tokens,
                               max(timeout, 120), conn, _reintento=True)
             print(f"· IA local respondio VACIO (finish={fin})")
             return None
