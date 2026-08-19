@@ -176,17 +176,26 @@ def _chat_local(messages: list[dict]):
             r = requests.post(
                 f"{url}/v1/chat/completions",
                 json={"model": modelo, "temperature": 0.3,
-                      "max_tokens": 700, "messages": msgs,
+                      # +200 de colchon por si el modelo ignora /no_think
+                      # y razona igual (mismo criterio que ia_puente).
+                      "max_tokens": 900, "messages": msgs,
                       "tools": TOOLS_OPENAI},
                 timeout=90)
             if r.status_code >= 400:
                 print(f"· Agente local HTTP {r.status_code}: {r.text[:200]}")
                 return None
-            m = r.json()["choices"][0]["message"]
+            eleccion = r.json()["choices"][0]
+            m = eleccion["message"]
             text = _sin_think(m.get("content"))
             tcs = m.get("tool_calls") or []
             if not tcs:
-                return (text or "No entendí, ¿puedes reformular?"), None
+                if not text:
+                    # Vacio = fallo del modelo (razonamiento comido), no
+                    # "no entendi": devolver None deja caer a la nube.
+                    print("· Agente local respondio VACIO (finish="
+                          f"{eleccion.get('finish_reason')})")
+                    return None
+                return text, None
             tc = tcs[0]
             name = tc.get("function", {}).get("name", "")
             raw = tc.get("function", {}).get("arguments") or "{}"
@@ -197,7 +206,9 @@ def _chat_local(messages: list[dict]):
             if name in MODIFYING:
                 return text, {"tool": name, "args": args}
             resultado = _exec_read(name, args)
-            msgs.append({"role": "assistant", "content": m.get("content"),
+            # Reinyectar el turno LIMPIO: sin el bloque <think>, que si
+            # existiera se acumularia paso a paso (hallazgo 18/8).
+            msgs.append({"role": "assistant", "content": text,
                          "tool_calls": tcs})
             msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                          "content": resultado})

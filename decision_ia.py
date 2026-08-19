@@ -27,7 +27,11 @@ import requests
 # imagenes esta en pausa, la GPU es del bot). Sin recargas just-in-time,
 # la inferencia son 2-4 s; 8 s cubre tunel y GPU ocupada. Esta llamada
 # corre en el hilo del webhook: es un maximo, no un objetivo.
-TIMEOUT = 8
+TIMEOUT = 8            # salidas: el precio se mueve, 8 s y a las reglas
+TIMEOUT_ENTRADA = 30   # filtro de entrada: corre en hilo aparte y en modo
+                       # sombra — puede esperar a un modelo lento sin
+                       # frenar nada (y "timed out" deja de disfrazarse
+                       # de tunel caido, hallazgo 18/8)
 MAX_HOLD_MIN = 120    # tope duro al hold que la IA puede pedir
 MIN_HOLD_MIN = 5
 
@@ -187,7 +191,7 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
                   # tokens cubre a los modelos que lo ignoren (18/8).
                   "max_tokens": 300,
                   "messages": [{"role": "user", "content": prompt}]},
-            timeout=TIMEOUT)
+            timeout=TIMEOUT_ENTRADA)
         if r.status_code >= 400:
             print(f"· IA entrada HTTP {r.status_code}: {r.text[:200]}")
             return None
