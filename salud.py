@@ -141,20 +141,55 @@ def _c_embudo(conn):
 
 
 def _c_presupuesto(conn):
-    """¿Queda presupuesto de IA y créditos?"""
+    """Presupuesto de la NUBE. Desde el 18/8 la local es titular: que la
+    nube este agotada ya no es un problema del sistema, solo un dato."""
     try:
+        from ia_puente import _setting
+        orden = str(_setting("ia_proveedor", "local_primero", conn)
+                    or "local_primero")
+        if orden == "local" or not os.getenv("ANTHROPIC_API_KEY"):
+            return _chk("Presupuesto IA nube", OK,
+                        "nube fuera de juego · titular: IA local")
         from ai_budget import budget_left, used_today, _cap
         quedan, usadas, cap = budget_left(conn), used_today(conn), _cap()
         if quedan <= 0:
-            return _chk("Presupuesto IA", WARN,
-                        f"agotado ({usadas}/{cap} hoy)",
-                        "el sistema sigue con el respaldo por grading")
+            # Solo es un problema si la nube es la titular.
+            nivel = WARN if orden == "nube" else OK
+            return _chk("Presupuesto IA nube", nivel,
+                        f"agotado hoy ({usadas}/{cap})",
+                        "la IA local sigue trabajando gratis")
         if quedan < cap * 0.1:
-            return _chk("Presupuesto IA", WARN,
-                        f"quedan {quedan} de {cap}")
-        return _chk("Presupuesto IA", OK, f"{usadas}/{cap} usadas hoy")
+            return _chk("Presupuesto IA nube", OK,
+                        f"quedan {quedan} de {cap} (respaldo)")
+        return _chk("Presupuesto IA nube", OK, f"{usadas}/{cap} usadas hoy")
     except Exception as e:
-        return _chk("Presupuesto IA", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Presupuesto IA nube", WARN, f"no se pudo comprobar ({e})")
+
+
+def _c_ia_local(conn):
+    """¿Responde la IA local? Ahora es la pieza critica: sin nube con
+    creditos, si esto se cae el sistema se queda sin IA."""
+    try:
+        from decision_ia import _url, _modelo
+        url = _url(conn)
+        if not url:
+            return _chk("IA local", WARN, "sin URL configurada",
+                        "usa /ialocal <url>")
+        import requests as _rq
+        r = _rq.get(f"{url}/v1/models", timeout=4)
+        if r.status_code >= 400:
+            return _chk("IA local", WARN, f"HTTP {r.status_code} en {url}")
+        modelos = [m.get("id") for m in r.json().get("data", [])]
+        modelo = _modelo(conn)
+        if modelo and modelos and modelo not in modelos:
+            return _chk("IA local", WARN,
+                        f"conectada pero sin el modelo {modelo}",
+                        "cárgalo en LM Studio (y revisa el auto-unload)")
+        return _chk("IA local", OK, f"responde · modelo {modelo}")
+    except Exception as e:
+        grave = CRIT if not os.getenv("ANTHROPIC_API_KEY") else WARN
+        return _chk("IA local", grave, f"no responde ({e})",
+                    "¿PC apagada o túnel caído? repite /ialocal <url>")
 
 
 def _c_apis():
@@ -166,10 +201,18 @@ def _c_apis():
     if faltan:
         return _chk("Claves API", CRIT, "faltan: " + ", ".join(faltan),
                     "configúralas en las variables de Railway")
-    sin_ia = not os.getenv("ANTHROPIC_API_KEY")
-    if sin_ia:
-        return _chk("Claves API", WARN, "sin ANTHROPIC_API_KEY",
-                    "el sistema funciona con grading, pero sin IA")
+    sin_nube = not os.getenv("ANTHROPIC_API_KEY")
+    try:
+        from ia_puente import hay_ia
+        ia_ok = hay_ia()
+    except Exception:
+        ia_ok = not sin_nube
+    if not ia_ok:
+        return _chk("Claves API", WARN, "sin IA disponible (ni local ni nube)",
+                    "configura /ialocal <url> o una ANTHROPIC_API_KEY")
+    if sin_nube:
+        return _chk("Claves API", OK,
+                    "todas presentes · IA: local titular, sin nube")
     return _chk("Claves API", OK, "todas presentes")
 
 
@@ -285,7 +328,7 @@ def diagnostico() -> list[dict]:
     try:
         conn = get_conn()
         checks += [_c_senales(conn), _c_medicion(conn), _c_embudo(conn),
-                   _c_presupuesto(conn), _c_helius(conn),
+                   _c_presupuesto(conn), _c_ia_local(conn), _c_helius(conn),
                    _c_base_datos(conn), _c_backup(conn)]
     except Exception as e:
         checks.append(_chk("Base de datos", CRIT, f"no accesible: {e}",

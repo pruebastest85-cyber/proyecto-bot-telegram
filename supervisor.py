@@ -3,9 +3,14 @@ Supervisor del BOT LOCAL: lo que hace Railway, pero en tu PC.
 
 - Lanza el bot (migrate_to_pg.py + telegram_bot.py) y lo vigila.
 - Cada 5 minutos consulta GitHub; si hay commit nuevo: baja el codigo
-  (origin/main manda, igual que Railway), reinstala dependencias y
-  reinicia el bot solo.
+  (origin/main MANDA: cualquier edicion local a archivos del repo se
+  pisa sin aviso — para probar cambios, subirlos a GitHub), reinstala
+  dependencias y reinicia el bot solo.
+- Si pip falla a mitad (p. ej. sin red), se reintenta antes de cada
+  arranque hasta que pase.
 - Si el bot crashea, lo reinicia en 15 segundos.
+- El apagado usa terminate(): la base local es SQLite con journal,
+  disenada para sobrevivir cortes; el bot ya es resistente a eso.
 
 Lo arranca BOT_LOCAL_ARRANCAR.bat con las variables de bot_local.env ya
 cargadas. Para pararlo todo: cierra la ventana.
@@ -19,6 +24,8 @@ import time
 DESTINO = os.path.join(os.path.expanduser("~"), "wallet-edge-local")
 CADA_S = 300          # revisar GitHub cada 5 min
 REINICIO_S = 15       # espera tras un crash
+
+pip_pendiente = False  # quedo un pip a medias por reintentar
 
 
 def _git(*args, timeout=90) -> str:
@@ -36,15 +43,27 @@ def hay_actualizacion() -> bool:
         return False
 
 
+def _pip() -> bool:
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-r",
+                        "requirements.txt", "--quiet"], cwd=DESTINO)
+    return r.returncode == 0
+
+
 def actualizar():
+    global pip_pendiente
     print("⬇️  Commit nuevo en GitHub: actualizando...")
     _git("reset", "--hard", "origin/main")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r",
-                    "requirements.txt", "--quiet"], cwd=DESTINO)
-    print(f"✅ Actualizado a {_git('rev-parse', '--short', 'HEAD')}")
+    pip_pendiente = not _pip()
+    if pip_pendiente:
+        print("⚠️  pip fallo (¿sin red?); se reintenta antes de arrancar")
+    print(f"✅ Codigo en {_git('rev-parse', '--short', 'HEAD')}")
 
 
 def lanzar() -> subprocess.Popen:
+    global pip_pendiente
+    if pip_pendiente:
+        print("🔁 Reintentando pip install pendiente...")
+        pip_pendiente = not _pip()
     subprocess.run([sys.executable, "migrate_to_pg.py"], cwd=DESTINO)
     print(f"🚀 Bot arrancando (commit {_git('rev-parse', '--short', 'HEAD')})")
     return subprocess.Popen([sys.executable, "telegram_bot.py"], cwd=DESTINO)
@@ -61,6 +80,7 @@ def parar(proc: subprocess.Popen):
 def main():
     print("=" * 60)
     print(" SUPERVISOR BOT LOCAL - auto-actualiza desde GitHub cada 5 min")
+    print(" GitHub manda: ediciones locales al codigo se pisan solas.")
     print(" Para parar todo: cierra esta ventana.")
     print("=" * 60)
     while True:

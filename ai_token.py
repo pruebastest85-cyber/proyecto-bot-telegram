@@ -65,6 +65,7 @@ def _call(prompt: str) -> dict | None:
         m = _re.search(r"\{.*\}", text, flags=_re.S)
         v = json.loads(m.group(0) if m else text)
         if v.get("nivel"):
+            v["modelo"] = f"puente:{_prov or '?'}"
             return v
     except Exception as e:
         print(f"  · Error IA token: {e}")

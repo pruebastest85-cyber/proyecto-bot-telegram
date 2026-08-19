@@ -79,18 +79,23 @@ def _nube(prompt: str, system: str | None, max_tokens: int,
     # El presupuesto diario SOLO gobierna la nube (la local es gratis), y
     # es la PROPIA nube quien se cuenta al terminar bien: un solo sitio,
     # sin depender de que cada llamador recuerde registrar (v3, 18/8).
-    _cb = None
+    # v4 (18/8): si el presupuesto NO se puede leer, NO se llama — mejor
+    # quedarse sin nube que gastar dolares sin contarlos. Y un solo
+    # try/finally: antes el "agotado" retornaba sin cerrar la conexion
+    # (una filtrada por intento, justo en el caso que mas se repite).
     try:
         from ai_budget import budget_left, record_call
+    except Exception as e:
+        print(f"· Nube sin presupuesto legible ({e}): no se gasta")
+        return None
+    _cb = None
+    try:
         if conn is None:
             from db import get_conn as _gc
             _cb = _gc()
         _bconn = conn if conn is not None else _cb
         if budget_left(_bconn) <= 0:
             return None           # presupuesto de NUBE agotado: no gastar
-    except Exception:
-        _bconn = None
-    try:
         body = {"model": NUBE_MODELO, "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}]}
         if system:
@@ -105,7 +110,7 @@ def _nube(prompt: str, system: str | None, max_tokens: int,
             return None
         texto = "".join(b.get("text", "")
                         for b in r.json().get("content", [])).strip() or None
-        if texto and _bconn is not None:
+        if texto:
             try:
                 record_call(_bconn)
             except Exception:
