@@ -507,6 +507,10 @@ def _preparar_pg(pg):
             # vendidos. Si la ⭐ vende el 15%, el paper vende SU 15%.
             ("paper_trades", "fraccion_restante", "DOUBLE PRECISION"),
             ("paper_trades", "pnl_realizado_usd", "DOUBLE PRECISION"),
+            # Copia por consenso (19/8): 'top' = copia clasica del top 30;
+            # 'consenso' = N ⭐ de cualquier liga compraron el mismo token
+            # y se imita al LIDER (la primera en entrar). Medibles aparte.
+            ("paper_trades", "origen", "TEXT"),
             # Experimento A/B de gestion de salidas: mitad "reglas", mitad
             # "ia" (la IA local del dueño). decidido_por registra quien
             # tomo la decision REAL en la salida (con fallback incluido).
@@ -577,7 +581,8 @@ def _preparar_sqlite(conn):
                      ("fraccion_restante", "REAL"),
                      ("pnl_realizado_usd", "REAL"),
                      ("gestion", "TEXT"), ("decidido_por", "TEXT"),
-                     ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT")]:
+                     ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT"),
+                     ("origen", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

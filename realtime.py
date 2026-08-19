@@ -586,19 +586,68 @@ def _proc(txs: list[dict], conn):
         # Copia TODA operacion de una ⭐ del top (asi funciona copiar
         # billeteras); el umbral de score solo gobierna las ALERTAS.
         # Apagable sin codigo: setting paper_rapido = 0.
-        if trade["wallet"] in stars and ((not top) or trade["wallet"] in top):
+        if trade["wallet"] in stars:
             try:
                 if int(float(get_setting(conn, "paper_rapido", "1") or 1)):
-                    import paper_trading as _pt
-                    from signal_tracker import _price_mc as _pm
-                    _p0, _mc0 = _pm(trade["mint"])
-                    if _p0 and _p0 > 0:
-                        _t0 = {"price": _p0, "symbol": trade["mint"][:6],
-                               "mc": _mc0}
-                        if es_compra:
-                            _pt.open_trade(conn, trade, _t0, None)
-                        else:
-                            _pt.close_on_wallet_sell(conn, trade, _t0, pos)
+                    en_top = (not top) or trade["wallet"] in top
+                    _accion = None      # (tipo, trade_a_usar)
+                    if es_compra and en_top:
+                        _accion = ("abrir", trade, "top")
+                    elif es_compra:
+                        # ── COPIA POR CONSENSO (19/8, idea del dueño) ──
+                        # N ⭐ de CUALQUIER liga comprando el mismo token
+                        # en la ventana = señal de manada. Se copia aunque
+                        # ninguna este en el top 30, imitando a la LIDER
+                        # (la primera ⭐ en entrar): el trade queda a su
+                        # nombre y su venta es la que se sigue. Etiqueta
+                        # origen='consenso' para medirla aparte. Ajuste:
+                        # consenso_copia_n (0 = apagado).
+                        _n_min = int(float(get_setting(
+                            conn, "consenso_copia_n", "3") or 3))
+                        if _n_min > 0:
+                            _since = trade["ts"] - CONSENSUS_WINDOW_MIN * 60
+                            _nc = conn.execute(
+                                "SELECT COUNT(DISTINCT s.wallet) c "
+                                "FROM signals s JOIN wallets w "
+                                "ON w.address=s.wallet AND w.is_tracked=1 "
+                                "WHERE s.mint=? AND s.ts>=? "
+                                "AND s.side='compra'",
+                                (trade["mint"], _since)).fetchone()["c"]
+                            if _nc >= _n_min:
+                                _lid = conn.execute(
+                                    "SELECT s.wallet FROM signals s "
+                                    "JOIN wallets w ON w.address=s.wallet "
+                                    "AND w.is_tracked=1 WHERE s.mint=? "
+                                    "AND s.ts>=? AND s.side='compra' "
+                                    "ORDER BY s.ts ASC LIMIT 1",
+                                    (trade["mint"], _since)).fetchone()
+                                _t_lider = dict(trade)
+                                if _lid:
+                                    _t_lider["wallet"] = _lid["wallet"]
+                                _accion = ("abrir", _t_lider, "consenso")
+                    else:
+                        # Venta: se sigue si es del top O si esta billetera
+                        # es quien ABRIO una posicion viva (p. ej. la lider
+                        # de un consenso fuera del top).
+                        _sigue = en_top or conn.execute(
+                            "SELECT 1 FROM paper_trades WHERE mint=? "
+                            "AND wallet=? AND status='abierta'",
+                            (trade["mint"], trade["wallet"])).fetchone()
+                        if _sigue:
+                            _accion = ("cerrar", trade, None)
+                    if _accion:
+                        import paper_trading as _pt
+                        from signal_tracker import _price_mc as _pm
+                        _p0, _mc0 = _pm(trade["mint"])
+                        if _p0 and _p0 > 0:
+                            _t0 = {"price": _p0, "symbol": trade["mint"][:6],
+                                   "mc": _mc0}
+                            if _accion[0] == "abrir":
+                                _pt.open_trade(conn, _accion[1], _t0, None,
+                                               origen=_accion[2])
+                            else:
+                                _pt.close_on_wallet_sell(conn, trade, _t0,
+                                                         pos)
             except Exception as e:
                 print(f"· Camino caliente falló ({e}); sigue la vía normal")
 

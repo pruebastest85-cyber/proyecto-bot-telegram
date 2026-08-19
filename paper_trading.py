@@ -127,7 +127,8 @@ def _symbol_rapido(mint: str) -> str | None:
     return None
 
 
-def open_trade(conn, trade: dict, token: dict, score) -> bool:
+def open_trade(conn, trade: dict, token: dict, score,
+               origen: str = "top") -> bool:
     """Abre una posición simulada a partir de una señal de compra alertada.
     Devuelve True si se abrió."""
     if not _enabled(conn):
@@ -225,13 +226,13 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
            (signature, wallet, mint, symbol, stake_sol, stake_usd,
             entry_price, entry_ts, signal_score, status,
             tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
-            gestion)
-           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?)""",
+            gestion, origen)
+           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?)""",
         (trade["signature"], trade["wallet"], trade["mint"], sym,
          stake, stake_usd, price, trade["ts"], score,
          str(cot["tokens_raw"]) if cot else None,
          cot.get("slippage_pct") if cot else None,
-         costo_entrada, round(demora, 2), gestion))
+         costo_entrada, round(demora, 2), gestion, origen))
     conn.commit()
     monto = (f"{_usd(stake_usd)} ({stake:.2f} SOL)" if stake_usd is not None
              else f"{stake:.2f} SOL")
@@ -256,6 +257,9 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
                       + (f" (#{_pos} del top)" if _pos else "")
                       + (f" · compró {float(trade.get('sol') or 0):.2f} SOL"
                          if trade.get("sol") else ""))
+        if origen == "consenso":
+            linea_star += ("\n🤝 *Copia por CONSENSO*: varias ⭐ entraron "
+                           "a este token; se imita a la LÍDER (la primera)")
     except Exception:
         pass
     extra_cot = ""
