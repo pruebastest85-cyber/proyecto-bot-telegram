@@ -159,15 +159,12 @@ def ai_verdict(profile: dict, evidence_lines: list[str],
         conf = float(v.get("confianza", 0))
     except (TypeError, ValueError):
         conf = 0
-    _escalate = os.getenv("AI_ESCALATE", "0") == "1"
-    if _escalate and conf < CONF_ESCALATE:
-        print(f"  · Confianza {conf:.0f}% < {CONF_ESCALATE}: "
-              f"escalando a {MODEL_SMART}")
-        v2 = _call_claude(prompt, MODEL_SMART)
-        if v2:
-            v2["modelo"] = MODEL_SMART
-            return v2
-    v["modelo"] = MODEL_FAST
+    # (18/8/2026) El escalado a MODEL_SMART murio con el puente: ambos
+    # nombres acababan en el MISMO modelo local, asi que "escalar" era
+    # pagar la misma inferencia dos veces. El puente decide el proveedor.
+    from ia_puente import ultimo_proveedor
+    v["modelo"] = f"puente:{ultimo_proveedor or '?'}"
+    _ = conf                                  # conservado para el registro
     return v
 
 

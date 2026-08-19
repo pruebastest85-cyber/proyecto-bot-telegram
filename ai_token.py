@@ -139,7 +139,8 @@ def token_verdict(t: dict, smart_ctx: dict, mint: str) -> dict | None:
     v = _call(prompt)
     if not v:
         return None
-    v.setdefault("modelo", MODEL)
+    import ia_puente as _ip
+    v.setdefault("modelo", f"puente:{_ip.ultimo_proveedor or '?'}")
 
     # Registrar el consumo de presupuesto
     try:

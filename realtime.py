@@ -251,24 +251,14 @@ MODEL_FAST = "claude-haiku-4-5-20251001"
 MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
 
 
-def _extract_json(text: str) -> dict:
-    """Parsea el JSON de la IA aunque venga envuelto en texto/markdown.
-    Evita tirar a la basura llamadas pagadas por un formato imperfecto."""
-    t = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(t)
-    except json.JSONDecodeError:
-        import re as _re
-        m = _re.search(r"\{.*\}", t, flags=_re.S)
-        if m:
-            return json.loads(m.group(0))
-        raise
-
-
-def _ai_signal_verdict(payload: dict, smart: bool = False) -> dict | None:
+def _ai_signal_verdict(payload: dict, smart: bool = False,
+                       conn=None) -> dict | None:
     """Veredicto IA de la señal via el puente (18/8/2026): la LOCAL es
     titular; `smart` queda como pista historica (la nube escalaba de
-    modelo, el puente ya no distingue)."""
+    modelo, el puente ya no distingue). `conn` prestada del hilo que
+    llama para no abrir conexiones extra; timeout 25 s: corre en el
+    hilo del webhook DESPUES de todos los filtros (pocas veces al dia),
+    pero sigue siendo un maximo, no un objetivo."""
     from ia_puente import hay_ia, completar, extraer_json
     if not hay_ia():
         return None
@@ -282,7 +272,7 @@ def _ai_signal_verdict(payload: dict, smart: bool = False) -> dict | None:
         f"{json.dumps(payload, ensure_ascii=False)}\n\n"
         'Responde SOLO JSON: {"veredicto":"entrar"|"precaucion"|"evitar"|"salir",'
         '"razon":"máx 2 frases en español"}')
-    text = completar(prompt, max_tokens=200, timeout=45)
+    text = completar(prompt, max_tokens=200, timeout=25, conn=conn)
     if not text:
         return None
     return extraer_json(text)
@@ -778,7 +768,7 @@ def _proc(txs: list[dict], conn):
         except Exception:
             _hay_ia = True
         if _hay_ia:
-            verdict = _ai_signal_verdict({
+            verdict = _ai_signal_verdict(conn=conn, payload={
                 "accion": trade["side"],
                 "token": ai_payload(t),
                 "monto_sol": round(trade["sol"], 2),

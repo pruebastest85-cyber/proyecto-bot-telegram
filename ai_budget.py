@@ -48,11 +48,30 @@ def budget_left(conn) -> int:
 
 
 def can_call(conn) -> bool:
-    """¿Queda presupuesto de IA hoy?"""
+    """¿Queda presupuesto de IA hoy?
+
+    Consciente del proveedor (18/8/2026): el presupuesto existe para no
+    quemar dolares de la NUBE. Con la IA local de titular (ia_proveedor
+    distinto de "nube"), este portero nunca frena — la local es gratis y
+    el freno de la nube lo aplica el puente solo al intento de nube."""
+    try:
+        from db import get_setting
+        if str(get_setting(conn, "ia_proveedor", "local_primero")
+               or "local_primero") != "nube":
+            return True
+    except Exception:
+        pass
     return budget_left(conn) > 0
 
 
 def record_call(conn, n: int = 1) -> None:
+    # Las llamadas atendidas por la IA LOCAL no gastan nube: no se cuentan.
+    try:
+        import ia_puente
+        if ia_puente.ultimo_proveedor == "local":
+            return
+    except Exception:
+        pass
     try:
         with _LOCK:      # sin lock, dos hilos podian perder conteos
             key = "ai_calls_" + _today()

@@ -101,7 +101,7 @@ def _snapshot() -> dict:
 
 def answer_question(pregunta: str) -> str:
     if not __import__("ia_puente").hay_ia():
-        return "Falta ANTHROPIC_API_KEY para usar el chat."
+        return ("No hay IA disponible: ni la local (revisa /ialocal y que la PC este encendida) ni la nube.")
     try:
         data = _snapshot()
     except Exception as e:
