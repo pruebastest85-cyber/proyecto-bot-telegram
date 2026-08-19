@@ -110,6 +110,23 @@ def _usd_firmado(x) -> str:
 
 # ───────────────────────── Apertura ───────────────────────────────────────
 
+def _symbol_rapido(mint: str) -> str | None:
+    """Ticker del token en una consulta corta a DexScreener (para que la
+    tarjeta del camino caliente no salga con el pedazo de contrato)."""
+    try:
+        import config
+        import requests
+        r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
+                         timeout=4)
+        pares = (r.json() or {}).get("pairs") or []
+        if pares:
+            s = ((pares[0].get("baseToken") or {}).get("symbol") or "")
+            return s.strip() or None
+    except Exception:
+        pass
+    return None
+
+
 def open_trade(conn, trade: dict, token: dict, score) -> bool:
     """Abre una posición simulada a partir de una señal de compra alertada.
     Devuelve True si se abrió."""
@@ -162,7 +179,12 @@ def open_trade(conn, trade: dict, token: dict, score) -> bool:
     if stake <= 0:
         return False
 
-    sym = token.get("symbol") or trade["mint"][:6]
+    # El camino caliente abre antes de conocer el ticker y la tarjeta
+    # salia con el pedazo de contrato ("7xKq4B"). Consulta relampago del
+    # simbolo (19/8): ~300 ms que no frenan la copia; si falla, el
+    # backfill posterior corrige la base igual que siempre.
+    sym = token.get("symbol") or _symbol_rapido(trade["mint"]) \
+        or trade["mint"][:6]
     # Importe en dólares al cambio de AHORA. Se guarda, no se recalcula
     # al cerrar: lo que quieres saber es cuánto dinero habrías puesto.
     su = _sol_a_usd()

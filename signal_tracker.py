@@ -246,6 +246,15 @@ def _check_streaks(conn):
             (w, STREAK_N)).fetchall()
         if len(ult) < STREAK_N or any(r["chg_24h"] > 0 for r in ult):
             continue
+        # RACHA ≠ RUINA (19/8): con el win rate tipico de memecoins
+        # (~25%), CUALQUIER billetera rentable encadena 4 rojas un
+        # tercio del tiempo — una ganadora grande paga muchas perdidas
+        # chicas. Si su mes va en POSITIVO, la racha no la degrada.
+        pnl30 = conn.execute(
+            "SELECT pnl_30d FROM wallets WHERE address=?",
+            (w,)).fetchone()
+        if pnl30 and (pnl30["pnl_30d"] or 0) > 0:
+            continue
         conn.execute(
             "UPDATE wallets SET is_tracked=0, ai_follow=0, ai_reason=? "
             "WHERE address=?",
