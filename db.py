@@ -511,6 +511,12 @@ def _preparar_pg(pg):
             # 'consenso' = N ⭐ de cualquier liga compraron el mismo token
             # y se imita al LIDER (la primera en entrar). Medibles aparte.
             ("paper_trades", "origen", "TEXT"),
+            # Idempotencia de ventas (19/8): firma de la ULTIMA venta ya
+            # procesada. El camino caliente y la via normal reciben el
+            # mismo evento; sin esta guardia el espejo parcial se aplicaba
+            # DOS veces (30% vendido dejaba 49% en vez de 70%, y el PnL
+            # realizado se sumaba doble).
+            ("paper_trades", "ultima_venta_sig", "TEXT"),
             # Experimento A/B de gestion de salidas: mitad "reglas", mitad
             # "ia" (la IA local del dueño). decidido_por registra quien
             # tomo la decision REAL en la salida (con fallback incluido).
@@ -582,7 +588,7 @@ def _preparar_sqlite(conn):
                      ("pnl_realizado_usd", "REAL"),
                      ("gestion", "TEXT"), ("decidido_por", "TEXT"),
                      ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT"),
-                     ("origen", "TEXT")]:
+                     ("origen", "TEXT"), ("ultima_venta_sig", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

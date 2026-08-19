@@ -405,7 +405,7 @@ def _close(conn, row, price: float, reason: str, icon: str):
           f"{_usd_firmado(pnl_usd) if pnl_usd is not None else f'{pnl:+.3f} SOL'}")
 
 
-def _venta_parcial(conn, row, price: float, pct: float):
+def _venta_parcial(conn, row, price: float, pct: float, firma=None):
     """La ⭐ vendio el pct% de SU posicion: el paper vende el mismo pct%
     de la SUYA. La fila sigue abierta con la fraccion restante; el PnL del
     trozo vendido se acumula en pnl_realizado_usd y se suma al cierre."""
@@ -444,8 +444,10 @@ def _venta_parcial(conn, row, price: float, pct: float):
 
     conn.execute(
         """UPDATE paper_trades SET fraccion_restante=?, pnl_realizado_usd=?,
-           tokens_raw=?, usd_salida_real=?, costos_usd=? WHERE id=?""",
-        (nueva, realizado, nuevos_tokens, usd_real, costos, row["id"]))
+           tokens_raw=?, usd_salida_real=?, costos_usd=?,
+           ultima_venta_sig=? WHERE id=?""",
+        (nueva, realizado, nuevos_tokens, usd_real, costos,
+         firma, row["id"]))
     conn.commit()
 
     txt_pnl = (f" · PnL del trozo {_usd_firmado(pnl_trozo)}"
@@ -474,6 +476,15 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         "SELECT * FROM paper_trades WHERE mint=? AND status='abierta'",
         (trade["mint"],)).fetchone()
     if not row:
+        return
+    # IDEMPOTENCIA POR FIRMA (19/8): el camino caliente y la via normal
+    # procesan el MISMO evento de venta. El cierre total era idempotente
+    # por accidente (la 2a llamada no encuentra fila abierta), pero el
+    # espejo parcial se aplicaba DOS veces: 30% vendido dejaba 49% en vez
+    # de 70%, con el PnL realizado sumado doble. La firma corta eso, y
+    # sobrevive a reinicios y a entregas duplicadas de Helius.
+    _firma = trade.get("signature")
+    if _firma and _campo(row, "ultima_venta_sig") == _firma:
         return
     if row["wallet"] and trade.get("wallet") \
             and row["wallet"] != trade["wallet"]:
@@ -534,7 +545,7 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         if pct_v < min_parcial:
             return                      # venta de polvo: no se copia
         if pct_v < tope_total and row["status"] == "abierta":
-            _venta_parcial(conn, row, price, pct_v)
+            _venta_parcial(conn, row, price, pct_v, firma=_firma)
             return
 
     # ── Salida inteligente (solo reglas, sin IA) ──────────────────────
