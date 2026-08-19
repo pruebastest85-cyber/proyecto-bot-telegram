@@ -13,8 +13,6 @@ import json
 import os
 import re
 
-import requests
-
 from db import get_conn, wallet_positions_summary
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -102,7 +100,7 @@ def _snapshot() -> dict:
 
 
 def answer_question(pregunta: str) -> str:
-    if not ANTHROPIC_API_KEY:
+    if not __import__("ia_puente").hay_ia():
         return "Falta ANTHROPIC_API_KEY para usar el chat."
     try:
         data = _snapshot()
@@ -148,16 +146,10 @@ def answer_question(pregunta: str) -> str:
         f"SNAPSHOT: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
         f"PREGUNTA: {pregunta}")
     try:
-        r = requests.post(
-            API_URL,
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 500,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60)
-        r.raise_for_status()
-        text = "".join(b.get("text", "") for b in r.json().get("content", []))
-        return text.strip() or "La IA no devolvió respuesta."
+        # Puente de IA (18/8/2026): la LOCAL es titular; la nube, opcional.
+        from ia_puente import completar
+        text = completar(prompt, max_tokens=500, timeout=90)
+        return (text or "").strip() or \
+            "La IA no está disponible (¿PC apagada? revisa /ialocal)."
     except Exception as e:
         return f"Error consultando a la IA: {e}"

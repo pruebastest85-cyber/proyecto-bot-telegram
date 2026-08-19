@@ -1603,6 +1603,21 @@ async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "🤖 IA local APAGADA: todo vuelve a reglas.")
                 return
+            if a.lower() == "proveedor":
+                if len(args) > 1 and args[1].lower() in (
+                        "local", "nube", "local_primero"):
+                    set_setting(conn, "ia_proveedor", args[1].lower())
+                    await update.message.reply_text(
+                        f"🧠 Proveedor de IA: *{args[1].lower()}*",
+                        parse_mode="Markdown")
+                else:
+                    actual = get_setting(conn, "ia_proveedor",
+                                         "local_primero")
+                    await update.message.reply_text(
+                        f"🧠 Proveedor actual: {actual}\n"
+                        "Cambiar: /ialocal proveedor local · "
+                        "local_primero · nube")
+                return
             if a.lower() == "on":
                 url = get_setting(conn, "local_ai_url", "") or ""
                 if not url:

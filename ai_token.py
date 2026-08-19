@@ -15,8 +15,6 @@ import json
 import os
 import time
 
-import requests
-
 from token_check import ai_payload
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -57,16 +55,11 @@ Responde SOLO con JSON válido, sin markdown ni texto extra:
 
 def _call(prompt: str) -> dict | None:
     try:
-        r = requests.post(
-            API_URL,
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 250,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60)
-        r.raise_for_status()
-        text = "".join(b.get("text", "") for b in r.json().get("content", []))
+        # Puente de IA (18/8/2026): la LOCAL es titular; la nube, opcional.
+        from ia_puente import completar
+        text = completar(prompt, max_tokens=250, timeout=60)
+        if not text:
+            return None
         text = text.replace("```json", "").replace("```", "").strip()
         import re as _re
         m = _re.search(r"\{.*\}", text, flags=_re.S)
@@ -114,7 +107,7 @@ def token_verdict(t: dict, smart_ctx: dict, mint: str) -> dict | None:
     Veredicto IA del token. None si no hay API key, no queda presupuesto,
     o la llamada falla → el llamador cae al Risk Score heurístico.
     """
-    if not ANTHROPIC_API_KEY:
+    if not __import__("ia_puente").hay_ia():
         return None
 
     cached = _cache_get(mint)

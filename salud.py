@@ -335,7 +335,7 @@ def interpretar(checks) -> str | None:
     problemas = [c for c in checks if c["estado"] != OK]
     if not problemas:
         return None
-    if not os.getenv("ANTHROPIC_API_KEY"):
+    if not __import__("ia_puente").hay_ia():
         return None
     try:
         conn = get_conn()
@@ -366,17 +366,11 @@ def interpretar(checks) -> str | None:
         f"DIAGNÓSTICO: {json.dumps(problemas, ensure_ascii=False)}\n\n"
         f"ERRORES 24h: {json.dumps(_res(24)[:10], ensure_ascii=False, default=str)}")
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": os.getenv("ANTHROPIC_API_KEY"),
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60)
-        r.raise_for_status()
-        txt = "".join(b.get("text", "") for b in
-                      r.json().get("content", [])).strip()
+        # Puente de IA (18/8/2026): la LOCAL es titular; la nube, opcional.
+        from ia_puente import completar
+        txt = (completar(prompt, max_tokens=500, timeout=90) or "").strip()
+        if not txt:
+            raise RuntimeError("IA no disponible (ni local ni nube)")
     except Exception as e:
         try:
             from errores import record

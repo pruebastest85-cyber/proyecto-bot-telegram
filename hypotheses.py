@@ -13,8 +13,6 @@ al momento. Requiere ANTHROPIC_API_KEY.
 import json
 import os
 
-import requests
-
 from db import get_conn, get_setting, set_setting
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -82,7 +80,7 @@ Formato de cada línea:
 
 
 def generate_hypotheses() -> str | None:
-    if not ANTHROPIC_API_KEY:
+    if not __import__("ia_puente").hay_ia():
         return None
     state = _gather_state()
     # Si no hay materia prima, no gastar IA
@@ -103,17 +101,11 @@ def generate_hypotheses() -> str | None:
     prompt = PROMPT.format(estado=json.dumps(state, ensure_ascii=False,
                                              indent=1)[:4000])
     try:
-        r = requests.post(
-            API_URL,
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 700,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=90)
-        r.raise_for_status()
-        text = "".join(b.get("text", "") for b in r.json().get("content", []))
-        text = text.strip()
+        # Puente de IA (18/8/2026): la LOCAL es titular; la nube, opcional.
+        from ia_puente import completar
+        text = (completar(prompt, max_tokens=700, timeout=120) or "").strip()
+        if not text:
+            raise RuntimeError("IA no disponible (ni local ni nube)")
         try:
             from ai_budget import record_call
             _c = get_conn()
@@ -138,7 +130,7 @@ def generate_hypotheses() -> str | None:
 
 
 def hypotheses_text() -> str:
-    if not ANTHROPIC_API_KEY:
+    if not __import__("ia_puente").hay_ia():
         return ("🧪 El motor de hipótesis necesita ANTHROPIC_API_KEY "
                 "configurada.")
     fresh = generate_hypotheses()

@@ -108,7 +108,7 @@ def analyze_submitted() -> str | None:
     separa y SUGIERE ajustes de filtros. Guarda el resultado en 'token_learnings'
     y lo manda por Telegram. No cambia ninguna configuración.
     """
-    if not ANTHROPIC_API_KEY:
+    if not __import__("ia_puente").hay_ia():
         return None
     conn = get_conn()
     try:
@@ -146,17 +146,12 @@ def analyze_submitted() -> str | None:
         f"DATOS ({buenas} buenos, {malas} malos): "
         f"{json.dumps(rows, ensure_ascii=False, default=str)}")
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 600,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=90)
-        r.raise_for_status()
-        hallazgos = "".join(b.get("text", "") for b in
-                            r.json().get("content", [])).strip()
+        # Puente de IA (18/8/2026): la LOCAL es titular; la nube, opcional.
+        from ia_puente import completar
+        hallazgos = (completar(prompt, max_tokens=600, timeout=120)
+                     or "").strip()
+        if not hallazgos:
+            raise RuntimeError("IA no disponible (ni local ni nube)")
     except Exception as e:
         print(f"· Aprendizaje de tokens IA falló: {e}")
         return None

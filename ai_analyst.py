@@ -17,7 +17,6 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
-import requests
 
 from db import now_iso
 from wallet_profiler import profile_wallet
@@ -123,37 +122,17 @@ def _resumir_perfil(p: dict) -> str:
 
 
 def _call_claude(prompt: str, model: str) -> dict | None:
-    try:
-        r = requests.post(
-            API_URL,
-            headers={"x-api-key": ANTHROPIC_API_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": model, "max_tokens": 300,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60)
-        if r.status_code >= 400:
-            # El motivo exacto del rechazo viene en el CUERPO de la
-            # respuesta; raise_for_status solo dice "400 Client Error" y
-            # ya nos costo dias diagnosticar sonnet-5 por no verlo.
-            print(f"  · IA {model} HTTP {r.status_code}: {r.text[:300]}")
-        r.raise_for_status()
-        text = "".join(b.get("text", "") for b in r.json().get("content", []))
-        text = text.replace("```json", "").replace("```", "").strip()
-        try:
-            v = json.loads(text)
-        except json.JSONDecodeError:
-            # No tirar una llamada pagada por formato imperfecto: extraer
-            # el primer bloque {...} del texto.
-            import re as _re
-            m = _re.search(r"\{.*\}", text, flags=_re.S)
-            if not m:
-                raise
-            v = json.loads(m.group(0))
-        if v.get("clasificacion") and isinstance(v.get("seguir"), bool):
-            return v
-    except Exception as e:
-        print(f"  · Error IA ({model}): {e}")
+    """Veredicto de billetera via el puente de IA (18/8/2026): la LOCAL
+    es titular y la nube opcional (setting ia_proveedor). El parametro
+    `model` queda como pista historica de la epoca en que la nube
+    escalaba de haiku a sonnet; el puente decide el proveedor real."""
+    from ia_puente import completar, extraer_json
+    text = completar(prompt, max_tokens=300, timeout=90)
+    v = extraer_json(text or "")
+    if v and v.get("clasificacion") and isinstance(v.get("seguir"), bool):
+        return v
+    if text:
+        print(f"  · IA: respuesta sin el JSON esperado: {text[:120]}")
     return None
 
 
@@ -164,7 +143,7 @@ def ai_verdict(profile: dict, evidence_lines: list[str],
     Veredicto en dos niveles: Haiku primero; si su confianza es baja,
     se consulta al modelo potente y prevalece su respuesta.
     """
-    if not ANTHROPIC_API_KEY:
+    if not __import__("ia_puente").hay_ia():
         return None
     prompt = PROMPT.format(
         perfil=_resumir_perfil(profile),
