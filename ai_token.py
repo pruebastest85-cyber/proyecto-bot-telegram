@@ -56,8 +56,8 @@ Responde SOLO con JSON válido, sin markdown ni texto extra:
 def _call(prompt: str) -> dict | None:
     try:
         # Puente de IA (18/8/2026): la LOCAL es titular; la nube, opcional.
-        from ia_puente import completar
-        text = completar(prompt, max_tokens=250, timeout=60)
+        from ia_puente import completar_ex
+        text, _prov = completar_ex(prompt, max_tokens=250, timeout=60)
         if not text:
             return None
         text = text.replace("```json", "").replace("```", "").strip()
@@ -139,20 +139,8 @@ def token_verdict(t: dict, smart_ctx: dict, mint: str) -> dict | None:
     v = _call(prompt)
     if not v:
         return None
-    import ia_puente as _ip
-    v.setdefault("modelo", f"puente:{_ip.ultimo_proveedor or '?'}")
+    v.setdefault("modelo", "puente")
 
-    # Registrar el consumo de presupuesto
-    try:
-        from db import get_conn
-        from ai_budget import record_call
-        conn = get_conn()
-        try:
-            record_call(conn)
-        finally:
-            conn.close()
-    except Exception:
-        pass
 
     _cache_put(mint, v)
     return v

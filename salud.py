@@ -353,7 +353,6 @@ def interpretar(checks) -> str | None:
         return None
 
     import json
-    import requests
     from errores import resumen as _res
     prompt = (
         "Eres el ingeniero de guardia de un bot de trading on-chain en "
@@ -380,17 +379,6 @@ def interpretar(checks) -> str | None:
         return None
     if not txt:
         return None
-    try:
-        conn = get_conn()
-        try:
-            from ai_budget import record_call
-            record_call(conn)
-            from db import set_setting
-            set_setting(conn, "salud_ia_dia", time.strftime("%Y-%m-%d"))
-        finally:
-            conn.close()
-    except Exception:
-        pass
     return txt[:1500]
 
 

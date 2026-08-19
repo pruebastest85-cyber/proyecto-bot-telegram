@@ -24,9 +24,6 @@ NUBE_URL = "https://api.anthropic.com/v1/messages"
 NUBE_MODELO = "claude-haiku-4-5-20251001"
 
 
-ultimo_proveedor = None      # "local" | "nube" tras cada completar()
-
-
 def _setting(key: str, default, conn=None):
     try:
         from db import get_setting
@@ -79,21 +76,20 @@ def _nube(prompt: str, system: str | None, max_tokens: int,
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if not key:
         return None
-    # El presupuesto diario SOLO gobierna la nube: la local es gratis y
-    # frenar a la local con el contador de la nube era un contrasentido
-    # (hallazgo de revision del 18/8).
+    # El presupuesto diario SOLO gobierna la nube (la local es gratis), y
+    # es la PROPIA nube quien se cuenta al terminar bien: un solo sitio,
+    # sin depender de que cada llamador recuerde registrar (v3, 18/8).
+    _cb = None
     try:
-        from ai_budget import budget_left
-        from db import get_conn as _gc
-        _cb = conn if conn is not None else _gc()
-        try:
-            if budget_left(_cb) <= 0:
-                return None       # presupuesto de NUBE agotado: no gastar
-        finally:
-            if conn is None:
-                _cb.close()
+        from ai_budget import budget_left, record_call
+        if conn is None:
+            from db import get_conn as _gc
+            _cb = _gc()
+        _bconn = conn if conn is not None else _cb
+        if budget_left(_bconn) <= 0:
+            return None           # presupuesto de NUBE agotado: no gastar
     except Exception:
-        pass
+        _bconn = None
     try:
         body = {"model": NUBE_MODELO, "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}]}
@@ -107,22 +103,31 @@ def _nube(prompt: str, system: str | None, max_tokens: int,
         if r.status_code >= 400:
             print(f"· IA nube HTTP {r.status_code}: {r.text[:200]}")
             return None
-        return "".join(b.get("text", "")
-                       for b in r.json().get("content", [])).strip() or None
+        texto = "".join(b.get("text", "")
+                        for b in r.json().get("content", [])).strip() or None
+        if texto and _bconn is not None:
+            try:
+                record_call(_bconn)
+            except Exception:
+                pass
+        return texto
     except Exception as e:
         print(f"· IA nube no disponible: {e}")
         return None
+    finally:
+        if _cb is not None:
+            _cb.close()
 
 
-def completar(prompt: str, system: str | None = None,
-              max_tokens: int = 500, timeout: int = 60,
-              conn=None) -> str | None:
+def completar_ex(prompt: str, system: str | None = None,
+                 max_tokens: int = 500, timeout: int = 60,
+                 conn=None) -> tuple[str | None, str | None]:
     """Texto de IA segun el proveedor configurado. None si nadie pudo.
 
-    `conn` opcional: quien ya tiene conexion (p. ej. el hilo del webhook)
-    la presta y este modulo no abre ninguna — sin ella, se abre UNA sola
-    para toda la llamada (antes eran dos por llamada)."""
-    global ultimo_proveedor
+    Devuelve (texto, proveedor) — el proveedor viaja en el RETORNO, no
+    en una global: las globales entre hilos mezclaban al webhook con los
+    jobs periodicos (hallazgo v3). `conn` opcional: quien ya tiene
+    conexion la presta y aqui no se abre ninguna."""
     propia = None
     if conn is None:
         try:
@@ -142,13 +147,19 @@ def completar(prompt: str, system: str | None = None,
         for nombre, intento in cadena:
             texto = intento(prompt, system, max_tokens, timeout, conn)
             if texto:
-                ultimo_proveedor = nombre
-                return texto
-        ultimo_proveedor = None
-        return None
+                return texto, nombre
+        return None, None
     finally:
         if propia is not None:
             propia.close()
+
+
+def completar(prompt: str, system: str | None = None,
+              max_tokens: int = 500, timeout: int = 60,
+              conn=None) -> str | None:
+    """Version simple: solo el texto (la mayoria no necesita saber quien
+    respondio)."""
+    return completar_ex(prompt, system, max_tokens, timeout, conn)[0]
 
 
 def extraer_json(texto: str) -> dict | None:

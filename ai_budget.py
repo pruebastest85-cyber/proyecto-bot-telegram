@@ -65,13 +65,8 @@ def can_call(conn) -> bool:
 
 
 def record_call(conn, n: int = 1) -> None:
-    # Las llamadas atendidas por la IA LOCAL no gastan nube: no se cuentan.
-    try:
-        import ia_puente
-        if ia_puente.ultimo_proveedor == "local":
-            return
-    except Exception:
-        pass
+    # (v3) Solo la registra quien de verdad gasto: ia_puente._nube al
+    # terminar bien. Los llamadores ya no la invocan.
     try:
         with _LOCK:      # sin lock, dos hilos podian perder conteos
             key = "ai_calls_" + _today()

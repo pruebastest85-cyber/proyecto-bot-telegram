@@ -24,8 +24,6 @@ from wallet_profiler import profile_wallet
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
 MODEL_FAST = "claude-haiku-4-5-20251001"
-MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
-CONF_ESCALATE = 65        # confianza mínima de Haiku para no escalar
 REEVAL_DAYS = 3           # caducidad del veredicto
 
 PROMPT = """Eres un analista experto en trading on-chain de Solana. Analiza esta billetera candidata y clasifícala.
@@ -126,10 +124,11 @@ def _call_claude(prompt: str, model: str) -> dict | None:
     es titular y la nube opcional (setting ia_proveedor). El parametro
     `model` queda como pista historica de la epoca en que la nube
     escalaba de haiku a sonnet; el puente decide el proveedor real."""
-    from ia_puente import completar, extraer_json
-    text = completar(prompt, max_tokens=300, timeout=90)
+    from ia_puente import completar_ex, extraer_json
+    text, proveedor = completar_ex(prompt, max_tokens=300, timeout=90)
     v = extraer_json(text or "")
     if v and v.get("clasificacion") and isinstance(v.get("seguir"), bool):
+        v["modelo"] = f"puente:{proveedor}"
         return v
     if text:
         print(f"  · IA: respuesta sin el JSON esperado: {text[:120]}")
@@ -155,16 +154,8 @@ def ai_verdict(profile: dict, evidence_lines: list[str],
     v = _call_claude(prompt, MODEL_FAST)
     if v is None:
         return None
-    try:
-        conf = float(v.get("confianza", 0))
-    except (TypeError, ValueError):
-        conf = 0
-    # (18/8/2026) El escalado a MODEL_SMART murio con el puente: ambos
-    # nombres acababan en el MISMO modelo local, asi que "escalar" era
-    # pagar la misma inferencia dos veces. El puente decide el proveedor.
-    from ia_puente import ultimo_proveedor
-    v["modelo"] = f"puente:{ultimo_proveedor or '?'}"
-    _ = conf                                  # conservado para el registro
+    # (v3) El escalado a MODEL_SMART murio con el puente; el proveedor
+    # real ya viene puesto en v["modelo"] desde _call_claude.
     return v
 
 

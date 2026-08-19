@@ -779,11 +779,6 @@ def _proc(txs: list[dict], conn):
                 "score_senal": score_sig,
                 "aprendizajes_del_sistema": (aprendizajes or "")[:600] or None,
             }, smart=importante) or {}
-            try:
-                from ai_budget import record_call as _rc
-                _rc(conn)
-            except Exception:
-                pass
         else:
             verdict = {}
         conn.execute("UPDATE signals SET verdict=? WHERE signature=?",
