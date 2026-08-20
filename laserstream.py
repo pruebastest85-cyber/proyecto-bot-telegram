@@ -30,7 +30,25 @@ import config
 WS_URL = "wss://mainnet.helius-rpc.com/?api-key={key}"
 _HILO = None
 _ULTIMO_SLOT = [0]
+_SLOT_PERSISTIDO = [0.0]   # cuando se escribio a settings por ultima vez
 _ESTADO = {"conectado": False, "desde": None, "recibidas": 0, "error": None}
+
+# v2 (auditoria 19/8) — tres agujeros de la unica via de ingesta del bot
+# local, todos silenciosos:
+#   1. La lista de billeteras se leia UNA vez por conexion y el ping
+#      mantenia el socket vivo dias: una ⭐ promovida no generaba señales
+#      hasta que el socket casualmente se cayera. Ahora se re-verifica la
+#      huella de la lista cada CHEQUEO_LISTA_S y se re-suscribe si cambio.
+#   2. El "watchdog" comparaba contra el ultimo PING (que siempre es
+#      reciente): codigo inalcanzable. Ahora vigila el ultimo MENSAJE
+#      recibido: SILENCIO_MAX_S sin transacciones con 150+ billeteras
+#      vigiladas es anomalo → re-suscribir (un WS reconecta gratis).
+#   3. Las respuestas de ERROR del servidor se descartaban como "otro
+#      aviso": una suscripcion rechazada dejaba el hilo "🟢 conectado"
+#      recibiendo nada para siempre. Ahora se imprimen y registran.
+CHEQUEO_LISTA_S = 60       # cada cuanto mirar si cambio la lista vigilada
+SILENCIO_MAX_S = 600       # 10 min sin mensajes → re-suscribir
+PERSISTIR_SLOT_S = 15      # el slot se escribe a settings como mucho asi
 
 
 def activo() -> bool:
@@ -42,10 +60,21 @@ def estado() -> dict:
 
 
 def _guardar_slot(slot: int) -> None:
-    """Recuerda hasta dónde procesamos, para reanudar tras un corte."""
+    """Recuerda hasta dónde procesamos, para reanudar tras un corte.
+
+    Con debounce (v2): antes se abria una conexion y se COMMITEABA por
+    CADA mensaje de 150+ billeteras — presion de escritura constante
+    sobre SQLite, alimentando los "database is locked". En memoria se
+    actualiza siempre; a settings va como mucho cada PERSISTIR_SLOT_S.
+    Si el proceso muere se pierden ≤15 s de avance: el fromSlot re-pide
+    ese trozo y el INSERT OR IGNORE por firma deduplica solo."""
     if not slot or slot <= _ULTIMO_SLOT[0]:
         return
     _ULTIMO_SLOT[0] = slot
+    ahora = time.time()
+    if ahora - _SLOT_PERSISTIDO[0] < PERSISTIR_SLOT_S:
+        return
+    _SLOT_PERSISTIDO[0] = ahora
     try:
         from db import get_conn, set_setting
         conn = get_conn()
@@ -55,6 +84,11 @@ def _guardar_slot(slot: int) -> None:
             conn.close()
     except Exception:
         pass
+
+
+def _huella(direcciones: list[str]) -> str:
+    import hashlib
+    return hashlib.sha1(",".join(sorted(direcciones)).encode()).hexdigest()
 
 
 def _cargar_slot() -> int:
@@ -99,7 +133,22 @@ def _procesar(mensaje: str) -> None:
     params = d.get("params") or {}
     resultado = params.get("result") or {}
     if not resultado:
-        return                      # confirmación de suscripción u otro aviso
+        # NO es una transaccion. Antes se descartaba TODO en silencio,
+        # incluidas las respuestas de error: una suscripcion rechazada
+        # dejaba el hilo "conectado" sin recibir nada para siempre.
+        if "error" in d:
+            err = str(d.get("error") or "")[:200]
+            print(f"· LaserStream: ERROR del servidor: {err}")
+            _ESTADO["error"] = err[:120]
+            try:
+                from errores import record
+                record("laserstream", RuntimeError(err))
+            except Exception:
+                pass
+        elif "result" in d:
+            print(f"· LaserStream: suscripción confirmada "
+                  f"(id {d.get('result')})")
+        return
 
     slot = resultado.get("slot")
     tx = resultado.get("transaction") or resultado
@@ -154,11 +203,14 @@ def _bucle() -> None:
         try:
             ws = websocket.create_connection(url, timeout=30)
             ws.send(_suscripcion(direcciones, _cargar_slot() or None))
+            huella = _huella(direcciones)
             _ESTADO.update({"conectado": True, "desde": time.time(),
                             "error": None})
             print(f"📡 LaserStream conectado · {len(direcciones)} billeteras")
             espera = 5
             ultimo_ping = time.time()
+            ultimo_mensaje = time.time()      # ultimo MENSAJE, no ping
+            ultimo_chequeo_lista = time.time()
             while True:
                 try:
                     ws.settimeout(60)
@@ -166,15 +218,42 @@ def _bucle() -> None:
                 except Exception:
                     mensaje = None
                 if mensaje:
+                    ultimo_mensaje = time.time()
                     _procesar(mensaje)
-                if time.time() - ultimo_ping > 30:
+                ahora = time.time()
+                if ahora - ultimo_ping > 30:
                     try:
                         ws.ping()          # el socket cierra a los 10 min sin uso
-                        ultimo_ping = time.time()
+                        ultimo_ping = ahora
                     except Exception:
+                        print("· LaserStream: ping falló; reconectando")
                         break
-                if mensaje is None and time.time() - ultimo_ping > 120:
+                # Watchdog REAL (v2): silencio de datos, no de pings. El
+                # ping siempre esta fresco (lo mandamos nosotros); lo que
+                # delata una suscripcion muerta es no recibir NADA.
+                if ahora - ultimo_mensaje > SILENCIO_MAX_S:
+                    print(f"· LaserStream: {SILENCIO_MAX_S // 60} min sin "
+                          f"mensajes con {len(direcciones)} billeteras "
+                          "vigiladas; re-suscribo por si la suscripción "
+                          "murió en silencio")
+                    espera = 1
                     break
+                # Gestor de suscripcion (v2): si la lista vigilada cambio
+                # (ciclo que promueve/degrada), re-suscribir YA — antes la
+                # ⭐ nueva no generaba señales hasta la proxima caida
+                # casual del socket.
+                if ahora - ultimo_chequeo_lista >= CHEQUEO_LISTA_S:
+                    ultimo_chequeo_lista = ahora
+                    try:
+                        nuevas = watch_addresses() or []
+                    except Exception:
+                        nuevas = []
+                    if nuevas and _huella(nuevas) != huella:
+                        print("· LaserStream: la lista vigilada cambió "
+                              f"({len(direcciones)} → {len(nuevas)}); "
+                              "re-suscribo")
+                        espera = 1
+                        break
         except Exception as e:
             _ESTADO.update({"conectado": False, "error": str(e)[:120]})
             print(f"· LaserStream desconectado: {e}; reintento en {espera}s")
