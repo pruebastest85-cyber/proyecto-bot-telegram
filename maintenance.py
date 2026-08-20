@@ -128,10 +128,23 @@ def purgar_historial_bots() -> int:
     """
     try:
         from trades_store import purgar_bots
-        return purgar_bots()
+        n = purgar_bots()
     except Exception as e:
         print(f"· purgar_historial_bots falló: {e}")
-        return 0
+        n = 0
+    # Misma pasada diaria: poda de posiciones cerradas y frias (v2,
+    # auditoria 19/8 — positions crecia sin tope y el JOIN de actividad
+    # del conjunto operativo la recorre en cada refresco).
+    try:
+        from db import get_conn as _gc, purgar_posiciones_muertas
+        _c = _gc()
+        try:
+            purgar_posiciones_muertas(_c)
+        finally:
+            _c.close()
+    except Exception as e:
+        print(f"· Poda de positions omitida: {e}")
+    return n
 
 
 

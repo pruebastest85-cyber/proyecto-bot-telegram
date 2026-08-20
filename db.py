@@ -410,9 +410,14 @@ def _dedupe_aliases(conn):
     que la IA les invente uno nuevo y único; el resto recibe sufijo.
     Idempotente; ignora bots descartados."""
     try:
+        # v2 (auditoria 19/8): la deteccion incluye TODAS las billeteras.
+        # Antes solo se buscaban duplicados entre no-bots: un alias
+        # compartido entre un bot y una billetera real no se detectaba
+        # nunca, y si el poseedor mas antiguo era un bot descartado, el
+        # bot se quedaba el nombre limpio.
         dups = conn.execute(
             """SELECT alias FROM wallets
-               WHERE alias IS NOT NULL AND COALESCE(is_bot, 0) = 0
+               WHERE alias IS NOT NULL
                GROUP BY alias HAVING COUNT(*) > 1""").fetchall()
         if not dups:
             return
@@ -429,7 +434,8 @@ def _dedupe_aliases(conn):
         for d in dups:
             rows = conn.execute(
                 """SELECT address FROM wallets WHERE alias = ?
-                   ORDER BY COALESCE(first_seen, ''), address""",
+                   ORDER BY COALESCE(is_bot, 0), COALESCE(first_seen, ''),
+                            address""",
                 (d["alias"],)).fetchall()
             # El PRIMERO conserva el nombre, asi que sigue ocupado: no hay
             # que sacarlo de `ocupados`. Si se saca, make_alias_unico lo ve
@@ -964,14 +970,61 @@ def top_wallets(conn, limit=20):
 
 TOP_ALERTAS_DEFAULT = 15
 
+# ── Conjunto OPERATIVO (quién alerta y se copia) ─────────────────────────
+# v2 (auditoria 19/8). Dos preguntas que antes compartia una consulta:
+#   · /top (top_wallets): RANKING PARA MOSTRAR — puede listar dormidas.
+#   · top_addresses: CONJUNTO OPERATIVO — quien alerta y dispara la copia.
+# En la vieja consulta la actividad y las perdidas eran criterios de
+# ORDEN, no filtros: con 122 ⭐ y solo 28 activas en 48 h, las muertas
+# ganadoras llenaban cupos del top de alertas por delante de una ACTIVA
+# con una perdida chica (que asi no podia alertar nunca), y su primera
+# operacion al despertar se copiaba con metricas viejas. Ahora la
+# actividad es un WHERE: si las activas no llenan el cupo, el cupo queda
+# corto — copiar fantasmas no es mejor que copiar menos.
+# Ademas se cachea 60 s: antes top_wallets (con su GROUP BY de positions)
+# corria entero por CADA mensaje de LaserStream.
+_COP_TTL = 60.0
+_COP_LOCK = threading.Lock()
+_COP_CACHE: dict = {"ts": 0.0, "limit": None, "set": None}
+
+
+def _operativas(conn, limit: int) -> set:
+    import time as _t
+    import os as _os
+    _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
+    corte = int(_t.time()) - int(_horas * 3600)
+    rows = conn.execute(
+        """SELECT w.address
+           FROM wallets w
+           LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
+                      GROUP BY wallet) actividad
+                ON actividad.wallet = w.address
+           WHERE w.is_tracked = 1 AND COALESCE(w.is_bot, 0) = 0
+             AND COALESCE(actividad.ult, 0) >= ?
+           ORDER BY CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
+                    w.wallet_score DESC,
+                    COALESCE(w.pnl_total, -1e9) DESC
+           LIMIT ?""",
+        (corte, limit)).fetchall()
+    return {r["address"] for r in rows}
+
+
+def invalidar_copiables() -> None:
+    """Fuerza recalcular el conjunto operativo (tras promover/degradar)."""
+    with _COP_LOCK:
+        _COP_CACHE["ts"] = 0.0
+
 
 def top_addresses(conn, limit: int | None = None) -> set:
-    """Direcciones de las mejores `limit` billeteras, con EXACTAMENTE el
-    mismo orden que /top y que wallet_ident.posicion.
+    """Conjunto OPERATIVO: las billeteras que alertan y disparan la copia.
 
-    Existe para que las alertas y las tarjetas salgan solo del top: antes
-    alertaba cualquier billetera con la ⭐, sin importar en qué puesto
-    estuviera. Si algo falla devuelve un conjunto vacío, y quien llama
+    Solo ⭐ ACTIVAS (operaron dentro de TOP_ACTIVITY_HOURS, 48 h por
+    defecto), ordenadas por calidad; las perdedoras solo llenan cupo
+    sobrante. Cache de 60 s compartida por todos los consumidores
+    (alertas, camino caliente, consenso): un solo conjunto, una sola
+    definicion. Si algo falla devuelve un conjunto vacio, y quien llama
     debe interpretarlo como "no filtres" en vez de "no alertes nada".
     """
     if limit is None:
@@ -983,11 +1036,42 @@ def top_addresses(conn, limit: int | None = None) -> set:
             limit = TOP_ALERTAS_DEFAULT
     if limit <= 0:
         return set()
+    import time as _t
+    with _COP_LOCK:
+        if (_COP_CACHE["set"] is not None
+                and _COP_CACHE["limit"] == limit
+                and _t.time() - _COP_CACHE["ts"] < _COP_TTL):
+            return set(_COP_CACHE["set"])
     try:
-        return {r["address"] for r in top_wallets(conn, limit)}
+        s = _operativas(conn, limit)
+        with _COP_LOCK:
+            _COP_CACHE.update({"ts": _t.time(), "limit": limit, "set": s})
+        return set(s)
     except Exception as e:
         print(f"· top_addresses falló ({e}); no se filtra por top")
         return set()
+
+
+def purgar_posiciones_muertas(conn, dias: int = 30) -> int:
+    """Poda de `positions` (auditoria 19/8): una fila por (wallet, mint)
+    para siempre, incluidas las vendidas del todo hace semanas — y el
+    JOIN de actividad del top la recorre entera. Se borran las posiciones
+    CERRADAS (tokens<=0) sin movimiento en `dias`; el historial real vive
+    en `trades`, y si la billetera recompra, apply_buy recrea la fila."""
+    import time as _t
+    corte = int(_t.time()) - dias * 86400
+    try:
+        cur = conn.execute(
+            "DELETE FROM positions WHERE COALESCE(tokens, 0) <= 0 "
+            "AND COALESCE(last_ts, 0) < ?", (corte,))
+        conn.commit()
+        n = cur.rowcount or 0
+        if n:
+            print(f"🧹 positions: {n} posiciones cerradas y frías podadas")
+        return n
+    except Exception as e:
+        print(f"· Poda de positions falló: {e}")
+        return 0
 
 
 def wallet_evidence(conn, wallet: str):
