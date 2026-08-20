@@ -46,9 +46,14 @@ def attention_score(address: str, inf=None, ap=None) -> int:
 
 
 def priority_score(address: str, wallet_score=None, inf=None, ap=None) -> int:
-    """0-100. Rentabilidad + atención → decide el presupuesto de ⭐."""
+    """0-100. Rentabilidad + atención → decide el presupuesto de ⭐.
+
+    wallet_score NULL cuenta como 0 (v2, auditoria 19/8): antes valía 50
+    y una billetera SIN medir protegía su cupo por delante de una medida
+    mala — lo no medido no puede puntuar mejor que lo medido."""
     att = attention_score(address, inf, ap)
-    f_prof = min(1.0, (wallet_score or 50) / 100.0)
+    f_prof = min(1.0, (wallet_score if wallet_score is not None else 0)
+                 / 100.0)
     f_att = att / 100.0
     return round(100 * (0.50 * f_prof + 0.50 * f_att))
 
@@ -80,11 +85,22 @@ def enforce_budget(conn, max_elite: int) -> int:
         reverse=True)
     to_demote = ranked[max_elite:]
     for r in to_demote:
+        # ai_follow=0 TAMBIEN (v2, auditoria 19/8): degradar solo con
+        # is_tracked=0 dejaba ai_follow=1 y la siguiente re-evaluacion
+        # re-estrellaba a la billetera — flip-flop eterno y el tope de
+        # presupuesto nunca aplicaba. Y el motivo va con SUBSTR(…,500)
+        # como el resto de escritores, para no crecer sin tope.
         conn.execute(
-            "UPDATE wallets SET is_tracked=0, "
-            "ai_reason=COALESCE(ai_reason,'') || ' · descendida por "
-            "presupuesto de atención' WHERE address=?", (r["address"],))
+            "UPDATE wallets SET is_tracked=0, ai_follow=0, "
+            "ai_reason=SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500) "
+            "WHERE address=?",
+            (" · descendida por presupuesto de atención", r["address"]))
     conn.commit()
+    try:
+        from db import invalidar_copiables
+        invalidar_copiables()
+    except Exception:
+        pass
     return len(to_demote)
 
 

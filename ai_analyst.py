@@ -223,18 +223,35 @@ def evaluate_tracked(conn) -> int:
         _m0 = float(getattr(_cfg, "MIN_ENTRY_MULTIPLE", 3.0))
     except Exception:
         _s0, _m0 = 1.0, 3.0
+    # Cola PRIORIZADA con enfriamiento (v2, auditoria 19/8). La version
+    # anterior re-evaluaba a las RECHAZADAS cada 3 dias para siempre y,
+    # como ordenaba solo por score de descubrimiento, esas acaparaban los
+    # 20-25 cupos del ciclo mientras una ⭐ de score bajo podia no llegar
+    # NUNCA al LIMIT: operaba y se copiaba con metricas eternamente
+    # viejas. Ahora: primero las ⭐ con veredicto vencido (son las que
+    # estas copiando), y las ya-rechazadas esperan RECHAZO_DIAS antes de
+    # volver a gastar presupuesto.
+    try:
+        _rechazo_dias = int(float(os.getenv("REEVAL_RECHAZADAS_DIAS", "14")))
+    except (TypeError, ValueError):
+        _rechazo_dias = 14
+    cutoff_rechazo = (datetime.now(timezone.utc)
+                      - timedelta(days=_rechazo_dias)
+                      ).isoformat(timespec="seconds")
     rows = conn.execute(
         """SELECT address FROM wallets w
            WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= ?
-             AND (ai_class IS NULL OR pnl_updated IS NULL OR pnl_updated < ?)
+             AND (ai_class IS NULL OR pnl_updated IS NULL
+                  OR (is_tracked = 1 AND pnl_updated < ?)
+                  OR (is_tracked = 0 AND pnl_updated < ?))
              AND EXISTS (SELECT 1 FROM appearances a
                          WHERE a.wallet = w.address
                            AND COALESCE(a.buy_sol, 0) >= ?
                            AND (a.entry_multiple IS NULL
                                 OR a.entry_multiple >= ?))
-           ORDER BY score DESC
+           ORDER BY is_tracked DESC, score DESC
            LIMIT ?""",
-        (_min, cutoff, _s0, _m0, _lim)).fetchall()
+        (_min, cutoff, cutoff_rechazo, _s0, _m0, _lim)).fetchall()
 
     # ── Filtro de IDENTIDAD (antes de gastar en perfilar) ──
     # Helius sabe qué direcciones son exchanges, protocolos, market makers,
@@ -371,10 +388,25 @@ def evaluate_tracked(conn) -> int:
             print(f"  · Grading no disponible: {_e}")
             _grade = None
 
-        # Alias DETERMINISTA y único desde la dirección (código, no IA):
-        # ni se repite ni gasta tokens; es estable en el tiempo.
-        from aliases import make_alias
-        alias = make_alias(addr)
+        # Alias INMUTABLE (v2, auditoria 19/8): se asigna UNA sola vez,
+        # unico contra los ya ocupados, y ninguna re-evaluacion lo pisa.
+        # Antes cada pasada re-escribia make_alias(addr) — que con 13k
+        # billeteras en 46k nombres choca seguro — y resucitaba los
+        # duplicados que _dedupe_aliases acababa de arreglar, en ciclo
+        # eterno. El UPDATE de abajo usa COALESCE(alias, ?): solo rellena
+        # si la billetera aun no tiene nombre.
+        alias = None
+        try:
+            _ya = conn.execute(
+                "SELECT alias FROM wallets WHERE address=?",
+                (addr,)).fetchone()
+            if not (_ya and _ya["alias"]):
+                from aliases import make_alias_unico
+                alias = make_alias_unico(addr, set(owner))
+                owner[alias] = addr
+        except Exception as _e:
+            print(f"  · alias no asignado ({_e}); se deja para el dedupe")
+            alias = None
 
         # ── Señales de FONDEO (bundle / wallets hermanas) ──
         # Una billetera fondeada horas antes de operar es desechable, no un
@@ -450,7 +482,7 @@ def evaluate_tracked(conn) -> int:
 
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
-               alias=COALESCE(?, alias),
+               alias=COALESCE(alias, ?),
                pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?,
                grade=?, consistency=?,
                hold_median_min=?, roi_median=?,
@@ -480,6 +512,14 @@ def evaluate_tracked(conn) -> int:
               f"«{alias or 'sin alias'}» "
               f"[{verdict.get('modelo', '?')}] "
               f"({verdict.get('confianza', '?')}%): {verdict.get('razon','')}")
+    if evaluated:
+        # El conjunto operativo (alertas/copia) se refresca ya, sin
+        # esperar el TTL: esta pasada pudo promover o degradar ⭐.
+        try:
+            from db import invalidar_copiables
+            invalidar_copiables()
+        except Exception:
+            pass
     return evaluated
 
 
