@@ -205,17 +205,25 @@ def primeras_txs(mint: str, max_txs: int = 1500) -> tuple[list[dict], bool]:
     desde el inicio sí estamos viendo el arranque del token — a diferencia
     de paginar hacia atrás, donde casi nunca se llegaba.
     """
-    todas, token = [], None
-    while len(todas) < max_txs:
+    # Paginacion honesta (Ola 6, auditoria 19/8 - M23): cortar por
+    # "pagina vacia" mentia — una pagina cuyas filas fallaron todas en
+    # traducir() daba lote vacio con token de paginacion VIVO, el bucle
+    # abortaba a mitad de historia y aun asi devolvia completo=True →
+    # ranks inventados desde una ventana truncada, el bug exacto que
+    # este modulo existe para evitar. Se corta cuando se AGOTA la
+    # paginacion; "completo" significa eso y nada mas.
+    todas, token, completo = [], None, False
+    for _ in range(40):                     # tope duro anti-bucle
         lote, token = _rpc(mint, orden="asc",
-                           limite=min(1000, max_txs - len(todas)),
+                           limite=min(1000, max(1, max_txs - len(todas))),
                            token_pag=token)
-        if not lote:
-            break
-        todas.extend(lote)
+        todas.extend(lote or [])
         if not token:
+            completo = True                 # no hay mas paginas
             break
-    return (todas[:max_txs], bool(todas))
+        if len(todas) >= max_txs:
+            break                           # truncado por cupo: NO completo
+    return (todas[:max_txs], completo and bool(todas))
 
 
 def historial_wallet(address: str, max_txs: int = 4000) -> list[dict]:

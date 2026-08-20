@@ -59,7 +59,13 @@ def analyze_token(mint: str) -> dict:
         t["pair"] = p.get("pairAddress")
         t["chain"] = p.get("chainId") or "solana"
         t["liq"] = (p.get("liquidity") or {}).get("usd")
-        t["mc"] = p.get("fdv")
+        # marketCap primero, fdv de respaldo (Ola 6, auditoria 19/8 -
+        # M3): igual que signal_tracker._price_mc. Antes aqui era FDV a
+        # secas y alla marketCap: en tokens con supply parcial (FDV≫MC)
+        # el chequeo de cordura de los hitos descartaba tarjetas
+        # legitimas como "dato poco fiable" y la linea "MC $a → $b"
+        # mezclaba unidades.
+        t["mc"] = p.get("marketCap") or p.get("fdv")
         t["price_change_h1"] = (p.get("priceChange") or {}).get("h1")
         t["price_change_h24"] = (p.get("priceChange") or {}).get("h24")
         t["vol24"] = (p.get("volume") or {}).get("h24")

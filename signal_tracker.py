@@ -324,14 +324,27 @@ def track_outcomes() -> int:
     #    la "1h" se mide entre 1h y 3h; la "24h" entre 24h y 30h. Antes una
     #    medicion atrasada (backlog, caida) se guardaba con la etiqueta
     #    equivocada y contaminaba track record, umbral automatico y rachas.
+    #    CAPACIDAD DIMENSIONADA (Ola 6, auditoria 19/8 - C12): con
+    #    LIMIT 30 cada 15 min salian ~2.880 mediciones/dia contra ~5.500
+    #    de demanda — el backlog envejecia, caia fuera de la ventana y la
+    #    mayoria de señales quedaba sin chg_1h/chg_24h PARA SIEMPRE,
+    #    matando de hambre a track record, umbral automatico y rachas.
+    #    Dos arreglos: medir solo lo que alimenta decisiones (⭐ y liga
+    #    de ascenso; el track record de una billetera aleatoria no decide
+    #    nada) y subir el cupo (los precios van cacheados por mint, el
+    #    costo real es por token, no por señal).
     pend = conn.execute(
-        """SELECT signature, wallet, mint, ts, price_usd, price_1h,
-                  price_24h, alerted_pct, symbol
-           FROM signals
-           WHERE side='compra' AND price_usd IS NOT NULL AND price_usd > 0
-             AND ((price_1h IS NULL AND ts <= ? AND ts >= ?)
-               OR (price_24h IS NULL AND ts <= ? AND ts >= ?))
-           ORDER BY ts ASC LIMIT 30""",
+        """SELECT s.signature, s.wallet, s.mint, s.ts, s.price_usd,
+                  s.price_1h, s.price_24h, s.alerted_pct, s.symbol
+           FROM signals s
+           JOIN wallets w ON w.address = s.wallet
+                AND COALESCE(w.is_bot, 0) = 0
+                AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2)
+           WHERE s.side='compra' AND s.price_usd IS NOT NULL
+             AND s.price_usd > 0
+             AND ((s.price_1h IS NULL AND s.ts <= ? AND s.ts >= ?)
+               OR (s.price_24h IS NULL AND s.ts <= ? AND s.ts >= ?))
+           ORDER BY s.ts ASC LIMIT 100""",
         (int(now - HOUR), int(now - 3 * HOUR),
          int(now - DAY), int(now - 30 * HOUR))).fetchall()
     # 1b) VENTAS de billeteras ⭐, mismas ventanas de medicion. Se miden
@@ -387,7 +400,7 @@ def track_outcomes() -> int:
            WHERE s.side='compra' AND s.price_usd IS NOT NULL
              AND s.price_usd > 0 AND s.ts >= ?
              AND w.is_tracked = 1
-           ORDER BY s.ts DESC LIMIT 30""",
+           ORDER BY s.ts DESC LIMIT 100""",
         (int(now - WATCH_HOURS * HOUR),
          int(now - WATCH_HOURS * HOUR))).fetchall()
 

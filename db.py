@@ -725,7 +725,11 @@ def apply_buy(conn, wallet: str, mint: str, sol: float, tokens: float,
         tokens0 = row["tokens"] or 0.0
         cost0 = row["sol_cost"] or 0.0
         buys0 = row["buys"] or 0
-    is_accum = buys0 >= 1 or tokens0 > 0
+    # "Acumulacion" = aun TIENE tokens del mint (Ola 6 - B5). Con
+    # `buys0 >= 1` una re-entrada tras salida total salia etiquetada
+    # "ACUMULANDO · compra #N", contradiciendo la definicion de la
+    # propia funcion ("ya tenia tokens de ese mint").
+    is_accum = tokens0 > 0
     tokens_new = tokens0 + tokens
     cost_new = cost0 + sol
     buys_new = buys0 + 1

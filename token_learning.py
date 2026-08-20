@@ -18,7 +18,6 @@ import json
 import os
 import time
 
-import requests
 
 from db import get_conn, get_setting, set_setting
 
@@ -52,20 +51,29 @@ def record_submission(mint: str, t: dict, risk: int,
                 1 if t.get("freeze_auth") else 0,
                 int(risk), int(smart_count), int(elite_count),
                 t.get("price_change_h24"), time.time())
-            cur = conn.execute(
-                """UPDATE submitted_tokens SET
-                     symbol=?, mc=?, liq=?, age_days=?, top10_pct=?,
-                     lp_locked_pct=?, mint_auth=?, freeze_auth=?, risk_score=?,
-                     smart_count=?, elite_count=?, chg24=?, ts=?
-                   WHERE mint=?""", vals + (mint,))
-            if not cur.rowcount:
-                conn.execute(
-                    """INSERT INTO submitted_tokens
-                       (symbol,mc,liq,age_days,top10_pct,lp_locked_pct,
-                        mint_auth,freeze_auth,risk_score,smart_count,
-                        elite_count,chg24,ts,feedback,mint)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)""",
-                    vals + (mint,))
+            # UPSERT atomico (Ola 6 - M26): el UPDATE-luego-INSERT en dos
+            # sentencias no era atomico — dos hilos con el mismo mint
+            # nuevo veian ambos rowcount=0 y el perdedor moria en
+            # IntegrityError tragado (foto perdida). ON CONFLICT preserva
+            # el feedback previo y es valido en SQLite y Postgres.
+            conn.execute(
+                """INSERT INTO submitted_tokens
+                   (symbol,mc,liq,age_days,top10_pct,lp_locked_pct,
+                    mint_auth,freeze_auth,risk_score,smart_count,
+                    elite_count,chg24,ts,feedback,mint)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)
+                   ON CONFLICT(mint) DO UPDATE SET
+                     symbol=excluded.symbol, mc=excluded.mc,
+                     liq=excluded.liq, age_days=excluded.age_days,
+                     top10_pct=excluded.top10_pct,
+                     lp_locked_pct=excluded.lp_locked_pct,
+                     mint_auth=excluded.mint_auth,
+                     freeze_auth=excluded.freeze_auth,
+                     risk_score=excluded.risk_score,
+                     smart_count=excluded.smart_count,
+                     elite_count=excluded.elite_count,
+                     chg24=excluded.chg24, ts=excluded.ts""",
+                vals + (mint,))
             conn.commit()
         finally:
             conn.close()

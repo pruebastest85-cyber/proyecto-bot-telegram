@@ -71,6 +71,13 @@ IGNORED_MINTS = {
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 }
 MIN_SIGNAL_SOL = 0.3
+# Umbral APARTE para ventas (Ola 6, auditoria 19/8 - M1): filtrar ventas
+# por lo RECIBIDO ocultaba las salidas perdedoras — una ⭐ que compro con
+# 0.5 SOL y sale a -50% recibe 0.25 y no generaba señal: positions no se
+# decrementaba (la proxima compra salia como "ACUMULANDO" falso), el
+# paper no seguia las salidas malas (si las buenas) y la deriva
+# post-venta solo veia ventas rentables. Sesgo optimista en todo.
+MIN_SIGNAL_SOL_VENTA = 0.05
 CONSENSUS_WINDOW_MIN = 45
 
 
@@ -322,7 +329,7 @@ def _detect_trade(tx: dict, tracked: set[str]) -> dict | None:
         seller = t.get("fromUserAccount")
         if seller in tracked:
             delta = _wallet_sol_delta(tx, seller)
-            if delta > 0 and delta >= MIN_SIGNAL_SOL:
+            if delta > 0 and delta >= MIN_SIGNAL_SOL_VENTA:
                 return {"wallet": seller, "mint": mint, "sol": delta,
                         "side": "venta",
                         "tokens": _tok_total(tx, mint, seller, "out"),
@@ -848,6 +855,18 @@ def _proc(txs: list[dict], conn):
         if score_sig < umbral:
             print(f"🔇 Señal {t['symbol']} ({trade['side']}) silenciada: "
                   f"score {score_sig} < umbral {umbral:.0f}")
+            # La VENTA silenciada igual cierra el paper (Ola 6 - M2): el
+            # silencio es de la ALERTA, no de la copia. El camino
+            # caliente ya lo intento, pero si su consulta de precio fallo
+            # (DexScreener transitorio) la posicion quedaba viva hasta
+            # TP/SL/tiempo, corrompiendo lo que la simulacion mide. Es
+            # idempotente via paper_fills: si ya se proceso, no-op.
+            if not es_compra:
+                try:
+                    import paper_trading
+                    paper_trading.close_on_wallet_sell(conn, trade, t, pos)
+                except Exception as e:
+                    print(f"· Paper (venta silenciada) falló: {e}")
             continue
 
         # Máximo por señal: cap de alertas por billetera y por token en
@@ -885,6 +904,12 @@ def _proc(txs: list[dict], conn):
                 motivo = f"token ({n_t}/{max_t} en 1h)"
             print(f"🔇 Señal {t['symbol']} ({_side}) silenciada: "
                   f"máximo por {motivo} alcanzado")
+            if not es_compra:      # mismo criterio que el umbral (M2)
+                try:
+                    import paper_trading
+                    paper_trading.close_on_wallet_sell(conn, trade, t, pos)
+                except Exception as e:
+                    print(f"· Paper (venta capada) falló: {e}")
             continue
 
         # ── Veredicto de IA: SOLO para señales que SÍ se alertan ──
