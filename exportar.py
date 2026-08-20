@@ -19,6 +19,7 @@ qué recomendó el sistema y qué pasó después.
 import gzip
 import json
 import os
+import tempfile
 import time
 
 from db import get_conn
@@ -53,7 +54,9 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
     Cada parte es un JSON valido por si mismo, con 'parte' y 'partes' para
     saber el orden al recomponerlo.
     """
-    base_dir = os.getenv("EXPORT_DIR", "/tmp")
+    # tempfile.gettempdir(), no "/tmp" (auditoria 19/8): en el bot local
+    # de Windows /tmp no existe y /exportar moria en silencio.
+    base_dir = os.getenv("EXPORT_DIR") or tempfile.gettempdir()
     sello = time.strftime("%Y%m%d_%H%M")
     prefijo = ruta.rsplit(".", 1)[0] if ruta else os.path.join(
         base_dir, f"wallet_edge_{sello}")

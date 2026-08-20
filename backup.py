@@ -15,6 +15,7 @@ import gzip
 import json
 import os
 import sqlite3
+import tempfile
 import time
 
 import db as _db
@@ -31,8 +32,12 @@ def make_backup() -> tuple[str, str, str]:
     """Genera el backup y devuelve (ruta_temporal, nombre_archivo, texto)."""
     stamp = time.strftime("%Y%m%d_%H%M")
 
+    # tempfile.gettempdir(), no "/tmp" (auditoria 19/8): el bot local
+    # corre en Windows, donde /tmp no existe y /backup moria con
+    # "unable to open database file". El mismo codigo sirve en Railway.
+    tmp = tempfile.gettempdir()
     if getattr(_db, "USE_PG", False):
-        path = f"/tmp/backup_{stamp}.json.gz"
+        path = os.path.join(tmp, f"backup_{stamp}.json.gz")
         conn = _db.get_conn()
         filas = 0
         # Se escribe por lotes directamente al archivo. Antes se montaba
@@ -81,7 +86,7 @@ def make_backup() -> tuple[str, str, str]:
         return path, f"wallets_backup_{stamp}.json.gz", cap
 
     # ── SQLite: copia consistente con la API de backup ──
-    path = f"/tmp/backup_{stamp}.db"
+    path = os.path.join(tmp, f"backup_{stamp}.db")
     src = sqlite3.connect(DB_PATH)
     try:
         dst = sqlite3.connect(path)
