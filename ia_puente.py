@@ -13,22 +13,38 @@ se recargan creditos (setting "ia_proveedor"):
 Todos los modulos que necesiten un texto de IA llaman a completar() y no
 saben ni les importa quien respondio. Un solo sitio decide, un solo sitio
 se arregla.
+
+REGLA DE LA CASA (19/8, auditoria): ningun otro modulo hace requests a
+"chat/completions" — el unico camino a la IA es este archivo. La ultima
+vez que un modulo se salto el puente (decidir_salida), se quedo sin el
+arreglo del modelo pensante y su experimento midio vacio una semana.
+Excepcion documentada y unica: ai_agent.py llama directo porque necesita
+`tools` (formato OpenAI) que el puente aun no ofrece — ya tiene su
+propio reintento sin tope; cuando el puente soporte tools, migra aqui.
+
+Para decisiones con menu cerrado usa completar_json(): valida la
+respuesta contra el menu y devuelve el MOTIVO cuando falla, para que el
+llamador lo persista — un veredicto invalido deja de ser indistinguible
+de "IA apagada".
 """
 
 import json
 import os
+import re
 
 import requests
 
 NUBE_URL = "https://api.anthropic.com/v1/messages"
 NUBE_MODELO = "claude-haiku-4-5-20251001"
 
-# Se aprende en caliente (19/8): True cuando el modelo local demostro ser
-# PENSANTE e ignorar los apagadores. A partir de ahi todas las llamadas
-# van directo SIN tope de tokens — sin quemar un primer intento condenado
-# en cada evaluacion. Se resetea al reiniciar el proceso (si cambias de
-# modelo, se re-aprende solo).
-_MODELO_PENSANTE = False
+# ¿El modelo local es PENSANTE (ignora /no_think y enable_thinking)?
+# None = aun no leido de settings. Se aprende una vez EN LA VIDA: queda
+# persistido en settings ("modelo_pensante") porque antes era una global
+# de modulo y el supervisor local reinicia el proceso con cada commit —
+# cada reinicio re-quemaba un primer intento condenado (auditoria 19/8).
+_MODELO_PENSANTE = None
+
+_RE_THINK = re.compile(r"<think>.*?</think>", re.S)
 
 
 def _setting(key: str, default, conn=None):
@@ -46,9 +62,52 @@ def _setting(key: str, default, conn=None):
         return default
 
 
-def _local(prompt: str, system: str | None, max_tokens: int,
-           timeout: int, conn=None, _reintento: bool = False) -> str | None:
+def _sin_think(t: str) -> str:
+    """Quita los bloques <think>…</think>. Un <think> sin cerrar (el
+    modelo se quedo sin tokens a mitad del razonamiento) es TODO
+    razonamiento: cuenta como vacio."""
+    if not t:
+        return ""
+    limpio = _RE_THINK.sub("", t)
+    s = limpio.strip()
+    if s.startswith("<think>"):
+        return ""
+    return s
+
+
+def _pensante(conn=None) -> bool:
     global _MODELO_PENSANTE
+    if _MODELO_PENSANTE is None:
+        _MODELO_PENSANTE = str(
+            _setting("modelo_pensante", "0", conn) or "0") == "1"
+    return _MODELO_PENSANTE
+
+
+def _aprender_pensante(conn=None) -> None:
+    global _MODELO_PENSANTE
+    if _MODELO_PENSANTE is True:
+        return
+    _MODELO_PENSANTE = True
+    print("· IA local: modelo PENSANTE detectado — de aqui en adelante "
+          "todas las llamadas van sin tope (anotado en settings)")
+    try:
+        from db import set_setting
+        if conn is not None:
+            set_setting(conn, "modelo_pensante", "1")
+        else:
+            from db import get_conn
+            c = get_conn()
+            try:
+                set_setting(c, "modelo_pensante", "1")
+            finally:
+                c.close()
+    except Exception as e:
+        print(f"· No pude persistir modelo_pensante: {e}")
+
+
+def _local(prompt: str, system: str | None, max_tokens: int,
+           timeout: int, conn=None, _reintento: bool = False,
+           paciencia: bool = False) -> str | None:
     try:
         from decision_ia import _url, _modelo
         if conn is not None:
@@ -66,14 +125,14 @@ def _local(prompt: str, system: str | None, max_tokens: int,
         # gasta el max_tokens razonando y el texto visible llega vacio con
         # HTTP 200 — el "Sin IA" silencioso del 18/8. /no_think apaga el
         # razonamiento en los modelos que lo honran; a los que lo ignoran
-        # los cubre el reintento SIN tope (y _MODELO_PENSANTE lo recuerda).
+        # los cubre el reintento SIN tope (y modelo_pensante lo recuerda).
         msgs = ([{"role": "system", "content": system}] if system else []) \
             + [{"role": "user", "content": prompt + "\n/no_think"}]
         cuerpo = {"model": modelo, "temperature": 0.3, "messages": msgs,
                   # Apagado "de verdad" del razonamiento via plantilla de
                   # chat; los servidores que no lo entienden lo ignoran.
                   "chat_template_kwargs": {"enable_thinking": False}}
-        if not _reintento and not _MODELO_PENSANTE:
+        if not _reintento and not _pensante(conn):
             cuerpo["max_tokens"] = max_tokens + 200
         # En el reintento va SIN tope de tokens (19/8): el modelo pensante
         # razona lo que necesite y termina solo; el limite real que nos
@@ -84,25 +143,26 @@ def _local(prompt: str, system: str | None, max_tokens: int,
             print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
             return None
         eleccion = r.json()["choices"][0]
-        texto = ((eleccion.get("message") or {}).get("content") or "").strip()
+        bruto = ((eleccion.get("message") or {}).get("content") or "")
+        # El razonamiento NO es respuesta (auditoria 19/8): una salida que
+        # es puro <think> contaba como texto valido y viajaba cruda hasta
+        # Telegram. Se limpia ANTES del chequeo de vacio, para que tambien
+        # dispare el reintento.
+        texto = _sin_think(bruto)
         if not texto:
             fin = eleccion.get("finish_reason")
-            # Variantes pensantes de Qwen que IGNORAN /no_think (18/8, se
-            # vio en vivo: reasoning_tokens 499 de 500): un solo reintento
-            # con presupuesto grande deja al modelo terminar de pensar y
-            # escribir. Lento pero con respuesta > rapido pero vacio.
-            # Solo reintentar cuando el llamador ya venia con paciencia
-            # (jobs periodicos): el hilo del webhook llama con timeout=25
-            # y no debe quedarse 2 minutos esperando (hallazgo 18/8).
-            if fin == "length" and not _reintento and timeout >= 60:
-                if not _MODELO_PENSANTE:
-                    _MODELO_PENSANTE = True
-                    print("· IA local: modelo PENSANTE detectado — de aqui "
-                          "en adelante todas las llamadas van sin tope")
-                print("· IA local: el razonamiento se comio el tope; "
+            # Reintento anti-razonamiento. La paciencia la declara el
+            # LLAMADOR (paciencia=True: decisiones en hilos de fondo);
+            # timeout >= 60 se mantiene como señal implicita para los
+            # jobs periodicos que ya llamaban asi.
+            if not _reintento and (paciencia or timeout >= 60):
+                if fin == "length":
+                    _aprender_pensante(conn)
+                print(f"· IA local vacia (finish={fin}); "
                       "reintento SIN tope de tokens")
                 return _local(prompt, system, max_tokens,
-                              max(timeout, 120), conn, _reintento=True)
+                              max(timeout, 90), conn, _reintento=True,
+                              paciencia=paciencia)
             print(f"· IA local respondio VACIO (finish={fin})")
             return None
         return texto
@@ -112,7 +172,7 @@ def _local(prompt: str, system: str | None, max_tokens: int,
 
 
 def _nube(prompt: str, system: str | None, max_tokens: int,
-          timeout: int, conn=None) -> str | None:
+          timeout: int, conn=None, paciencia: bool = False) -> str | None:
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if not key:
         return None
@@ -166,13 +226,18 @@ def _nube(prompt: str, system: str | None, max_tokens: int,
 
 def completar_ex(prompt: str, system: str | None = None,
                  max_tokens: int = 500, timeout: int = 60,
-                 conn=None) -> tuple[str | None, str | None]:
+                 conn=None, paciencia: bool = False
+                 ) -> tuple[str | None, str | None]:
     """Texto de IA segun el proveedor configurado. None si nadie pudo.
 
     Devuelve (texto, proveedor) — el proveedor viaja en el RETORNO, no
     en una global: las globales entre hilos mezclaban al webhook con los
     jobs periodicos (hallazgo v3). `conn` opcional: quien ya tiene
-    conexion la presta y aqui no se abre ninguna."""
+    conexion la presta y aqui no se abre ninguna.
+
+    `paciencia=True` autoriza el reintento sin tope contra el modelo
+    pensante aunque el timeout sea corto — para decisiones que corren en
+    hilos de fondo y prefieren respuesta lenta a respuesta vacia."""
     propia = None
     if conn is None:
         try:
@@ -190,7 +255,8 @@ def completar_ex(prompt: str, system: str | None = None,
         else:                               # local_primero
             cadena = (("local", _local), ("nube", _nube))
         for nombre, intento in cadena:
-            texto = intento(prompt, system, max_tokens, timeout, conn)
+            texto = intento(prompt, system, max_tokens, timeout, conn,
+                            paciencia=paciencia)
             if texto:
                 return texto, nombre
         return None, None
@@ -207,22 +273,98 @@ def completar(prompt: str, system: str | None = None,
     return completar_ex(prompt, system, max_tokens, timeout, conn)[0]
 
 
+def _candidatos_json(t: str) -> list[str]:
+    """Substrings {…} balanceados de nivel superior, en orden de
+    aparicion. Respeta llaves dentro de strings JSON."""
+    cands: list[str] = []
+    prof, ini = 0, -1
+    en_str = esc = False
+    for i, ch in enumerate(t):
+        if en_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                en_str = False
+            continue
+        if ch == '"':
+            en_str = True
+        elif ch == "{":
+            if prof == 0:
+                ini = i
+            prof += 1
+        elif ch == "}" and prof > 0:
+            prof -= 1
+            if prof == 0 and ini >= 0:
+                cands.append(t[ini:i + 1])
+    return cands
+
+
 def extraer_json(texto: str) -> dict | None:
-    """El JSON de la respuesta aunque venga envuelto en texto/markdown."""
+    """El dict JSON de la respuesta aunque venga envuelto en texto,
+    markdown o razonamiento filtrado.
+
+    v2 (auditoria 19/8): el regex voraz \\{.*\\} abarcaba desde la primera
+    llave del razonamiento hasta la ultima de la respuesta y descartaba
+    veredictos validos — en vivo, 'copiar' no se registro NUNCA. Ahora:
+    fuera <think>, y se prueban los objetos balanceados DESDE EL FINAL
+    (la respuesta real viene despues del razonamiento). Solo dicts: una
+    lista o un string suelto no son un veredicto."""
     if not texto:
         return None
-    t = texto.replace("```json", "").replace("```", "").strip()
+    t = _sin_think(texto).replace("```json", "").replace("```", "").strip()
     try:
-        return json.loads(t)
+        v = json.loads(t)
+        return v if isinstance(v, dict) else None
     except json.JSONDecodeError:
-        import re
-        m = re.search(r"\{.*\}", t, flags=re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                return None
+        pass
+    for cand in reversed(_candidatos_json(t)):
+        try:
+            v = json.loads(cand)
+            if isinstance(v, dict):
+                return v
+        except json.JSONDecodeError:
+            continue
     return None
+
+
+def completar_json(prompt: str, menu: dict, *, system: str | None = None,
+                   max_tokens: int = 300, timeout: int = 60, conn=None,
+                   paciencia: bool = False
+                   ) -> tuple[dict | None, str | None, str]:
+    """Decision con menu cerrado. Devuelve (dict, proveedor, motivo).
+
+    `menu` = {campo: opciones_permitidas}; el valor del campo se normaliza
+    (minusculas, sin espacios) y DEBE estar en las opciones. Extras utiles
+    ("razon", "max_min") viajan tal cual si vienen.
+
+    El motivo distingue los desenlaces para que el llamador los persista:
+      "ok"                  → dict valido
+      "sin_respuesta"       → la IA no contesto (apagada, timeout, vacia)
+      "sin_json"            → contesto pero sin JSON parseable
+      "fuera_de_menu:campo" → JSON valido con un valor fuera del menu
+    Nunca mas un veredicto perdido indistinguible de IA apagada."""
+    texto, prov = completar_ex(prompt, system=system, max_tokens=max_tokens,
+                               timeout=timeout, conn=conn,
+                               paciencia=paciencia)
+    if not texto:
+        return None, None, "sin_respuesta"
+    v = extraer_json(texto)
+    if v is None:
+        print(f"· IA sin JSON [{prov}]: {texto[:120]}")
+        return None, prov, "sin_json"
+    salida: dict = {}
+    for campo, permitidas in menu.items():
+        val = str(v.get(campo) or "").lower().strip()
+        if val not in permitidas:
+            print(f"· IA fuera de menu [{prov}]: {campo}={val!r}")
+            return None, prov, f"fuera_de_menu:{campo}"
+        salida[campo] = val
+    for extra in ("razon", "max_min"):
+        if extra in v and extra not in salida:
+            salida[extra] = v[extra]
+    return salida, prov, "ok"
 
 
 def hay_ia() -> bool:

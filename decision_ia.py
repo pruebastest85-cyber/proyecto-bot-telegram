@@ -20,18 +20,17 @@ cambian de URL al reiniciar.
 import json
 import os
 
-import requests
-
-# 8 s: el Qwen 35B-A3B queda MONTADO de forma permanente durante la
-# semana de prueba (decision del dueño, 17/8/2026: el proyecto de
-# imagenes esta en pausa, la GPU es del bot). Sin recargas just-in-time,
-# la inferencia son 2-4 s; 8 s cubre tunel y GPU ocupada. Esta llamada
-# corre en el hilo del webhook: es un maximo, no un objetivo.
-TIMEOUT = 8            # salidas: el precio se mueve, 8 s y a las reglas
-TIMEOUT_ENTRADA = 30   # filtro de entrada: corre en hilo aparte y en modo
-                       # sombra — puede esperar a un modelo lento sin
-                       # frenar nada (y "timed out" deja de disfrazarse
-                       # de tunel caido, hallazgo 18/8)
+# Tiempos (v2, auditoria 19/8). La salida tenia TIMEOUT=8 y un POST crudo
+# que se saltaba el puente: contra el Qwen pensante CADA llamada volvia
+# vacia y el A/B midio reglas-contra-reglas una semana (decidido_por fue
+# 3/3 respuesta_vacia en vivo). Ahora las dos decisiones van por el
+# puente con paciencia=True: con modelo_pensante ya aprendido el primer
+# intento sale sin tope y tarda 5-30 s; el TP/SL duro sigue supremo
+# durante la espera, y la llamada corre en el hilo del lote, no frena a
+# los demas webhooks.
+TIMEOUT_SALIDA = 45    # salida: un intento generoso; a las reglas si no
+TIMEOUT_ENTRADA = 60   # filtro de entrada: hilo aparte y modo sombra —
+                       # puede esperar a un modelo lento sin frenar nada
 MAX_HOLD_MIN = 120    # tope duro al hold que la IA puede pedir
 MIN_HOLD_MIN = 5
 
@@ -135,9 +134,15 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
     no espera a nadie — y el veredicto se guarda para medir, al cierre,
     cuanto habria ahorrado rechazar. None si la IA no esta o falla.
 
-    Devuelve {"entrada": "copiar"|"rechazar", "razon": "..."} validado."""
-    url = _url(conn)
-    if not url:
+    Devuelve {"entrada": "copiar"|"rechazar", "razon": "..."} validado,
+    o {"entrada": "invalida:<motivo>"} si la IA hablo pero mal (se
+    persiste: una respuesta basura ya no es indistinguible de IA
+    apagada), o None si la IA no esta / no contesto."""
+    # La puerta es hay_ia(), no la URL local (auditoria 19/8): el puente
+    # tiene fallback a nube y esta puerta lo mataba cuando el tunel de
+    # Cloudflare rotaba de URL.
+    from ia_puente import hay_ia
+    if not hay_ia():
         return None
     ctx = {"compra_de_la_billetera_sol": trade.get("sol"),
            "mint": (trade.get("mint") or "")[:12]}
@@ -183,21 +188,22 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
         + "\n\nResponde SOLO este JSON, sin nada mas:\n"
         '{"entrada":"copiar"} o {"entrada":"rechazar","razon":"una frase"}')
     try:
-        # Via el puente (19/8): hereda el /no_think, el apagado por
-        # plantilla y el reintento anti-razonamiento. Corre en hilo de
-        # fondo y en modo sombra: sus 60 s de paciencia no frenan nada.
-        from ia_puente import completar_ex, extraer_json
-        texto, _prov = completar_ex(prompt, max_tokens=300, timeout=60,
-                                    conn=conn)
-        if not texto:
-            return None
-        v = extraer_json(texto)
-        if v is None:
-            print(f"· IA entrada sin JSON: {texto[:120]}")
-            return None
-        e = str(v.get("entrada", "")).lower().strip()
-        if e in ("copiar", "rechazar"):
-            return {"entrada": e, "razon": str(v.get("razon", ""))[:120]}
+        # Via el puente con menu cerrado (v2, 19/8): hereda /no_think, el
+        # apagado por plantilla, la limpieza de <think> y el reintento
+        # anti-razonamiento (paciencia=True: hilo de fondo, modo sombra).
+        from ia_puente import completar_json
+        v, _prov, motivo = completar_json(
+            prompt, {"entrada": ("copiar", "rechazar")},
+            max_tokens=300, timeout=TIMEOUT_ENTRADA, conn=conn,
+            paciencia=True)
+        if v is not None:
+            return {"entrada": v["entrada"],
+                    "razon": str(v.get("razon", ""))[:120]}
+        if motivo != "sin_respuesta":
+            # Hablo pero mal: se registra el porque (antes se perdia y la
+            # columna ia_entrada quedaba NULL — en vivo, 'copiar' no se
+            # registro jamas por esto).
+            return {"entrada": f"invalida:{motivo}"[:40], "razon": ""}
     except Exception as e:
         print(f"· IA entrada falló: {e}")
     return None
@@ -210,11 +216,17 @@ def decidir_salida(conn, contexto: dict) -> dict:
       {"salida": "vender"}                     → cerrar ya
       {"salida": "holdear", "max_min": N}      → hold con trailing (N acotado)
     y ademas "decidido_por": "ia_local" | "reglas_fallback:<motivo>".
+
+    v2 (auditoria 19/8): via el puente. La version anterior hacia su
+    propio POST con max_tokens=320 y timeout=8 y NUNCA recibio el arreglo
+    del modelo pensante: contra el Qwen 35B cada llamada volvia vacia y
+    el A/B llevaba una semana midiendo reglas-contra-reglas (en vivo:
+    decidido_por 3/3 'respuesta_vacia'). Un solo camino a la IA.
     """
-    url = _url(conn)
-    if not url:
+    from ia_puente import hay_ia, completar_json
+    if not hay_ia():
         return {"salida": "vender",
-                "decidido_por": "reglas_fallback:sin_url"}
+                "decidido_por": "reglas_fallback:sin_ia"}
     prompt = (
         "Eres el gestor de salidas de un copy trading de memecoins en "
         "Solana. La billetera que copiamos acaba de VENDER TODO su token. "
@@ -224,61 +236,27 @@ def decidir_salida(conn, contexto: dict) -> dict:
         + json.dumps(contexto, ensure_ascii=False, default=str)
         + "\n\nResponde SOLO este JSON, sin nada mas:\n"
         '{"salida":"vender"} o {"salida":"holdear","max_min":<5-120>,'
-        '"razon":"una frase"}'
-        "\n/no_think")
-    try:
-        r = requests.post(
-            f"{url}/v1/chat/completions",
-            json={"model": _modelo(conn), "temperature": 0.2,
-                  # /no_think apaga el razonamiento de Qwen; el colchon de
-                  # tokens cubre a los modelos que lo ignoren (18/8) y el
-                  # apagado por plantilla remata a los que ignoran ambos.
-                  "max_tokens": 320,
-                  "chat_template_kwargs": {"enable_thinking": False},
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=TIMEOUT)
-        if r.status_code >= 400:
-            print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
-            return {"salida": "vender",
-                    "decidido_por": f"reglas_fallback:http_{r.status_code}"}
-        eleccion = r.json()["choices"][0]
-        texto = ((eleccion.get("message") or {}).get("content") or "")
-        if not texto.strip():
-            # Vacio con HTTP 200 = razonamiento comido (18/8). Registrado
-            # con nombre propio para que el A/B no lo disfrace de otra cosa.
-            print("· IA local respondio VACIO (finish="
-                  f"{eleccion.get('finish_reason')})")
-            return {"salida": "vender",
-                    "decidido_por": "reglas_fallback:respuesta_vacia"}
-    except Exception as e:
-        print(f"· IA local inalcanzable: {e}")
+        '"razon":"una frase"}')
+    v, _prov, motivo = completar_json(
+        prompt, {"salida": ("vender", "holdear")},
+        max_tokens=320, timeout=TIMEOUT_SALIDA, conn=conn, paciencia=True)
+    if v is None:
+        det = ("respuesta_vacia" if motivo == "sin_respuesta"
+               else f"invalida_{motivo}")
         return {"salida": "vender",
-                "decidido_por": "reglas_fallback:inalcanzable"}
-
-    # Parseo tolerante (igual que con las IAs de nube: no tirar una
-    # respuesta por venir envuelta en texto) + validacion ESTRICTA del
-    # contenido: fuera del menu permitido no se obedece nada.
+                "decidido_por": f"reglas_fallback:{det}"[:60]}
+    if v["salida"] == "vender":
+        return {"salida": "vender", "decidido_por": "ia_local",
+                "razon": str(v.get("razon", ""))[:120]}
+    # holdear: max_min es OBLIGATORIO y numerico. Antes un holdear sin
+    # max_min se convertia en hold de 5 min etiquetado ia_local; ahora
+    # una respuesta incompleta cae a reglas con su motivo.
     try:
-        t = texto.replace("```json", "").replace("```", "").strip()
-        try:
-            v = json.loads(t)
-        except json.JSONDecodeError:
-            import re
-            m = re.search(r"\{.*\}", t, flags=re.S)
-            if not m:
-                raise
-            v = json.loads(m.group(0))
-        salida = str(v.get("salida", "")).lower().strip()
-        if salida == "vender":
-            return {"salida": "vender", "decidido_por": "ia_local",
-                    "razon": str(v.get("razon", ""))[:120]}
-        if salida == "holdear":
-            mins = float(v.get("max_min", 0))
-            mins = max(MIN_HOLD_MIN, min(MAX_HOLD_MIN, mins))
-            return {"salida": "holdear", "max_min": mins,
-                    "decidido_por": "ia_local",
-                    "razon": str(v.get("razon", ""))[:120]}
-    except Exception as e:
-        print(f"· IA local respondio basura ({e}): {texto[:120]}")
-    return {"salida": "vender",
-            "decidido_por": "reglas_fallback:respuesta_invalida"}
+        mins = float(v.get("max_min"))
+    except (TypeError, ValueError):
+        return {"salida": "vender",
+                "decidido_por": "reglas_fallback:invalida_max_min"}
+    mins = max(MIN_HOLD_MIN, min(MAX_HOLD_MIN, mins))
+    return {"salida": "holdear", "max_min": mins,
+            "decidido_por": "ia_local",
+            "razon": str(v.get("razon", ""))[:120]}
