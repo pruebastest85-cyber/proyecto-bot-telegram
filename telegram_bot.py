@@ -1802,11 +1802,66 @@ def main():
     except Exception as e:
         print(f"· LaserStream no arrancó: {e}")
 
-    # Ciclo automático: primero a los 60s de arrancar, luego cada N horas
+    # ── Reloj PERSISTENTE de jobs (Ola 5, auditoria 19/8 - M19) ─────
+    # Los timers del job_queue viven en memoria y el supervisor local
+    # reinicia el proceso con cada commit: cada deploy disparaba un
+    # ciclo COMPLETO 60 s despues de arrancar (7 commits en un dia =
+    # ~8 ciclos = purga acelerada de ⭐ + cuota de Helius/Gecko quemada),
+    # y weekly_learning (first=3 dias) no corrio NUNCA. Ahora la ultima
+    # ejecucion se guarda en settings y el `first` se calcula desde ahi:
+    # un reinicio ya no adelanta nada, y un job vencido corre pronto.
+    def _reloj_first(nombre: str, intervalo: int, defecto: int) -> int:
+        try:
+            from db import get_setting
+            _c = get_conn()
+            try:
+                last = float(get_setting(_c, f"job_ts:{nombre}", 0) or 0)
+            finally:
+                _c.close()
+        except Exception:
+            return defecto
+        if not last:
+            # Primera vez: se ancla el reloj YA, para que el tiempo de
+            # calendario cuente ENTRE reinicios (sin esto, un job de
+            # first largo — weekly_learning, 3 dias — necesitaria 3 dias
+            # de proceso ininterrumpido y no corria jamas).
+            try:
+                from db import set_setting
+                _c = get_conn()
+                try:
+                    set_setting(_c, f"job_ts:{nombre}",
+                                _t.time() - intervalo + defecto)
+                finally:
+                    _c.close()
+            except Exception:
+                pass
+            return defecto
+        falta = intervalo - (_t.time() - last)
+        if falta <= 0:                      # vencido: corre pronto
+            return min(max(defecto, 60), 600)
+        return int(min(falta, intervalo))
+
+    def _con_reloj(nombre: str, fn):
+        async def _w(ctx):
+            try:
+                await fn(ctx)
+            finally:
+                try:
+                    from db import set_setting
+                    _c = get_conn()
+                    try:
+                        set_setting(_c, f"job_ts:{nombre}", _t.time())
+                    finally:
+                        _c.close()
+                except Exception:
+                    pass
+        return _w
+
+    # Ciclo automático: cada N horas DE VERDAD (reloj persistente)
     app.job_queue.run_repeating(
-        auto_cycle_job,
+        _con_reloj("auto_cycle", auto_cycle_job),
         interval=AUTO_CYCLE_HOURS * 3600,
-        first=60,
+        first=_reloj_first("auto_cycle", AUTO_CYCLE_HOURS * 3600, 60),
         name="auto_cycle",
     )
     # Track record: mide el resultado de las señales cada 15 min
@@ -1832,23 +1887,33 @@ def main():
     )
     # Motor de hipótesis: descubrimiento autónomo cada 12 h
     app.job_queue.run_repeating(
-        hypotheses_job,
+        _con_reloj("hypotheses", hypotheses_job),
         interval=12 * 3600,
-        first=1800,
+        first=_reloj_first("hypotheses", 12 * 3600, 1800),
         name="hypotheses",
     )
     # Backup diario de la base + watchdog del webhook + aprendizaje semanal
-    app.job_queue.run_repeating(backup_job, interval=86400, first=7200,
+    app.job_queue.run_repeating(_con_reloj("db_backup", backup_job),
+                                interval=86400,
+                                first=_reloj_first("db_backup", 86400, 7200),
                                 name="db_backup")
     app.job_queue.run_repeating(watchdog_job, interval=3600, first=1800,
                                 name="watchdog")
-    app.job_queue.run_repeating(learning_job, interval=7 * 86400,
-                                first=3 * 86400, name="weekly_learning")
+    app.job_queue.run_repeating(
+        _con_reloj("weekly_learning", learning_job),
+        interval=7 * 86400,
+        first=_reloj_first("weekly_learning", 7 * 86400, 3 * 86400),
+        name="weekly_learning")
     # Cierre del ciclo: el rendimiento medido degrada ⭐ cada 24 h
-    app.job_queue.run_repeating(performance_review_job, interval=86400,
-                                first=3600, name="performance_review")
+    app.job_queue.run_repeating(
+        _con_reloj("performance_review", performance_review_job),
+        interval=86400,
+        first=_reloj_first("performance_review", 86400, 3600),
+        name="performance_review")
     # Autodiagnóstico cada 6 h (solo avisa ante problemas críticos)
-    app.job_queue.run_repeating(salud_job, interval=6 * 3600, first=900,
+    app.job_queue.run_repeating(_con_reloj("salud", salud_job),
+                                interval=6 * 3600,
+                                first=_reloj_first("salud", 6 * 3600, 900),
                                 name="salud")
     # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
     app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
