@@ -60,7 +60,11 @@ TOOLS = [
                      "mano APAGA el auto-ajuste; -1 = volver al modo "
                      "automático. Requiere confirmación del usuario."),
      "input_schema": {"type": "object", "properties": {
-         "valor": {"type": "number", "description": "umbral 0-100"}},
+         "valor": {"type": "number",
+                   "description": ("umbral 0-100, o -1 para volver al "
+                                   "modo automático (0 significa alertar "
+                                   "TODO en modo manual, no es el "
+                                   "automático)")}},
          "required": ["valor"]}},
 ]
 
@@ -322,6 +326,11 @@ def describe_action(action: dict) -> str:
     if tool == "correr_ciclo":
         return "🔄 Correr el ciclo completo de descubrimiento y análisis"
     if tool == "cambiar_umbral_senal":
+        try:
+            if float(args.get("valor", 0)) < 0:
+                return "🎯 Volver el umbral de señal al modo AUTOMÁTICO"
+        except (TypeError, ValueError):
+            pass
         return f"🎯 Fijar el umbral mínimo de señal en {args.get('valor')}/100"
     return tool
 

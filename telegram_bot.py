@@ -1016,9 +1016,20 @@ async def cmd_preguntar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                               " ".join(ctx.args))
 
 
+def _alias_md(s) -> str:
+    """Alias seguro para Markdown (Ola 6 - M21): un apodo con _, ` o [
+    rompia el parseo y Telegram rechazaba el MENSAJE ENTERO (/elite,
+    /saldos y el digest de las 13:00 fallaban en silencio)."""
+    return (str(s or "").replace("*", "").replace("_", " ")
+            .replace("`", "").replace("[", "(").replace("]", ")"))
+
+
 @solo_admin
 async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(_senales_text(), parse_mode="Markdown")
+    # to_thread (Ola 6 - M25): las consultas corrian EN el event loop;
+    # un stall de SQLite (busy_timeout 30 s) congelaba el bot entero.
+    texto = await asyncio.to_thread(_senales_text)
+    await update.message.reply_text(texto, parse_mode="Markdown")
 
 
 @solo_admin
@@ -1035,7 +1046,8 @@ async def cmd_app(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @solo_admin
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(_status_text(), parse_mode="Markdown")
+    texto = await asyncio.to_thread(_status_text)
+    await update.message.reply_text(texto, parse_mode="Markdown")
 
 
 @solo_admin
@@ -1128,7 +1140,13 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=kb_paper())
 
 
-@solo_admin
+# SIN @solo_admin (Ola 6, auditoria 19/8 - C5): esto es un helper de
+# fondo, no un handler. El decorador lo envolvia como wrapper(update,
+# ctx) de 2 parametros; la llamada le pasa 4 → TypeError en CADA mint
+# pegado que generaba ficha, y la extraccion de compradores (la que
+# alimenta la red de billeteras) no corrio NUNCA — disfrazada del
+# "⚠️ Algo falló" generico. La seguridad ya la puso on_chat, que si
+# es handler y si esta decorado.
 async def _extract_buyers_bg(chat, mint: str, symbol, chg24):
     """En segundo plano: extrae los compradores del token enviado y los mete
     a la red (mismo análisis que un token ganador). No bloquea la ficha."""
@@ -1562,7 +1580,7 @@ def _elite_text() -> str:
         if r["grade"] != actual:
             actual = r["grade"]
             out.append(f"\n{emo.get(actual,'')} *{actual}*")
-        nombre = (r["alias"] or r["address"][:8]).replace("*", "")
+        nombre = _alias_md(r["alias"] or r["address"][:8])
         cons = f" · C{round(r['consistency'])}" if r["consistency"] is not None else ""
         pnl = f" · {r['pnl_total']:+.0f} SOL" if r["pnl_total"] is not None else ""
         sc = f" · score {round(r['wallet_score'])}" if r["wallet_score"] is not None else ""
@@ -1717,7 +1735,7 @@ def _saldos_text():
                 sol = resp.json()["result"]["value"] / 1e9
             except Exception:
                 sol = None
-            nombre = (r["alias"] or r["address"][:8]).replace("*", "")
+            nombre = _alias_md(r["alias"] or r["address"][:8])
             icono = "⭐" if r["is_tracked"] else "👁"
             if sol is None:
                 out.append(f"{icono} {nombre}: _error al consultar_")

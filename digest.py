@@ -41,7 +41,9 @@ def resumen_text() -> str:
             algo = True
             out.append("⭐ *Nuevas Elite (24h):*")
             for r in elites:
-                nom = (r["alias"] or r["address"][:8]).replace("*", "")
+                nom = (str(r["alias"] or r["address"][:8]).replace("*", "")
+                       .replace("_", " ").replace("`", "")
+                       .replace("[", "(").replace("]", ")"))
                 pnl = f" · {r['pnl_total']:+.0f} SOL" if r["pnl_total"] is not None else ""
                 out.append(f"  • {nom}{pnl}")
     except Exception:
