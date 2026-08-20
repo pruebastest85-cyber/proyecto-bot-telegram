@@ -13,7 +13,6 @@ import time
 
 import requests
 
-import config
 from db import get_conn, get_setting, set_setting
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -22,37 +21,61 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
 def send_db_backup():
-    """Envía el archivo de la base de datos por Telegram."""
+    """Envía un backup VERIFICADO de la base por Telegram.
+
+    v2 (auditoria 19/8): la version anterior copiaba wallets.db byte a
+    byte MIENTRAS los hilos escribian — con WAL, la copia salia sin lo
+    pendiente del .wal y podia quedar corrupta por un checkpoint a mitad:
+    el backup automatico que protege el historico podia ser irrestaurable
+    justo cuando hiciera falta. Ahora delega en backup.make_backup() (la
+    API de backup de sqlite3, consistente en caliente; en Postgres, el
+    volcado JSON por lotes) y ademas VERIFICA la copia con
+    PRAGMA integrity_check antes de enviarla: un backup no comprobado no
+    cuenta como backup."""
     if not (BOT_TOKEN and ADMIN_ID):
         return
     try:
-        # Comprimido: Telegram admite 50 MB por archivo y una base SQLite
-        # se encoge mucho al comprimirla. Así el historial puede crecer
-        # bastante más sin que el backup empiece a fallar.
         import gzip
         import shutil
-        import tempfile as _tmp
-        origen = config.DB_PATH
-        crudo = os.path.getsize(origen) / 1e6 if os.path.exists(origen) else 0
-        destino = _tmp.mktemp(suffix=".db.gz")
-        with open(origen, "rb") as fin, gzip.open(destino, "wb",
-                                                  compresslevel=6) as fout:
-            shutil.copyfileobj(fin, fout)
-        comprimido = os.path.getsize(destino) / 1e6
-        with open(destino, "rb") as f:
+        import sqlite3 as _sq
+
+        from backup import make_backup
+        path, nombre, cap = make_backup()
+
+        if path.endswith(".db"):
+            # Verificacion sobre LA COPIA (no toca la base viva).
+            chk = _sq.connect(path)
+            try:
+                veredicto = chk.execute(
+                    "PRAGMA integrity_check").fetchone()[0]
+            finally:
+                chk.close()
+            if veredicto != "ok":
+                raise RuntimeError(f"integrity_check: {veredicto}")
+            cap += "\n✅ Verificado (integrity_check ok)"
+            # Comprimir para Telegram (50 MB por archivo).
+            gz = path + ".gz"
+            with open(path, "rb") as fin, \
+                    gzip.open(gz, "wb", compresslevel=6) as fout:
+                shutil.copyfileobj(fin, fout)
+            os.remove(path)
+            path, nombre = gz, nombre + ".gz"
+
+        mb = os.path.getsize(path) / 1e6
+        if mb > 49:
+            cap += (f"\n⚠️ {mb:.1f} MB: cerca del límite de 50 MB de "
+                    "Telegram")
+        with open(path, "rb") as f:
             requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                data={"chat_id": int(ADMIN_ID),
-                      "caption": (f"📦 Backup diario ({comprimido:.1f} MB "
-                                  f"comprimido, {crudo:.0f} MB original).\n"
-                                  "Descomprime con gzip para abrirlo.")},
-                files={"document": ("wallets_backup.db.gz", f)},
+                data={"chat_id": int(ADMIN_ID), "caption": cap[:1000]},
+                files={"document": (nombre, f)},
                 timeout=180)
         try:
-            os.remove(destino)
+            os.remove(path)
         except Exception:
             pass
-        print("📦 Backup de la base enviado por Telegram")
+        print(f"📦 Backup verificado enviado por Telegram ({mb:.1f} MB)")
         try:
             conn = get_conn()
             try:
