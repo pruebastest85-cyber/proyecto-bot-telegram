@@ -153,6 +153,27 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     status          TEXT DEFAULT 'abierta'
 );
 
+-- Libro de eventos del paper (Ola 4, auditoria 19/8): cada salida
+-- (parcial, total, hold) es UNA fila inmutable. UNIQUE(trade_id, firma)
+-- da la idempotencia por esquema: el camino caliente y la via normal
+-- pueden intentar el mismo evento y el segundo INSERT es un no-op —
+-- sustituye a la guardia ultima_venta_sig (que solo recordaba la ULTIMA
+-- firma) y sobrevive a reinicios y entregas duplicadas de Helius.
+CREATE TABLE IF NOT EXISTS paper_fills (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id        INTEGER NOT NULL,
+    firma           TEXT,               -- firma de la venta (NULL = job)
+    ts              INTEGER,
+    tipo            TEXT,               -- parcial | total | hold
+    motivo          TEXT,               -- venta de la ⭐ / tp / sl / ...
+    fraccion        REAL,               -- fraccion liquidada (0-1)
+    precio          REAL,
+    usd_cotizado    REAL,               -- venta real Jupiter (NULL si fallo)
+    fee_usd         REAL,
+    UNIQUE(trade_id, firma)
+);
+CREATE INDEX IF NOT EXISTS idx_fills_trade ON paper_fills(trade_id);
+
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
@@ -309,6 +330,22 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     status          TEXT DEFAULT 'abierta'
 );
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
+
+-- Libro de eventos del paper (Ola 4): ver comentario en el esquema SQLite.
+CREATE TABLE IF NOT EXISTS paper_fills (
+    id              SERIAL PRIMARY KEY,
+    trade_id        INTEGER NOT NULL,
+    firma           TEXT,
+    ts              BIGINT,
+    tipo            TEXT,
+    motivo          TEXT,
+    fraccion        DOUBLE PRECISION,
+    precio          DOUBLE PRECISION,
+    usd_cotizado    DOUBLE PRECISION,
+    fee_usd         DOUBLE PRECISION,
+    UNIQUE(trade_id, firma)
+);
+CREATE INDEX IF NOT EXISTS idx_fills_trade ON paper_fills(trade_id);
 
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);

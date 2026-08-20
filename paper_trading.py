@@ -326,9 +326,57 @@ def _campo(row, nombre):
         return None
 
 
-def _close(conn, row, price: float, reason: str, icon: str):
+# ── Libro de eventos (Ola 4, auditoria 19/8) ─────────────────────────────
+# Cada salida es UNA fila inmutable en paper_fills. La idempotencia sale
+# del esquema — UNIQUE(trade_id, firma) — y no de una columna-recuerdo:
+# ultima_venta_sig solo guardaba la ULTIMA firma, asi que la re-entrega
+# de un evento ANTERIOR (Helius reintenta fuera de orden) pasaba la
+# guardia. El INSERT OR IGNORE atrapa todos, para siempre.
+
+def _fill_nuevo(conn, trade_id: int, firma) -> bool:
+    """Reclama el evento para este trade. True = primera vez (procesar);
+    False = ya procesado (el otro camino llego antes). Sin firma (jobs
+    TP/SL/tiempo) siempre True: esos solo ocurren una vez por diseño."""
+    if not firma:
+        return True
+    try:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO paper_fills (trade_id, firma, ts) "
+            "VALUES (?,?,?)", (trade_id, firma, int(time.time())))
+        conn.commit()
+        return bool(cur.rowcount)
+    except Exception as e:
+        print(f"· paper_fills no disponible ({e}); sigo sin guardia")
+        return True
+
+
+def _fill_resultado(conn, trade_id: int, firma, tipo: str, motivo: str,
+                    fraccion, precio, usd_cotizado, fee_usd) -> None:
+    """Completa (o crea, si no hay firma) la fila del evento con lo que
+    realmente paso. Best-effort: un fallo aqui no frena el paper."""
+    try:
+        if firma:
+            conn.execute(
+                """UPDATE paper_fills SET tipo=?, motivo=?, fraccion=?,
+                   precio=?, usd_cotizado=?, fee_usd=?
+                   WHERE trade_id=? AND firma=?""",
+                (tipo, motivo, fraccion, precio, usd_cotizado, fee_usd,
+                 trade_id, firma))
+        else:
+            conn.execute(
+                """INSERT INTO paper_fills
+                   (trade_id, firma, ts, tipo, motivo, fraccion, precio,
+                    usd_cotizado, fee_usd)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (trade_id, None, int(time.time()), tipo, motivo, fraccion,
+                 precio, usd_cotizado, fee_usd))
+        conn.commit()
+    except Exception as e:
+        print(f"· fill no registrado ({e})")
+
+
+def _close(conn, row, price: float, reason: str, icon: str, firma=None):
     pct = (price / row["entry_price"] - 1) * 100
-    pnl = (row["stake_sol"] or 0) * pct / 100      # notional en SOL (histórico)
 
     # PnL en dólares sobre el importe que se guardó al entrar. Si la fila
     # es vieja y no lo tiene, se reconstruye al cambio de ahora; es una
@@ -345,6 +393,12 @@ def _close(conn, row, price: float, reason: str, icon: str):
     realizado = _campo(row, "pnl_realizado_usd") or 0
     pnl_usd = (stake_usd * frac * pct / 100 + realizado
                if stake_usd is not None else None)
+    # pnl_sol tambien respeta la fraccion viva (Ola 4): antes aplicaba el
+    # pct final al stake COMPLETO — con parciales de por medio, el win
+    # rate (que contaba por pnl_sol) podia contradecir al PnL en dolares.
+    # Sigue sin incluir lo realizado por los trozos (eso vive en USD);
+    # es la cifra legada, el resumen decide por pnl_usd.
+    pnl = (row["stake_sol"] or 0) * frac * pct / 100
 
     # stake_usd se guarda también cuando se ha reconstruido. Si no, el
     # SUM(stake_usd) del resumen se saltaría esa fila y el ROI saldría
@@ -359,6 +413,7 @@ def _close(conn, row, price: float, reason: str, icon: str):
     usd_salida = _campo(row, "usd_salida_real")   # acumulado de parciales
     costos = _campo(row, "costos_usd")
     tokens_raw = _campo(row, "tokens_raw")
+    _usd_fill = _fee_fill = None
     if tokens_raw and stake_usd is not None and int(tokens_raw) > 0:
         try:
             from ejecucion_simulada import cotizar_venta
@@ -370,11 +425,22 @@ def _close(conn, row, price: float, reason: str, icon: str):
                 costos = (costos or 0) + fee_sol * su2
                 usd_salida = (usd_salida or 0) + v["usd_salida"]
                 pnl_neto = usd_salida - stake_usd - costos
+                _usd_fill = v["usd_salida"]
+                _fee_fill = fee_sol * su2
         except Exception as e:
             print(f"· Paper: cotización de salida falló ({e})")
     elif usd_salida is not None and stake_usd is not None:
         # todo se vendio ya por trozos: el neto sale de lo acumulado
         pnl_neto = usd_salida - stake_usd - (costos or 0)
+    # Cierres "sin liquidez" (rug / par muerto): Jupiter no cotiza JAMAS
+    # esos tokens, asi que el neto quedaba NULL y las PEORES perdidas se
+    # excluian de "Realidad vs papel" — sesgo de supervivencia que
+    # inflaba el neto real justo donde ejecutar pierde mas (Ola 4). Aqui
+    # el remanente vale 0 con certeza: el neto es lo acumulado por los
+    # trozos (o 0) menos lo invertido.
+    if pnl_neto is None and stake_usd is not None \
+            and reason == "sin liquidez":
+        pnl_neto = (usd_salida or 0) - stake_usd - (costos or 0)
 
     conn.execute(
         """UPDATE paper_trades SET status='cerrada', exit_price=?,
@@ -384,6 +450,8 @@ def _close(conn, row, price: float, reason: str, icon: str):
         (price, int(time.time()), reason, pct, pnl, pnl_usd,
          stake_usd, costos, usd_salida, pnl_neto, row["id"]))
     conn.commit()
+    _fill_resultado(conn, row["id"], firma, "total", reason,
+                    round(frac, 4), price, _usd_fill, _fee_fill)
 
     res = "🟢" if pnl >= 0 else "🔴"
     if pnl_usd is not None:
@@ -415,18 +483,31 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
     nueva = max(0.0, frac - vendida)
 
     pct_precio = (price / row["entry_price"] - 1) * 100
+    # stake_usd se reconstruye si la fila es vieja (Ola 4): antes solo
+    # _close lo hacia — un parcial sobre fila sin stake_usd reducia la
+    # fraccion pero su PnL se perdia para siempre.
     stake_usd = _campo(row, "stake_usd")
+    if stake_usd is None:
+        _su0 = _sol_a_usd()
+        stake_usd = ((row["stake_sol"] or 0) * _su0
+                     if _su0 and _su0 > 0 else None)
     pnl_trozo = (stake_usd * vendida * pct_precio / 100
                  if stake_usd is not None else None)
     realizado = (_campo(row, "pnl_realizado_usd") or 0) + (pnl_trozo or 0)
 
     # Ejecucion simulada del trozo: cotizar en Jupiter la venta de la
-    # parte proporcional de los tokens crudos, y acumular el resultado
-    # real (usd_salida_real) y la fee, igual que hace el cierre total.
+    # parte proporcional de los tokens crudos. Los tokens se descuentan
+    # SOLO si la cotizacion respondio (Ola 4, auditoria 19/8): antes se
+    # descontaban tambien cuando Jupiter fallaba — el trozo desaparecia
+    # de tokens_raw sin que sus dolares entraran a usd_salida_real, y el
+    # pnl_usd_neto quedaba subestimado para siempre. Si falla, el trozo
+    # queda en tokens_raw y lo cotiza el cierre.
     tokens_raw = _campo(row, "tokens_raw")
     nuevos_tokens = tokens_raw
     usd_real = _campo(row, "usd_salida_real")
     costos = _campo(row, "costos_usd")
+    _fee_fill = None
+    _usd_fill = None
     if tokens_raw:
         try:
             from ejecucion_simulada import cotizar_venta
@@ -438,17 +519,24 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
                 usd_real = (usd_real or 0) + v["usd_salida"]
                 fee_sol = _f(conn, "paper_fee_sol", 0.0005)
                 costos = (costos or 0) + fee_sol * su
-            nuevos_tokens = str(int(tokens_raw) - trozo)
+                nuevos_tokens = str(int(tokens_raw) - trozo)
+                _usd_fill = v["usd_salida"]
+                _fee_fill = fee_sol * su
         except Exception as e:
-            print(f"· Paper: cotización parcial falló ({e})")
+            print(f"· Paper: cotización parcial falló ({e}); el trozo "
+                  "queda para el cierre")
 
     conn.execute(
         """UPDATE paper_trades SET fraccion_restante=?, pnl_realizado_usd=?,
-           tokens_raw=?, usd_salida_real=?, costos_usd=?,
-           ultima_venta_sig=? WHERE id=?""",
+           tokens_raw=?, usd_salida_real=?, costos_usd=?, stake_usd=?
+           WHERE id=?""",
         (nueva, realizado, nuevos_tokens, usd_real, costos,
-         firma, row["id"]))
+         stake_usd if stake_usd is not None else _campo(row, "stake_usd"),
+         row["id"]))
     conn.commit()
+    _fill_resultado(conn, row["id"], firma, "parcial",
+                    f"espejo {pct:.0f}% de la ⭐", round(vendida, 4),
+                    price, _usd_fill, _fee_fill)
 
     txt_pnl = (f" · PnL del trozo {_usd_firmado(pnl_trozo)}"
                if pnl_trozo is not None else "")
@@ -477,15 +565,18 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         (trade["mint"],)).fetchone()
     if not row:
         return
-    # IDEMPOTENCIA POR FIRMA (19/8): el camino caliente y la via normal
-    # procesan el MISMO evento de venta. El cierre total era idempotente
-    # por accidente (la 2a llamada no encuentra fila abierta), pero el
-    # espejo parcial se aplicaba DOS veces: 30% vendido dejaba 49% en vez
-    # de 70%, con el PnL realizado sumado doble. La firma corta eso, y
-    # sobrevive a reinicios y a entregas duplicadas de Helius.
+    # IDEMPOTENCIA POR LIBRO DE EVENTOS (Ola 4): el camino caliente y la
+    # via normal procesan el MISMO evento de venta. Chequeo barato aqui
+    # (evita las consultas de quorum en duplicados); el reclamo atomico
+    # va mas abajo, cuando la decision de actuar ya esta tomada.
     _firma = trade.get("signature")
-    if _firma and _campo(row, "ultima_venta_sig") == _firma:
-        return
+    try:
+        if _firma and conn.execute(
+                "SELECT 1 FROM paper_fills WHERE trade_id=? AND firma=?",
+                (row["id"], _firma)).fetchone():
+            return
+    except Exception:
+        pass
     if row["wallet"] and trade.get("wallet") \
             and row["wallet"] != trade["wallet"]:
         # SALIDA DE MANADA CON QUORUM (19/8): en posiciones por CONSENSO
@@ -529,18 +620,27 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
     price = token.get("price")
     if not price or price <= 0:
         return
-    # La firma se graba AQUI, en cuanto la decision de actuar esta tomada
-    # (19/8): el "return por precio ausente" de arriba es transitorio y SI
-    # se quiere reintentar; de aqui en adelante, todo pase repetido del
-    # mismo evento (caliente + via normal) debe morir en la guardia. Sin
-    # esto, los caminos de HOLD se ejecutaban dos veces: doble UPDATE de
-    # politica (reloj reiniciado), pico pisado, DOBLE consulta a la IA de
-    # salida (8 s cada una, respuestas que podian no coincidir) y doble 🕐.
-    if _firma:
-        conn.execute(
-            "UPDATE paper_trades SET ultima_venta_sig=? WHERE id=?",
-            (_firma, row["id"]))
-        conn.commit()
+    # El evento se RECLAMA aqui, en cuanto la decision de actuar esta
+    # tomada: el "return por precio ausente" de arriba es transitorio y
+    # SI se quiere reintentar; de aqui en adelante, todo pase repetido
+    # del mismo evento (caliente + via normal) muere en el UNIQUE del
+    # libro de eventos.
+    if not _fill_nuevo(conn, row["id"], _firma):
+        return
+
+    # ── HOLD YA DECIDIDO (Ola 4, auditoria 19/8) ─────────────────────
+    # Si la posicion ya esta en hold (la ⭐ vendio y se decidio aguantar
+    # con trailing), un evento de venta NUEVO no re-decide: antes volvia
+    # a consultar a la IA, reiniciaba el reloj del hold y PISABA el pico
+    # con el precio actual — el trailing perdia el maximo ya alcanzado
+    # justo durante la caida que debia atraparlo. La salida de un hold
+    # es de TP/SL/trailing/tiempo, que siguen supremos en el job.
+    if _campo(row, "politica") == "holdear":
+        _fill_resultado(conn, row["id"], _firma, "hold", "venta durante "
+                        "hold: no se re-decide", 0.0, price, None, None)
+        print(f"🕐 Paper: venta nueva en {row['symbol']} durante el hold; "
+              "mando el trailing, no se re-decide")
+        return
 
     # ── Espejo proporcional (implementado a pedido, 13/8/2026) ────────
     # Antes: venta <50% se ignoraba y >=50% cerraba TODO. Ahora el paper
@@ -602,7 +702,7 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
                 _close(conn, row, price,
                        "venta de la ⭐ (decisión IA)"
                        if d.get("decidido_por") == "ia_local"
-                       else "venta de la ⭐", "🚪")
+                       else "venta de la ⭐", "🚪", firma=_firma)
                 return
             except Exception as e:
                 print(f"· Decisión IA falló ({e}); reglas de siempre")
@@ -634,7 +734,7 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
 
     motivo = ("venta de la ⭐" if sigue_estrella
               else "venta (la billetera ya no es ⭐)")
-    _close(conn, row, price, motivo, "🚪")
+    _close(conn, row, price, motivo, "🚪", firma=_firma)
 
 
 def update_open_trades() -> int:
@@ -714,12 +814,15 @@ def resumen_text() -> str:
     abiertas = conn.execute(
         "SELECT * FROM paper_trades WHERE status='abierta' "
         "ORDER BY entry_ts DESC").fetchall()
+    # wins por pnl_usd (Ola 4): pnl_sol ignoraba los parciales y una
+    # operacion podia salir 🟢 en dolares pero contar como derrota.
+    # pnl_sol solo decide cuando no hay cifra en dolares (filas viejas).
     cer = conn.execute(
         "SELECT COUNT(*) n, SUM(pnl_sol) pnl, SUM(pnl_usd) pnl_usd, "
         "SUM(stake_usd) invertido, "
         "SUM(CASE WHEN stake_usd IS NULL THEN 1 ELSE 0 END) sin_usd, "
-        "SUM(CASE WHEN pnl_sol>0 THEN 1 ELSE 0 END) wins "
-        "FROM paper_trades WHERE status='cerrada'").fetchone()
+        "SUM(CASE WHEN COALESCE(pnl_usd, pnl_sol) > 0 THEN 1 ELSE 0 END) "
+        "wins FROM paper_trades WHERE status='cerrada'").fetchone()
     # Comparacion optimista vs REAL, solo sobre las cerradas que tienen
     # ambas cifras: la brecha entre las dos es el costo verdadero de
     # ejecutar (slippage + fees) y decide si el copy trading real da.
@@ -845,7 +948,13 @@ def resumen_text() -> str:
     if abiertas:
         out.append(f"📂 *Abiertas ({len(abiertas)}):*")
         now = time.time()
-        from card_image import _ago
+        try:
+            from card_image import _ago
+        except Exception:
+            # Pillow roto no puede tumbar /paper (politica del modulo).
+            def _ago(hs):
+                return (f"hace {hs:.1f}h" if hs < 24
+                        else f"hace {hs / 24:.1f}d")
         for r in abiertas[:15]:
             hs = (now - r["entry_ts"]) / HOUR
             su = _campo(r, "stake_usd")
@@ -890,6 +999,10 @@ def reset() -> tuple[int, int]:
     conn = get_conn()
     try:
         conn.execute("DELETE FROM paper_trades")
+        try:
+            conn.execute("DELETE FROM paper_fills")
+        except Exception as e:
+            print(f"· Reset: no pude limpiar paper_fills: {e}")
         try:
             conn.execute("DELETE FROM settings WHERE key LIKE 'mult_alert:%'")
         except Exception as e:
