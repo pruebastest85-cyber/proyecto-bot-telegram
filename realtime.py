@@ -47,6 +47,22 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # la misma operación dos veces.
 _SIGNAL_LOCK = threading.Lock()
 
+# Candados FINOS por mint (Ola 5, auditoria 19/8 - M4): dos transacciones
+# del mismo token en el mismo bloque llegan como dos hilos; apply_buy /
+# apply_sell hacen leer-modificar-escribir sobre positions (una compra se
+# perdia) y el "una posicion por token" de open_trade es SELECT-then-
+# INSERT (dos posiciones del mismo mint). Serializar por mint arregla
+# ambos sin frenar a los demas tokens.
+_MINT_LOCKS: dict = {}
+_MINT_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_mint(mint: str) -> threading.Lock:
+    with _MINT_LOCKS_GUARD:
+        if len(_MINT_LOCKS) > 4096:        # que no crezca sin tope
+            _MINT_LOCKS.clear()
+        return _MINT_LOCKS.setdefault(mint, threading.Lock())
+
 HELIUS_WEBHOOKS = "https://api.helius.xyz/v0/webhooks"
 
 IGNORED_MINTS = {
@@ -557,19 +573,48 @@ def _proc(txs: list[dict], conn):
             conn.commit()
             es_nueva = cur.rowcount
         if not es_nueva:
+            # RE-ENRIQUECIMIENTO (Ola 5, auditoria 19/8 - C14): si el
+            # primer pase murio por "database is locked" DESPUES de
+            # registrar la firma pero ANTES de guardar el precio, el
+            # reintento veia la señal "ya procesada" y la saltaba:
+            # price_usd quedaba NULL para siempre y la señal salia de
+            # track_outcomes y de los hitos. Ahora se completa lo
+            # medible (precio/simbolo/mc/liq); la alerta de ese caso
+            # raro se da por perdida, los DATOS no.
+            try:
+                _f = conn.execute(
+                    "SELECT price_usd FROM signals WHERE signature=?",
+                    (trade["signature"],)).fetchone()
+                if _f and _f["price_usd"] is None:
+                    _t2 = analyze_token(trade["mint"])
+                    if _t2.get("price"):
+                        conn.execute(
+                            "UPDATE signals SET price_usd=?, symbol=?, "
+                            "mc=?, liq=? WHERE signature=?",
+                            (_t2.get("price"), _t2.get("symbol"),
+                             _t2.get("mc"), _t2.get("liq"),
+                             trade["signature"]))
+                        conn.commit()
+                        print(f"· Señal {trade['signature'][:8]}… quedo a "
+                              "medias; datos completados")
+            except Exception as _e:
+                print(f"· Re-enriquecimiento falló: {_e}")
             continue  # ya procesada, no re-alertar
 
         es_compra = trade["side"] == "compra"
 
         # Posición de la billetera en este token (acumulación / profit)
+        # — bajo el candado del mint (M4): sin el, dos hilos del mismo
+        # token pisaban el leer-modificar-escribir de positions.
         from db import apply_buy, apply_sell
         tokens_tx = trade.get("tokens") or 0.0
-        if es_compra:
-            pos = apply_buy(conn, trade["wallet"], trade["mint"],
-                            trade["sol"], tokens_tx, trade["ts"])
-        else:
-            pos = apply_sell(conn, trade["wallet"], trade["mint"],
-                             trade["sol"], tokens_tx, trade["ts"])
+        with _lock_mint(trade["mint"]):
+            if es_compra:
+                pos = apply_buy(conn, trade["wallet"], trade["mint"],
+                                trade["sol"], tokens_tx, trade["ts"])
+            else:
+                pos = apply_sell(conn, trade["wallet"], trade["mint"],
+                                 trade["sol"], tokens_tx, trade["ts"])
         es_acum = bool(es_compra and pos.get("is_accumulation"))
 
         # ── CAMINO CALIENTE (copy trading rápido) ────────────────────
@@ -645,12 +690,15 @@ def _proc(txs: list[dict], conn):
                         if _p0 and _p0 > 0:
                             _t0 = {"price": _p0, "symbol": trade["mint"][:6],
                                    "mc": _mc0}
-                            if _accion[0] == "abrir":
-                                _pt.open_trade(conn, _accion[1], _t0, None,
-                                               origen=_accion[2])
-                            else:
-                                _pt.close_on_wallet_sell(conn, trade, _t0,
-                                                         pos)
+                            # Candado por mint (M4): el "una posicion por
+                            # token" de open_trade es SELECT-then-INSERT.
+                            with _lock_mint(trade["mint"]):
+                                if _accion[0] == "abrir":
+                                    _pt.open_trade(conn, _accion[1], _t0,
+                                                   None, origen=_accion[2])
+                                else:
+                                    _pt.close_on_wallet_sell(conn, trade,
+                                                             _t0, pos)
             except Exception as e:
                 print(f"· Camino caliente falló ({e}); sigue la vía normal")
 
@@ -677,7 +725,12 @@ def _proc(txs: list[dict], conn):
         conn.commit()
 
         # ── Motor predictivo: decide si emitir una señal PREDICTIVA ──
-        if es_compra:
+        # Solo para ⭐ (Ola 5, auditoria 19/8 - M5): el docstring de
+        # on_buy dice "cuando una ⭐ compra", pero corria para CUALQUIER
+        # vigilada — candidatas quedaban como "lider" de prediccion y el
+        # grafo de influencia (el caro) se reconstruia dentro de los
+        # hilos de ingesta por compras que no alimentan ninguna decision.
+        if es_compra and trade["wallet"] in stars:
             try:
                 from predictions import on_buy as _pred_on_buy
                 _pred_on_buy(conn, trade["wallet"], trade["mint"],

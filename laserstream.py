@@ -49,6 +49,33 @@ _ESTADO = {"conectado": False, "desde": None, "recibidas": 0, "error": None}
 CHEQUEO_LISTA_S = 60       # cada cuanto mirar si cambio la lista vigilada
 SILENCIO_MAX_S = 600       # 10 min sin mensajes → re-suscribir
 PERSISTIR_SLOT_S = 15      # el slot se escribe a settings como mucho asi
+N_WORKERS = 3              # hilos consumidores (Ola 5); la cola absorbe
+_COLA_MAX = 1000           # rafagas sin crear un hilo por mensaje
+
+import queue as _queue
+_COLA: "_queue.Queue" = _queue.Queue(maxsize=_COLA_MAX)
+_WORKERS: list = []
+
+
+def _worker() -> None:
+    from realtime import process_transactions
+    while True:
+        t = _COLA.get()
+        try:
+            process_transactions([t])
+        except Exception as e:
+            print(f"· LaserStream worker: {e}")
+        finally:
+            _COLA.task_done()
+
+
+def _arrancar_workers() -> None:
+    vivos = [w for w in _WORKERS if w.is_alive()]
+    for i in range(N_WORKERS - len(vivos)):
+        w = threading.Thread(target=_worker, daemon=True,
+                             name=f"ls-worker-{i}")
+        w.start()
+        _WORKERS.append(w)
 
 
 def activo() -> bool:
@@ -167,13 +194,18 @@ def _procesar(mensaje: str) -> None:
     _ESTADO["recibidas"] += 1
     if slot:
         _guardar_slot(int(slot))
+    # Pool FIJO de workers (Ola 5, auditoria 19/8 - M4): antes se lanzaba
+    # UN HILO POR MENSAJE — con rafagas de 150+ billeteras, decenas de
+    # hilos concurrentes peleando por la escritura de SQLite ("database
+    # is locked") y carreras en positions/paper. Ahora el socket solo
+    # encola y N workers consumen: la concurrencia queda acotada y las
+    # rafagas se absorben en la cola en vez de en hilos.
     try:
-        from realtime import process_transactions
-        # En su propio hilo, igual que hace el webhook: no bloquear el socket
-        threading.Thread(target=process_transactions, args=([t],),
-                         daemon=True).start()
-    except Exception as e:
-        print(f"· LaserStream: no se pudo procesar ({e})")
+        _COLA.put_nowait(t)
+    except Exception:
+        _ESTADO["descartadas"] = _ESTADO.get("descartadas", 0) + 1
+        print("· LaserStream: cola llena; transaccion descartada "
+              f"({_ESTADO['descartadas']} en total)")
 
 
 def _bucle() -> None:
@@ -283,6 +315,7 @@ def start() -> bool:
     if _HILO and _HILO.is_alive():
         return True
     _ULTIMO_SLOT[0] = _cargar_slot()
+    _arrancar_workers()
     _HILO = threading.Thread(target=_bucle, daemon=True, name="laserstream")
     _HILO.start()
     return True
