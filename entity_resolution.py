@@ -16,6 +16,7 @@ Combina las tres en una confianza 0-100 y une por transitividad en
 """
 
 import calendar
+import threading
 import time
 from collections import defaultdict
 from statistics import median
@@ -23,6 +24,7 @@ from statistics import median
 from db import get_conn
 
 _CACHE = {"e": None, "ts": 0.0}
+_BUILD_LOCK = threading.Lock()
 _TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
                    # cada 10 min y forzaba una reconstruccion en CADA
                    # pasada. Son datos historicos: media hora de
@@ -50,38 +52,58 @@ def _pair_confidence(shared, gaps, size_ratios):
 
 
 def _build():
+    # PARES EN SQL (Ola 5, auditoria 19/8 - C15): esto era el mismo
+    # O(n²) en memoria que ya mato el servicio en influence.py (un token
+    # con 500 compradores = 124.750 entradas de dict con listas, cacheadas
+    # 30 min). Ahora la base agrega y devuelve SOLO las parejas con
+    # shared >= MIN_SHARED (las de menos las descartaba _pair_confidence
+    # igualmente); el detalle fino (gaps/montos) se lee solo para esas
+    # pocas parejas calificadas.
     conn = get_conn()
+    pair = {}
+    alias = {}
     try:
-        rows = conn.execute(
-            """SELECT a.mint, a.wallet, a.buy_time, a.buy_sol, w.alias
-               FROM appearances a JOIN wallets w ON w.address = a.wallet
-               WHERE COALESCE(w.is_bot,0)=0""").fetchall()
+        pares = conn.execute(
+            """SELECT a1.wallet wa, a2.wallet wb, COUNT(*) shared
+               FROM appearances a1
+               JOIN appearances a2 ON a2.mint = a1.mint
+                    AND a2.wallet > a1.wallet
+               JOIN wallets w1 ON w1.address = a1.wallet
+                    AND COALESCE(w1.is_bot, 0) = 0
+               JOIN wallets w2 ON w2.address = a2.wallet
+                    AND COALESCE(w2.is_bot, 0) = 0
+               GROUP BY a1.wallet, a2.wallet
+               HAVING COUNT(*) >= ?""", (MIN_SHARED,)).fetchall()
+        for pr in pares:
+            wa, wb = pr["wa"], pr["wb"]
+            det = conn.execute(
+                """SELECT a1.buy_time t1, a2.buy_time t2,
+                          a1.buy_sol s1, a2.buy_sol s2
+                   FROM appearances a1
+                   JOIN appearances a2 ON a2.mint = a1.mint
+                        AND a2.wallet = ?
+                   WHERE a1.wallet = ?""", (wb, wa)).fetchall()
+            gaps, sizes = [], []
+            for d in det:
+                ta, tb = _ts(d["t1"]), _ts(d["t2"])
+                if ta is not None and tb is not None:
+                    gaps.append(abs(ta - tb))
+                if d["s1"] and d["s2"]:
+                    sizes.append(min(d["s1"], d["s2"])
+                                 / max(d["s1"], d["s2"]))
+            pair[(wa, wb)] = {"shared": pr["shared"], "gaps": gaps,
+                              "sizes": sizes}
+        # Aliases solo de las billeteras que aparecen en parejas
+        # calificadas (en trozos: SQLite acepta ~999 parametros).
+        miembros = sorted({w for k in pair for w in k})
+        for i in range(0, len(miembros), 500):
+            trozo = miembros[i:i + 500]
+            for r in conn.execute(
+                    "SELECT address, alias FROM wallets WHERE address IN "
+                    f"({','.join('?' * len(trozo))})", tuple(trozo)):
+                alias[r["address"]] = r["alias"] or r["address"][:6]
     finally:
         conn.close()
-
-    alias = {}
-    by_token = defaultdict(list)
-    for r in rows:
-        alias[r["wallet"]] = r["alias"] or r["wallet"][:6]
-        by_token[r["mint"]].append((r["wallet"], _ts(r["buy_time"]),
-                                    r["buy_sol"]))
-
-    pair = defaultdict(lambda: {"shared": 0, "gaps": [], "sizes": []})
-    for entries in by_token.values():
-        n = len(entries)
-        for i in range(n):
-            wa, ta, sa = entries[i]
-            for j in range(i + 1, n):
-                wb, tb, sb = entries[j]
-                if wa == wb:
-                    continue
-                key = tuple(sorted((wa, wb)))
-                p = pair[key]
-                p["shared"] += 1
-                if ta is not None and tb is not None:
-                    p["gaps"].append(abs(ta - tb))
-                if sa and sb:
-                    p["sizes"].append(min(sa, sb) / max(sa, sb))
 
     # aristas fuertes → union-find
     edges = {}
@@ -144,12 +166,17 @@ def _build():
 def _graph():
     if _CACHE["e"] is not None and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["e"]
-    # Soltar el viejo ANTES de construir el nuevo (ver alpha.graph).
-    _CACHE["e"] = None
-    g = _build()
-    _CACHE["e"] = g
-    _CACHE["ts"] = time.time()
-    return g
+    # Candado de construccion (Ola 5): sin el, predictions_job y un /adn
+    # simultaneos con el cache vencido construian DOS grafos a la vez.
+    with _BUILD_LOCK:
+        if _CACHE["e"] is not None and time.time() - _CACHE["ts"] < _TTL:
+            return _CACHE["e"]
+        # Soltar el viejo ANTES de construir el nuevo (ver alpha.graph).
+        _CACHE["e"] = None
+        g = _build()
+        _CACHE["e"] = g
+        _CACHE["ts"] = time.time()
+        return g
 
 
 def entity_for(address: str) -> dict | None:

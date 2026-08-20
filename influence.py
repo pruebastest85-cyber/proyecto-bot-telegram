@@ -360,22 +360,40 @@ def role(address: str) -> str | None:
     return "Seguidor tardío"
 
 
+def _indice_aristas(g) -> tuple[dict, dict]:
+    """Adyacencia por billetera, construida UNA vez por grafo (Ola 5,
+    auditoria 19/8 - M16): influence() recorria TODAS las aristas en
+    cada llamada, y hidden_leaders() la llama por cada billetera
+    candidata — O(billeteras × aristas), minutos de CPU con la escala
+    real (~1,8 M de parejas). Con el indice, cada consulta es O(grado).
+    Se cuelga del propio dict del grafo: muere con el."""
+    idx = g.get("_idx")
+    if idx is None:
+        salientes, entrantes = {}, {}
+        for (a, b) in g["edges"]:
+            salientes.setdefault(a, []).append(b)
+            entrantes.setdefault(b, []).append(a)
+        idx = (salientes, entrantes)
+        g["_idx"] = idx
+    return idx
+
+
 def influence(address: str) -> dict | None:
     g = graph()
     if address not in g["wallets"]:
         return None
+    salientes, entrantes = _indice_aristas(g)
     followers, leaders = [], []
-    for (a, b), e in g["edges"].items():
-        if a == address:
-            wgt, sh, gap = _weight(g, a, b)
-            if wgt is not None and wgt >= STRONG_EDGE:
-                followers.append({"wallet": b, "alias": g["wallets"].get(b, {}).get("alias", b[:6]),
-                                  "prob": round(100 * wgt), "eta_s": gap, "shared": sh})
-        if b == address:
-            wgt, sh, gap = _weight(g, a, b)
-            if wgt is not None and wgt >= STRONG_EDGE:
-                leaders.append({"wallet": a, "alias": g["wallets"].get(a, {}).get("alias", a[:6]),
-                                "prob": round(100 * wgt), "eta_s": gap, "shared": sh})
+    for b in salientes.get(address, ()):
+        wgt, sh, gap = _weight(g, address, b)
+        if wgt is not None and wgt >= STRONG_EDGE:
+            followers.append({"wallet": b, "alias": g["wallets"].get(b, {}).get("alias", b[:6]),
+                              "prob": round(100 * wgt), "eta_s": gap, "shared": sh})
+    for a in entrantes.get(address, ()):
+        wgt, sh, gap = _weight(g, a, address)
+        if wgt is not None and wgt >= STRONG_EDGE:
+            leaders.append({"wallet": a, "alias": g["wallets"].get(a, {}).get("alias", a[:6]),
+                            "prob": round(100 * wgt), "eta_s": gap, "shared": sh})
     followers.sort(key=lambda x: x["prob"], reverse=True)
     leaders.sort(key=lambda x: x["prob"], reverse=True)
     w = g["wallets"][address]

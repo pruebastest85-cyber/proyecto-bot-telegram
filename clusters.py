@@ -27,11 +27,17 @@ MIN_SHARED = 2        # nº mínimo de tokens ganadores compartidos por par
 
 def _early_data(conn):
     """Devuelve (by_token: {mint:set(wallets)}, ranks: {(mint,wallet):rank})."""
+    # Rank NULL EXCLUIDO (Ola 5, auditoria 19/8 - C16): wallet_analyzer
+    # escribe rank_real=None a proposito cuando la historia del token
+    # esta incompleta ("mejor sin dato que con un dato falso") — y aqui
+    # ese NULL pasaba el filtro de "comprador temprano", asi que TODOS
+    # los compradores de esos tokens contaban como tempranos: clusters
+    # inventados de co-compradores tardios. Sin dato no es evidencia.
     rows = conn.execute(
         """SELECT a.mint, a.wallet, a.buy_rank
            FROM appearances a
            JOIN wallets w ON w.address = a.wallet
-           WHERE (a.buy_rank IS NULL OR a.buy_rank <= ?)
+           WHERE a.buy_rank <= ?
              AND COALESCE(w.is_bot, 0) = 0
            ORDER BY a.mint""",
         (EARLY_RANK,)).fetchall()
