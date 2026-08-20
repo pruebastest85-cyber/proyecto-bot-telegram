@@ -85,6 +85,25 @@ def consistency_score(p) -> int:
     f_rmed = 1.0 if (rmed or 0) > 0 else 0.0
     f_recent = 1.0 if (net30 or 0) > 0 else 0.3
 
+    # Metricas PERFECTAS descontadas por confianza estadistica (v2,
+    # auditoria 19/8): una billetera SIN perdidas cerradas recibe el
+    # centinela profit_factor=99.99 y drawdown=0 — con 10 ganadas
+    # seguidas (MIN_CLOSED_TRADES=10 en el bot local) eso daba
+    # f_pf=f_dd=1.0, consistencia ~90 y ⭐ Elite por la via
+    # "excepcional": pura supervivencia sobre muestra chica. La
+    # perfeccion solo vale entera cuando la muestra la respalda
+    # (stat_confidence: n/(n+11) → 10 ops=48%, 30=73%, 100=90%).
+    # Con historial real el descuento desaparece solo.
+    try:
+        from reliability import stat_confidence
+        _conf = stat_confidence(p) / 100.0
+    except Exception:
+        _conf = 1.0
+    if pf is not None and pf >= 99:          # centinela "sin perdidas"
+        f_pf *= _conf
+    if dd is not None and dd <= 0:           # "sin drawdown" = sin perder
+        f_dd *= _conf
+
     score = 100 * (0.28 * f_pf + 0.20 * f_dd + 0.20 * f_div +
                    0.12 * f_sh + 0.10 * f_rmed + 0.10 * f_recent)
     return round(score)
