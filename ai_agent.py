@@ -53,6 +53,75 @@ TOOLS = [
                      "y análisis (tarda varios minutos). Requiere "
                      "confirmación del usuario."),
      "input_schema": {"type": "object", "properties": {}}},
+    # ── Consultas con parámetros (Ola 9, 21/8): la IA ya no depende del
+    # snapshot fijo — puede pedir datos concretos de la base y encadenar. ──
+    {"name": "tokens_con_estrellas",
+     "description": ("Tokens donde MÁS billeteras ⭐ distintas compraron "
+                     "en las últimas N horas, con cuántas entraron y "
+                     "cuándo. Ideal para '¿dónde se está metiendo la smart "
+                     "money ahora?'"),
+     "input_schema": {"type": "object", "properties": {
+         "horas": {"type": "number",
+                   "description": "ventana en horas, 1 a 48 (default 6)"}}}},
+    {"name": "buscar_billetera",
+     "description": ("Busca billeteras por alias o trozo de dirección. "
+                     "Devuelve dirección completa, alias, grado, score, "
+                     "clase IA y si está rastreada. Úsala SIEMPRE que el "
+                     "usuario nombre una billetera por su alias."),
+     "input_schema": {"type": "object", "properties": {
+         "texto": {"type": "string", "description": "alias o fragmento"}},
+         "required": ["texto"]}},
+    {"name": "senales_de_billetera",
+     "description": ("Últimas señales (compras/ventas) de UNA billetera con "
+                     "su resultado medido a 1h/24h."),
+     "input_schema": {"type": "object", "properties": {
+         "address": {"type": "string", "description": "dirección completa"},
+         "n": {"type": "number", "description": "cuántas, máx 20"}},
+         "required": ["address"]}},
+    {"name": "top_billeteras",
+     "description": ("El top N del ranking real (el que alerta y se copia) "
+                     "con alias, score, PnL y clase."),
+     "input_schema": {"type": "object", "properties": {
+         "n": {"type": "number", "description": "cuántas, máx 30"}}}},
+    {"name": "evidencia_billetera",
+     "description": ("El PORQUÉ de una billetera: sus apariciones tempranas "
+                     "en tokens ganadores registradas por el sistema."),
+     "input_schema": {"type": "object", "properties": {
+         "address": {"type": "string"}}, "required": ["address"]}},
+    {"name": "estado_sistema",
+     "description": ("Estado en vivo por sección: 'paper' (simulación y "
+                     "PnL), 'posiciones' (paper abiertas), 'rendimiento' "
+                     "(win rate de señales), 'salud' (chequeos del "
+                     "sistema), 'helius' (créditos del ciclo)."),
+     "input_schema": {"type": "object", "properties": {
+         "seccion": {"type": "string",
+                     "description": ("una de: paper, posiciones, "
+                                     "rendimiento, salud, helius")}},
+         "required": ["seccion"]}},
+    # ── Ajustes con confirmación (Ola 9): lista blanca y rangos duros. ──
+    {"name": "cambiar_top_alertas",
+     "description": ("Cambia cuántas billeteras del top alertan y disparan "
+                     "la copia (0 = sin límite, todas las ⭐). Requiere "
+                     "confirmación del usuario."),
+     "input_schema": {"type": "object", "properties": {
+         "n": {"type": "number", "description": "0 a 100"}},
+         "required": ["n"]}},
+    {"name": "configurar_paper",
+     "description": ("Configura el paper trading: encenderlo/apagarlo o "
+                     "cambiar el tope de SOL por señal. Requiere "
+                     "confirmación del usuario."),
+     "input_schema": {"type": "object", "properties": {
+         "accion": {"type": "string",
+                    "description": "una de: encender, apagar, max_sol"},
+         "valor": {"type": "number",
+                   "description": ("solo para max_sol: tope en SOL, "
+                                   "0.05 a 10")}},
+         "required": ["accion"]}},
+    {"name": "deshacer_ajuste",
+     "description": ("Revierte el ÚLTIMO ajuste hecho por chat (umbral, "
+                     "top alertas o paper) a su valor anterior. Requiere "
+                     "confirmación del usuario."),
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "cambiar_umbral_senal",
      "description": ("Cambia el umbral mínimo del score de señal (0-100). "
                      "Señales de compra con score menor no alertan (pero sí "
@@ -76,7 +145,8 @@ TOOLS_OPENAI = [{"type": "function",
                 for t in TOOLS]
 
 MODIFYING = {"descartar_billetera", "rastrear_billetera", "correr_ciclo",
-             "cambiar_umbral_senal"}
+             "cambiar_umbral_senal", "cambiar_top_alertas",
+             "configurar_paper", "deshacer_ajuste"}
 
 SYSTEM = (
     "Eres el asistente del sistema de rastreo de billeteras rentables en "
@@ -84,9 +154,13 @@ SYSTEM = (
     "últimos mensajes de la conversación. Responde en español, breve "
     "y directo, sin markdown pesado. Abrevia direcciones a 8 caracteres al "
     "mencionarlas (pero pasa la dirección COMPLETA a las herramientas). "
-    "Usa las herramientas cuando haga falta; para preguntas de datos usa "
-    "consultar_base. Para acciones que modifican, invoca la herramienta "
-    "directamente: el sistema le pedirá confirmación al usuario, no tú.")
+    "Usa las herramientas cuando haga falta y encadénalas si la pregunta "
+    "lo pide (p. ej. buscar_billetera para resolver un alias y luego "
+    "senales_de_billetera con la dirección). Cita SOLO números que salgan "
+    "de los resultados de las herramientas: si no consultaste, no inventes. "
+    "Para acciones que modifican, invoca la herramienta directamente: el "
+    "sistema le pedirá confirmación al usuario, no tú. El bot NO puede "
+    "mover dinero real; el paper trading es simulación.")
 
 HISTORY_TURNS = 12   # mensajes de memoria (6 intercambios)
 MAX_PASOS = 4        # iteraciones máximas del loop de herramientas
@@ -149,6 +223,148 @@ def _exec_read(name: str, args: dict) -> str:
                     "horas_activas_24": p.get("active_hours_24"),
                     "track_record": tr}
             return json.dumps(comp, ensure_ascii=False, default=str)
+        if name == "tokens_con_estrellas":
+            import time as _t
+            try:
+                horas = max(1.0, min(48.0, float(args.get("horas") or 6)))
+            except (TypeError, ValueError):
+                horas = 6.0
+            conn = get_conn()
+            try:
+                rows = conn.execute(
+                    """SELECT s.mint, MAX(s.symbol) symbol,
+                              COUNT(DISTINCT s.wallet) estrellas,
+                              MIN(s.ts) primera_ts, MAX(s.ts) ultima_ts
+                       FROM signals s JOIN wallets w
+                         ON w.address = s.wallet AND w.is_tracked = 1
+                       WHERE s.side='compra' AND s.ts >= ?
+                       GROUP BY s.mint
+                       ORDER BY estrellas DESC, ultima_ts DESC
+                       LIMIT 12""",
+                    (int(_t.time() - horas * 3600),)).fetchall()
+                ahora = _t.time()
+                out = [{"mint": r["mint"], "symbol": r["symbol"],
+                        "estrellas_compraron": r["estrellas"],
+                        "primera_hace_min": round((ahora - r["primera_ts"]) / 60),
+                        "ultima_hace_min": round((ahora - r["ultima_ts"]) / 60)}
+                       for r in rows]
+            finally:
+                conn.close()
+            return json.dumps({"ventana_horas": horas, "tokens": out},
+                              ensure_ascii=False)[:4000]
+        if name == "buscar_billetera":
+            texto = (args.get("texto") or "").strip()
+            if len(texto) < 2:
+                return "Dame al menos 2 caracteres del alias o dirección."
+            conn = get_conn()
+            try:
+                rows = conn.execute(
+                    """SELECT address, alias, grade, wallet_score, ai_class,
+                              is_tracked, winning_tokens_count
+                       FROM wallets
+                       WHERE alias LIKE ? OR address LIKE ?
+                       ORDER BY COALESCE(is_tracked,0) DESC,
+                                COALESCE(wallet_score,0) DESC
+                       LIMIT 8""",
+                    (f"%{texto}%", f"{texto}%")).fetchall()
+            finally:
+                conn.close()
+            if not rows:
+                return f"Ninguna billetera coincide con {texto!r}."
+            return json.dumps([dict(r) for r in rows],
+                              ensure_ascii=False, default=str)[:4000]
+        if name == "senales_de_billetera":
+            import time as _t
+            addr = (args.get("address") or "").strip()
+            try:
+                n = max(1, min(20, int(float(args.get("n") or 10))))
+            except (TypeError, ValueError):
+                n = 10
+            conn = get_conn()
+            try:
+                rows = conn.execute(
+                    """SELECT symbol, mint, side, sol, ts, chg_1h, chg_24h
+                       FROM signals WHERE wallet=?
+                       ORDER BY ts DESC LIMIT ?""", (addr, n)).fetchall()
+            finally:
+                conn.close()
+            if not rows:
+                return "Esa billetera no tiene señales registradas."
+            ahora = _t.time()
+            out = [{"symbol": r["symbol"] or r["mint"][:8],
+                    "side": r["side"], "sol": round(r["sol"] or 0, 2),
+                    "hace_h": round((ahora - r["ts"]) / 3600, 1),
+                    "chg_1h_pct": r["chg_1h"], "chg_24h_pct": r["chg_24h"]}
+                   for r in rows]
+            return json.dumps(out, ensure_ascii=False)[:4000]
+        if name == "top_billeteras":
+            try:
+                n = max(3, min(30, int(float(args.get("n") or 10))))
+            except (TypeError, ValueError):
+                n = 10
+            from db import top_wallets
+            conn = get_conn()
+            try:
+                rows = top_wallets(conn, n)
+                out = [{"puesto": i, "alias": r["alias"],
+                        "address": r["address"],
+                        "score": r["wallet_score"],
+                        "pnl_total_sol_ult_evaluacion": r["pnl_total"]}
+                       for i, r in enumerate(rows, 1)]
+            finally:
+                conn.close()
+            return json.dumps(out, ensure_ascii=False, default=str)[:4000]
+        if name == "evidencia_billetera":
+            from db import wallet_evidence
+            addr = (args.get("address") or "").strip()
+            conn = get_conn()
+            try:
+                rows = wallet_evidence(conn, addr)
+            finally:
+                conn.close()
+            if not rows:
+                return "Sin evidencia registrada para esa dirección."
+            return json.dumps([r["reason"] for r in rows[:10]],
+                              ensure_ascii=False)[:4000]
+        if name == "estado_sistema":
+            seccion = (args.get("seccion") or "").lower().strip()
+            if seccion == "paper":
+                from paper_trading import resumen_text
+                return resumen_text()[:4000]
+            if seccion == "posiciones":
+                import time as _t
+                conn = get_conn()
+                try:
+                    rows = conn.execute(
+                        """SELECT symbol, mint, entry_price, entry_ts,
+                                  stake_sol, origen
+                           FROM paper_trades WHERE status='abierta'
+                           ORDER BY entry_ts DESC LIMIT 15""").fetchall()
+                finally:
+                    conn.close()
+                if not rows:
+                    return "No hay posiciones de paper abiertas."
+                ahora = _t.time()
+                out = [{"symbol": r["symbol"],
+                        "abierta_hace_h": round((ahora - r["entry_ts"]) / 3600, 1),
+                        "stake_sol": r["stake_sol"],
+                        "origen": r["origen"] or "top"} for r in rows]
+                return json.dumps(out, ensure_ascii=False)[:4000]
+            if seccion == "rendimiento":
+                from rendimiento import rendimiento_text
+                return rendimiento_text()[:4000]
+            if seccion == "salud":
+                from salud import salud_text
+                return salud_text()[:4000]
+            if seccion == "helius":
+                from helius_budget import estado_line
+                conn = get_conn()
+                try:
+                    return estado_line(conn)
+                finally:
+                    conn.close()
+            return ("Sección desconocida. Usa: paper, posiciones, "
+                    "rendimiento, salud o helius.")
     except Exception as e:
         return f"Error ejecutando {name}: {e}"
     return "Herramienta desconocida."
@@ -316,6 +532,36 @@ def chat(user_text: str):
             "(/ialocal <url>) o configura ANTHROPIC_API_KEY."), None
 
 
+def _registrar_ajuste(conn, clave: str, antes, despues):
+    """Bitácora de ajustes hechos por chat (Ola 9): pila de hasta 10 en
+    settings 'ajustes_log', para poder deshacer el último."""
+    import time as _t
+    from db import get_setting, set_setting
+    try:
+        log = json.loads(get_setting(conn, "ajustes_log", "[]") or "[]")
+    except (ValueError, TypeError):
+        log = []
+    log.append({"ts": int(_t.time()), "clave": clave,
+                "antes": antes, "despues": despues})
+    set_setting(conn, "ajustes_log", json.dumps(log[-10:],
+                                                ensure_ascii=False))
+
+
+def _deshacer_ultimo(conn) -> str:
+    from db import get_setting, set_setting
+    try:
+        log = json.loads(get_setting(conn, "ajustes_log", "[]") or "[]")
+    except (ValueError, TypeError):
+        log = []
+    if not log:
+        return "No hay ajustes hechos por chat que deshacer."
+    ult = log.pop()
+    set_setting(conn, ult["clave"], str(ult["antes"]))
+    set_setting(conn, "ajustes_log", json.dumps(log, ensure_ascii=False))
+    return (f"↩️ Deshecho: {ult['clave']} vuelve de "
+            f"{ult['despues']} a {ult['antes']}.")
+
+
 def describe_action(action: dict) -> str:
     tool, args = action["tool"], action.get("args", {})
     addr = (args.get("address") or "")[:12]
@@ -332,6 +578,25 @@ def describe_action(action: dict) -> str:
         except (TypeError, ValueError):
             pass
         return f"🎯 Fijar el umbral mínimo de señal en {args.get('valor')}/100"
+    if tool == "cambiar_top_alertas":
+        try:
+            n = int(float(args.get("n", 0)))
+        except (TypeError, ValueError):
+            n = 0
+        return ("📡 Quitar el límite: alertarán TODAS las ⭐" if n == 0
+                else f"📡 Que alerten solo las top {n} billeteras")
+    if tool == "configurar_paper":
+        acc = (args.get("accion") or "").lower().strip()
+        if acc == "encender":
+            return "🧪 ENCENDER el paper trading (simulación)"
+        if acc == "apagar":
+            return "🧪 APAGAR el paper trading (simulación)"
+        if acc == "max_sol":
+            return (f"🧪 Fijar el tope del paper en "
+                    f"{args.get('valor')} SOL por señal")
+        return f"🧪 Paper: acción {acc!r} (no reconocida)"
+    if tool == "deshacer_ajuste":
+        return "↩️ Deshacer el último ajuste hecho por chat"
     return tool
 
 
@@ -348,6 +613,58 @@ def execute_action(action: dict) -> str:
         if tool == "correr_ciclo":
             from telegram_bot import run_full_cycle
             return run_full_cycle()
+        if tool == "cambiar_top_alertas":
+            from db import get_setting, set_setting
+            try:
+                n = max(0, min(100, int(float(args.get("n", 0)))))
+            except (TypeError, ValueError):
+                return "Valor inválido para top de alertas (usa 0-100)."
+            conn = get_conn()
+            try:
+                antes = get_setting(conn, "top_alertas", "30")
+                set_setting(conn, "top_alertas", str(n))
+                _registrar_ajuste(conn, "top_alertas", antes, str(n))
+            finally:
+                conn.close()
+            return ("📡 Sin límite: ahora alertan TODAS las ⭐." if n == 0
+                    else f"📡 Hecho: alertan las top {n} billeteras "
+                         f"(antes: {antes}).")
+        if tool == "configurar_paper":
+            from db import get_setting, set_setting
+            acc = (args.get("accion") or "").lower().strip()
+            conn = get_conn()
+            try:
+                if acc in ("encender", "apagar"):
+                    antes = get_setting(conn, "paper_enabled", "1")
+                    nuevo = "1" if acc == "encender" else "0"
+                    set_setting(conn, "paper_enabled", nuevo)
+                    _registrar_ajuste(conn, "paper_enabled", antes, nuevo)
+                    return ("🧪 Paper trading ENCENDIDO." if nuevo == "1"
+                            else "🧪 Paper trading APAGADO (las posiciones "
+                                 "abiertas se siguen gestionando).")
+                if acc == "max_sol":
+                    try:
+                        v = float(args.get("valor"))
+                    except (TypeError, ValueError):
+                        return "Falta el valor en SOL (0.05 a 10)."
+                    if not (0.05 <= v <= 10):
+                        return ("Fuera de rango: el tope debe estar entre "
+                                "0.05 y 10 SOL. No lo cambié.")
+                    antes = get_setting(conn, "paper_max_sol", "1.0")
+                    set_setting(conn, "paper_max_sol", str(v))
+                    _registrar_ajuste(conn, "paper_max_sol", antes, str(v))
+                    return (f"🧪 Tope del paper: {v:g} SOL por señal "
+                            f"(antes: {antes}).")
+                return ("Acción de paper no reconocida: usa encender, "
+                        "apagar o max_sol.")
+            finally:
+                conn.close()
+        if tool == "deshacer_ajuste":
+            conn = get_conn()
+            try:
+                return _deshacer_ultimo(conn)
+            finally:
+                conn.close()
         if tool == "cambiar_umbral_senal":
             from db import set_setting
             v_raw = float(args.get("valor", 0))
@@ -359,6 +676,12 @@ def execute_action(action: dict) -> str:
                         "optimizarse solo con el historial medido.")
             v = max(0, min(100, v_raw))
             conn = get_conn()
+            try:
+                from db import get_setting as _gs
+                _registrar_ajuste(conn, "min_signal_score",
+                                  _gs(conn, "min_signal_score", "0"), str(v))
+            except Exception:
+                pass
             set_setting(conn, "min_signal_score", v)
             # El ajuste MANUAL manda (19/8): sin esta marca, el auto-
             # ajustador de signal_tracker lo pisaba a los 15 minutos.
