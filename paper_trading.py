@@ -110,6 +110,23 @@ def _usd_firmado(x) -> str:
 
 # ───────────────────────── Apertura ───────────────────────────────────────
 
+def _symbol_db(conn, mint: str) -> str | None:
+    """(21/8) Ticker desde la PROPIA base: señales previas del mint o el
+    catalogo de ganadores ya lo traen casi siempre. Cero red, cero espera.
+    Descarta los placebos guardados que son el trozo del contrato."""
+    try:
+        for sql in ("SELECT symbol FROM signals WHERE mint=? AND symbol "
+                    "IS NOT NULL AND symbol<>'' ORDER BY ts DESC LIMIT 1",
+                    "SELECT symbol FROM winning_tokens WHERE mint=? "
+                    "AND symbol IS NOT NULL AND symbol<>''"):
+            r = conn.execute(sql, (mint,)).fetchone()
+            if r and r["symbol"] and not mint.startswith(r["symbol"]):
+                return str(r["symbol"]).strip()
+    except Exception:
+        pass
+    return None
+
+
 def _symbol_rapido(mint: str) -> str | None:
     """Ticker del token en una consulta corta a DexScreener (para que la
     tarjeta del camino caliente no salga con el pedazo de contrato)."""
@@ -184,8 +201,17 @@ def open_trade(conn, trade: dict, token: dict, score,
     # salia con el pedazo de contrato ("7xKq4B"). Consulta relampago del
     # simbolo (19/8): ~300 ms que no frenan la copia; si falla, el
     # backfill posterior corrige la base igual que siempre.
-    sym = token.get("symbol") or _symbol_rapido(trade["mint"]) \
-        or trade["mint"][:6]
+    # (21/8) El camino caliente manda el PEDAZO DE CONTRATO como
+    # "symbol" (mint[:6]) y el `or` lo daba por bueno: el buscador
+    # rapido nunca corria y la tarjeta decia "X4PLbt" en vez de
+    # "EARNBOT". Ahora ese placebo se descarta, y antes de ir a
+    # DexScreener se mira la PROPIA base (señales previas del mint ya
+    # traen el ticker): gratis e instantaneo.
+    _sym_tok = (token.get("symbol") or "").strip()
+    if _sym_tok and trade["mint"].startswith(_sym_tok):
+        _sym_tok = None                      # es el trozo del contrato
+    sym = (_sym_tok or _symbol_db(conn, trade["mint"])
+           or _symbol_rapido(trade["mint"]) or trade["mint"][:6])
     # Importe en dólares al cambio de AHORA. Se guarda, no se recalcula
     # al cerrar: lo que quieres saber es cuánto dinero habrías puesto.
     su = _sol_a_usd()
