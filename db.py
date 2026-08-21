@@ -770,7 +770,20 @@ def apply_sell(conn, wallet: str, mint: str, sol: float, tokens: float,
     sells0 = row["sells"] or 0
     frac = min(1.0, tokens / tokens0) if tokens0 > 0 else 1.0
     cost_of_sold = cost0 * frac
-    realized_this = sol - cost_of_sold
+    # (Ola 8, 21/8) Si la billetera vende MAS tokens de los que el bot le
+    # vio comprar (compras anteriores al rastreo), solo la fraccion
+    # rastreada de los ingresos entra al PnL: antes TODOS los ingresos se
+    # comparaban contra el costo de la parte observada y el "Profit
+    # realizado" salia inflado (caso real: 106 posiciones sobrevendidas
+    # en la base el 21/8). El excedente se reporta aparte en
+    # tokens_no_rastreados para que la alerta pueda decirlo.
+    if tokens > tokens0:
+        proceeds_rastreados = sol * (tokens0 / tokens) if tokens > 0 else 0.0
+        no_rastreados = tokens - tokens0
+    else:
+        proceeds_rastreados = sol
+        no_rastreados = 0.0
+    realized_this = proceeds_rastreados - cost_of_sold
     tokens_left = max(0.0, tokens0 - tokens)
     cost_left = max(0.0, cost0 - cost_of_sold)
     realized_total = real0 + realized_this
@@ -783,7 +796,7 @@ def apply_sell(conn, wallet: str, mint: str, sol: float, tokens: float,
     return {"known": True, "tokens_sold": tokens, "proceeds": sol,
             "realized_this": realized_this, "realized_total": realized_total,
             "remaining_tokens": tokens_left, "pct_sold": frac * 100,
-            "fully_sold": fully}
+            "fully_sold": fully, "tokens_no_rastreados": no_rastreados}
 
 
 def wallet_positions(conn, wallet: str, limit: int = 25):

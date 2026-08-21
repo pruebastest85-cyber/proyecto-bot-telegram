@@ -464,9 +464,13 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None):
     if pnl_neto is not None:
         linea_neto = (f"\n⚖️ Neto real (Jupiter, con slippage y fees): "
                       f"*{_usd_firmado(pnl_neto)}*")
+    # (Ola 8, 21/8) Al cerrar "sin liquidez" el precio de salida es un
+    # SUPUESTO (par muerto, -99%), no una cotizacion: se dice.
+    nota_precio = ("\n_(precio de salida asumido: el par ya no cotiza)_"
+                   if reason == "sin liquidez" else "")
     _tg(f"{icon} *Paper cerrada* ({reason}): *{row['symbol']}*\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
-        f"*${_precio(price)}*  ({pct:+.0f}%)\n"
+        f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}\n"
         f"{linea_pnl}{linea_neto}\n"
         f"Resumen: /paper")
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: "
@@ -821,6 +825,9 @@ def resumen_text() -> str:
         "SELECT COUNT(*) n, SUM(pnl_sol) pnl, SUM(pnl_usd) pnl_usd, "
         "SUM(stake_usd) invertido, "
         "SUM(CASE WHEN stake_usd IS NULL THEN 1 ELSE 0 END) sin_usd, "
+        "SUM(CASE WHEN pnl_usd IS NULL AND pnl_sol IS NULL "
+        "THEN 1 ELSE 0 END) sin_pnl, "
+        "SUM(CASE WHEN pnl_usd IS NULL THEN 1 ELSE 0 END) sin_usd_pnl, "
         "SUM(CASE WHEN COALESCE(pnl_usd, pnl_sol) > 0 THEN 1 ELSE 0 END) "
         "wins FROM paper_trades WHERE status='cerrada'").fetchone()
     # Comparacion optimista vs REAL, solo sobre las cerradas que tienen
@@ -854,6 +861,7 @@ def resumen_text() -> str:
         org = conn.execute(
             "SELECT COALESCE(origen,'top') o, COUNT(*) n, "
             "SUM(pnl_usd) pnl, "
+            "SUM(CASE WHEN pnl_usd IS NOT NULL THEN 1 ELSE 0 END) n_dato, "
             "SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END) wins "
             "FROM paper_trades WHERE status<>'abierta' "
             "GROUP BY COALESCE(origen,'top')").fetchall()
@@ -871,13 +879,23 @@ def resumen_text() -> str:
         pnl_t = cer["pnl"] or 0.0
         pnl_usd_t = cer["pnl_usd"]
         invertido = cer["invertido"]
-        wr = 100.0 * (cer["wins"] or 0) / n_c
+        # (Ola 8, 21/8) Filas legadas sin NINGUN pnl no pueden "ganar":
+        # dejarlas en el denominador hundia el win rate; y el PnL total
+        # en $ las excluye del SUM sin decirlo — ahora ambas cosas se ven.
+        sin_pnl = cer["sin_pnl"] or 0
+        con_dato = n_c - sin_pnl
+        wr = 100.0 * (cer["wins"] or 0) / con_dato if con_dato else 0.0
         res = "🟢" if (pnl_usd_t if pnl_usd_t is not None
                        else pnl_t) >= 0 else "🔴"
         total = (_usd_firmado(pnl_usd_t) if pnl_usd_t is not None
                  else f"{pnl_t:+.2f} SOL")
-        out.append(f"{res} *Cerradas:* {n_c} · win rate {wr:.0f}% · "
-                   f"PnL total *{total}*")
+        wr_txt = (f"win rate {wr:.0f}% (de {con_dato} con dato)"
+                  if sin_pnl else f"win rate {wr:.0f}%")
+        nota_usd = ""
+        if pnl_usd_t is not None and (cer["sin_usd_pnl"] or 0) > sin_pnl:
+            nota_usd = f"  _($ sin dato en {cer['sin_usd_pnl']})_"
+        out.append(f"{res} *Cerradas:* {n_c} · {wr_txt} · "
+                   f"PnL total *{total}*{nota_usd}")
         if invertido:
             roi = 100.0 * (pnl_usd_t or 0) / invertido
             # Aviso honesto: si alguna cerrada no tiene importe en
@@ -905,8 +923,10 @@ def resumen_text() -> str:
             out.append(f"⚡ Demora señal→copia: {demora['d']:.1f}s de media "
                        f"({demora['n']} medidas)")
         if ab and len(ab) > 1:
+            # (Ola 8) NULL ya no se disfraza de "+$0.00": se dice "s/d".
             trozos = [f"{r['gestion']}: {r['n']} ops "
-                      f"{_usd_firmado(r['pnl'] or 0)}" for r in ab]
+                      + (_usd_firmado(r["pnl"]) if r["pnl"] is not None
+                         else "s/d") for r in ab]
             out.append("🤖 A/B de salidas · " + "  vs  ".join(trozos))
         # ¿El consenso gana o pierde frente a la copia clasica del top?
         # (19/8) La columna origen existe justamente para contestar esto.
@@ -918,10 +938,17 @@ def resumen_text() -> str:
                 for o in ("top", "consenso"):
                     r = omap.get(o)
                     if r and r["n"]:
+                        # (Ola 8) wr solo sobre filas con pnl (las legadas
+                        # sin dato no pueden ganar) y NULL como s/d.
+                        nd = r["n_dato"] or 0
+                        wr_o = (f"wr {100 * (r['wins'] or 0) / nd:.0f}%"
+                                + (f" de {nd}" if nd < r["n"] else "")
+                                if nd else "wr s/d")
                         trozos_o.append(
                             f"{o}: {r['n']} ops "
-                            f"{_usd_firmado(r['pnl'] or 0)} "
-                            f"(wr {100*(r['wins'] or 0)/r['n']:.0f}%)")
+                            + (_usd_firmado(r["pnl"])
+                               if r["pnl"] is not None else "s/d")
+                            + f" ({wr_o})")
                 if trozos_o:
                     out.append("🤝 Origen · " + "  vs  ".join(trozos_o))
         except Exception as e:
@@ -933,11 +960,13 @@ def resumen_text() -> str:
             if rech or cop:
                 linea = "🚪 Filtro de entrada IA · "
                 if cop:
-                    linea += (f"copiaría: {cop['n']} "
-                              f"({_usd_firmado(cop['pnl'] or 0)})")
+                    linea += (f"copiaría: {cop['n']} ("
+                              + (_usd_firmado(cop["pnl"])
+                                 if cop["pnl"] is not None else "s/d") + ")")
                 if rech:
-                    linea += (f"  ·  rechazaría: {rech['n']} "
-                              f"({_usd_firmado(rech['pnl'] or 0)})")
+                    linea += (f"  ·  rechazaría: {rech['n']} ("
+                              + (_usd_firmado(rech["pnl"])
+                                 if rech["pnl"] is not None else "s/d") + ")")
                 out.append(linea)
                 if rech and (rech["pnl"] or 0) < 0:
                     out.append(f"   → rechazar habría ahorrado "

@@ -79,13 +79,23 @@ def _snapshot() -> dict:
             "SELECT COUNT(*) c FROM signals WHERE ts >= ?",
             (hace24,)).fetchone()["c"],
     }
+    # (Ola 8, 21/8) El stake medio era un "~76 USD" ESCRITO A MANO en la
+    # leyenda: la IA lo repetia como si saliera de los registros. Ahora se
+    # calcula del propio paper; si aun no hay operaciones, se dice.
+    _stake = conn.execute(
+        "SELECT AVG(stake_usd) a FROM paper_trades "
+        "WHERE stake_usd IS NOT NULL").fetchone()["a"]
+    _stake_txt = (f"stakes de ~{_stake:.0f} USD de media"
+                  if _stake else "sin stakes registrados aun")
     conn.close()
     return {
         "leyenda": {
             "pnl_onchain_sol": "ganancia DE ESA BILLETERA en la cadena, "
-                               "en SOL. NO es dinero del dueño ni del paper",
+                               "en SOL, al momento de su ULTIMA evaluacion "
+                               "(se refresca cada 3-14 dias). NO es dinero "
+                               "del dueño ni del paper",
             "paper_trading": "la simulacion de copy trading del dueño, en "
-                             "DOLARES (stakes de ~76 USD). Es la unica "
+                             f"DOLARES ({_stake_txt}). Es la unica "
                              "cifra que es 'suya'",
             "senales_historico_completo": "desde el inicio del sistema, "
                                           "NO son de hoy",

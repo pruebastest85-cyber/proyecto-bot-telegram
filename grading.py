@@ -60,10 +60,13 @@ ELITE_NET_SOLO = _env("ELITE_NET_SIN_LIDERAZGO", 60.0)   # PnL neto excepcional
 CONS_ELITE_SOLO = _env("CONS_ELITE_SIN_LIDERAZGO", 80)   # consistencia alta
 
 
-def _conc(p) -> float:
+def _conc(p) -> float | None:
+    """Concentracion del beneficio (0-1). (Ola 8, 21/8) Sin ningun token
+    con ganancia devuelve None: antes devolvia 1.0 y la razon del grado
+    decia "100% del beneficio en 1 token" sin que existiera beneficio."""
     gains = [i["pnl_sol"] for i in (p.get("tokens") or {}).values()
              if i.get("pnl_sol", 0) > 0]
-    return (max(gains) / sum(gains)) if gains else 1.0
+    return (max(gains) / sum(gains)) if gains else None
 
 
 def consistency_score(p) -> int:
@@ -80,7 +83,7 @@ def consistency_score(p) -> int:
 
     f_pf = min(1.0, max(0.0, (pf - 1) / 2)) if pf is not None else 0.4
     f_dd = (1 - min(1.0, (dd or 0) / 50)) if dd is not None else 0.6
-    f_div = 1 - min(1.0, conc)
+    f_div = 1 - min(1.0, conc) if conc is not None else 0.0
     f_sh = min(1.0, max(0.0, (sharpe or 0) / 2)) if sharpe is not None else 0.4
     f_rmed = 1.0 if (rmed or 0) > 0 else 0.0
     f_recent = 1.0 if (net30 or 0) > 0 else 0.3
@@ -181,7 +184,7 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
                and (exp is None or exp > 0)
                and (dd is None or dd < MAXDD))
     # ── Nivel 5: diversificación ──
-    diversified = conc < CONC_MAX
+    diversified = conc is not None and conc < CONC_MAX
     # ── Nivel 6: comportamiento social ──
     leads = bool(inf and ((inf.get("leader_score") or 0) >= LEADER_MIN
                           or inf.get("followers_count", 0) >= 2))
@@ -200,8 +203,10 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
         reasons.append("gana por asimetría (pocas grandes)")
     if diversified:
         reasons.append("beneficio diversificado")
-    else:
+    elif conc is not None:
         reasons.append(f"⚠️ {round(conc*100)}% del beneficio en 1 token")
+    else:
+        reasons.append("sin beneficio realizado en ningún token")
     if leads:
         reasons.append("lidera en su cluster")
 
@@ -255,7 +260,7 @@ def elite_gap(p, inf=None) -> list[str]:
         faltan.append(f"Profit Factor ≥{PF_MIN} (ahora {pf})")
     if dd is not None and dd >= MAXDD:
         faltan.append(f"bajar drawdown <{MAXDD}% (ahora {dd}%)")
-    if conc >= CONC_MAX:
+    if conc is not None and conc >= CONC_MAX:
         faltan.append(f"diversificar: {round(conc*100)}% del beneficio en "
                       f"1 token (máx {round(CONC_MAX*100)}%)")
     if cons < CONS_ELITE:

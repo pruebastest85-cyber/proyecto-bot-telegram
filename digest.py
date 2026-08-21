@@ -39,7 +39,10 @@ def resumen_text() -> str:
             (_cutoff_iso(24),)).fetchall()
         if elites:
             algo = True
-            out.append("⭐ *Nuevas Elite (24h):*")
+            # (Ola 8) pnl_updated se refresca en CADA re-evaluacion:
+            # una Elite vieja re-confirmada ayer NO es nueva.
+            out.append("⭐ *Elite confirmadas en 24h* (nuevas o "
+                       "re-evaluadas):")
             for r in elites:
                 nom = (str(r["alias"] or r["address"][:8]).replace("*", "")
                        .replace("_", " ").replace("`", "")

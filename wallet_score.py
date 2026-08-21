@@ -28,8 +28,11 @@ def compute_score(p: dict, track: dict | None = None) -> dict:
         p_pnl = 0.0
 
     # ROI% (0-20): eficiencia del capital (secundario al PnL absoluto)
-    roi = (100 * net / invested) if invested > 0.5 else 0.0
-    p_roi = max(0.0, min(20.0, 10.0 + roi / 25))
+    # (Ola 8, 21/8) Con inversion minuscula el ROI no es medible: antes se
+    # fabricaba un 0.0 y la ficha imprimia "+0%" como si fuera dato.
+    roi = (100 * net / invested) if invested > 0.5 else None
+    p_roi = (max(0.0, min(20.0, 10.0 + roi / 25))
+             if roi is not None else 10.0)
 
     wr = p.get("win_rate_pct")
     p_wr = min(20.0, wr / 5) if wr is not None else 6.0
@@ -71,7 +74,9 @@ def compute_score(p: dict, track: dict | None = None) -> dict:
     else:
         riesgo = "Medio"
 
-    return {"score": score, "roi_pct": round(roi), "win_rate": wr,
+    return {"score": score,
+            "roi_pct": round(roi) if roi is not None else None,
+            "win_rate": wr,
             "trades": p.get("closed_positions", 0),
             "pnl_sol": round(p["pnl_total_sol"], 1),
             "pnl_30d": round(p.get("pnl_30d_sol", 0.0), 1),
@@ -88,7 +93,8 @@ def format_ficha(address: str, s: dict, alias: str | None = None,
     wr = f"{s['win_rate']}%" if s["win_rate"] is not None else "?"
     lines = [f"{head}`{address}`", "",
              f"🧮 *Wallet Score: {s['score']}/100*",
-             f"ROI (muestra): {s['roi_pct']:+d}%",
+             (f"ROI (muestra): {s['roi_pct']:+d}%"
+              if s.get("roi_pct") is not None else "ROI (muestra): ?"),
              f"Win Rate: {wr}",
              f"Trades cerrados: {s['trades']}",
              f"PnL realizado: {s['pnl_sol']:+.1f} SOL (30d: {s['pnl_30d']:+.1f})"]

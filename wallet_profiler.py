@@ -395,8 +395,12 @@ def format_profile(p: dict) -> str:
                  f"{len(traded)}")
     if closed:
         lines.append(f"✅ Con ventas: {closed} · ganadores: {wins}")
-    lines.append(f"💰 *PnL realizado (muestra):* {p['pnl_total_sol']:+.2f} SOL")
-    lines.append(f"📅 *PnL últimos 30 días:* {p['pnl_30d_sol']:+.2f} SOL")
+    # (Ola 8, 21/8) Ambas cifras son FLUJO de caja de la muestra/ventana
+    # (una venta de algo comprado antes cuenta entera; una compra sin
+    # venta resta entera): etiquetarlas "PnL" a secas sobreclamaba.
+    lines.append(f"💰 *Flujo neto (muestra):* {p['pnl_total_sol']:+.2f} SOL")
+    lines.append(f"📅 *Flujo neto últimos 30 días:* "
+                 f"{p['pnl_30d_sol']:+.2f} SOL")
     if p.get("held_tokens"):
         cob = f"{p.get('priced_tokens', 0)}/{p['held_tokens']} con precio"
         lines.append(f"🎒 *En cartera (sin vender):* "

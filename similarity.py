@@ -47,7 +47,10 @@ def _vectors():
     for w, (avg_rank, n) in ranks.items():
         if w not in wl:
             continue
-        iw = infg.get(w, {})
+        # (Ola 8, 21/8) infg es {"edges","both","wallets","meta"}: indexar
+        # por direccion directamente devolvia SIEMPRE {} y las features de
+        # liderazgo y % primera quedaban en 0 para todas las billeteras.
+        iw = infg.get("wallets", {}).get(w, {})
         aw = alpg.get(w, {})
         row = wl[w]
         vec = [

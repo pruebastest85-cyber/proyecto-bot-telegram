@@ -243,7 +243,7 @@ def run_full_cycle() -> str:
         hook_msg = sync_helius_webhook()
         print(f"📡 {hook_msg}")
         return (f"✅ Ciclo terminado.\n"
-                f"Ganadores nuevos/actualizados: {saved}\n"
+                f"Ganadores nuevos: {saved}\n"
                 f"Billeteras totales: {wallets}\n"
                 f"Rastreadas ⭐: {tracked}\n"
                 f"📡 {hook_msg}")
@@ -264,8 +264,16 @@ def _status_text() -> str:
             "SELECT COUNT(*) c FROM wallets WHERE is_bot=1").fetchone()["c"]
         from db import get_setting
         umbral = get_setting(conn, "min_signal_score", "0")
-        prof = int(float(get_setting(conn, "funnel_profiled", "0") or 0))
-        prom = int(float(get_setting(conn, "funnel_promoted", "0") or 0))
+        # (Ola 8, 21/8) Antes se mostraban los contadores funnel_profiled/
+        # funnel_promoted, que suman EVALUACIONES de por vida (la misma
+        # billetera cuenta N veces al re-evaluarse): decian "484/6800" con
+        # 72 seguidas reales. Ahora: billeteras DISTINTAS, en vivo.
+        prof = conn.execute(
+            "SELECT COUNT(*) c FROM wallets "
+            "WHERE ai_class IS NOT NULL").fetchone()["c"]
+        prom = conn.execute(
+            "SELECT COUNT(*) c FROM wallets "
+            "WHERE ai_follow=1").fetchone()["c"]
         try:
             from api_usage import usage_line, flush as _api_flush
             _api_flush()
@@ -282,24 +290,32 @@ def _status_text() -> str:
         f"Billeteras registradas: {wallets}\n"
         f"Billeteras rastreadas ⭐: {tracked}\n"
         f"Descartadas/bots ❌: {descartadas}"
-        + (f"\n📈 Embudo: {prom}/{prof} perfiladas → ⭐ "
+        + (f"\n📈 Embudo: {prof} evaluadas → {prom} seguidas "
            f"({100 * prom / prof:.0f}%)" if prof else "")
         + (f"\n{apis}" if apis else ""))
 
 
 def _senales_text() -> str:
     conn = get_conn()
+    # (Ola 8, 21/8) El feed guarda señales de ⭐ Y de candidatas en
+    # observación (liga de ascenso): se marca cuál es cuál en vez de
+    # presentarlo todo como si fuera de ⭐.
     rows = conn.execute(
-        "SELECT * FROM signals ORDER BY ts DESC LIMIT 10").fetchall()
+        "SELECT s.*, COALESCE(w.is_tracked, 0) es_estrella FROM signals s "
+        "LEFT JOIN wallets w ON w.address = s.wallet "
+        "ORDER BY s.ts DESC LIMIT 10").fetchall()
     conn.close()
     if not rows:
         return ("📡 *Últimas señales*\n\n"
                 "_Aún no hay señales. Llegarán cuando una billetera ⭐ "
                 "compre o venda algo._")
-    lines = ["📡 *Últimas señales*", "━━━━━━━━━━━━━━", ""]
+    lines = ["📡 *Últimas señales*  _(⭐ rastreada · 👁 en observación)_",
+             "━━━━━━━━━━━━━━", ""]
     for s in rows:
-        hace = (_t.time() - s["ts"]) / 3600
-        cuando = f"hace {hace:.1f}h" if hace >= 1 else f"hace {hace*60:.0f} min"
+        # (Ola 8) minutos enteros con acarreo: 59,6 min ya no es "60 min"
+        mins = int(round((_t.time() - s["ts"]) / 60))
+        cuando = (f"hace {mins/60:.1f}h" if mins >= 60
+                  else f"hace {mins} min")
         try:
             side = s["side"] or "compra"
         except (KeyError, IndexError):
@@ -323,9 +339,13 @@ def _senales_text() -> str:
                 res = "\n    📈 " + "  ·  ".join(partes)
         except (KeyError, IndexError):
             pass
+        try:
+            marca = "⭐" if s["es_estrella"] else "👁"
+        except (KeyError, IndexError):
+            marca = ""
         lines.append(
             f"{emoji} *{simbolo}*  ·  {verbo}  ·  {s['sol']:.2f} SOL"
-            f"\n    🕒 {cuando}{res}\n")
+            f"  {marca}\n    🕒 {cuando}{res}\n")
     return "\n".join(lines).rstrip()
 
 
@@ -608,7 +628,7 @@ def _resumen_diario_text() -> str:
     conn.close()
     out = ["☀️ *Resumen diario*\n",
            f"Señales de compra (24h): {n24}",
-           f"⭐ activas: {stars}"]
+           f"⭐ rastreadas: {stars}"]
     if med["c"]:
         wr = 100.0 * (med["w"] or 0) / med["c"]
         out.append(f"Win rate 7 días: {wr:.0f}% ({med['c']} medidas)")
@@ -1075,8 +1095,13 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(txt, parse_mode="Markdown")
             return
         actual = get_setting(conn, "top_alertas", str(TOP_ALERTAS_DEFAULT))
+        # (Ola 8) 0 significa "sin limite" para todo el sistema: decir
+        # "top 0" seria mentira.
+        _desc = (f"las *top {actual}* billeteras"
+                 if int(float(actual or 0)) else
+                 "*todas* las billeteras ⭐ (sin límite)")
         await update.message.reply_text(
-            f"📡 Ahora mismo alertan las *top {actual}* billeteras "
+            f"📡 Ahora mismo alertan {_desc} "
             f"(señales y tarjetas).\nCambiar: `/topalertas 20`  ·  "
             f"`/topalertas 0` quita el límite.",
             parse_mode="Markdown")
@@ -1561,6 +1586,12 @@ async def cmd_entidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def _elite_text() -> str:
     conn = get_conn()
+    # (Ola 8, 21/8) El corte a 40 era silencioso: con 280 graduadas en la
+    # base, la cola desaparecia y la lista parecia completa. Ahora se dice.
+    graduadas = conn.execute(
+        """SELECT COUNT(*) c FROM wallets
+           WHERE grade IN ('Elite','Seguimiento','Observación')
+             AND is_bot=0""").fetchone()["c"]
     rows = conn.execute(
         """SELECT address, alias, grade, consistency, pnl_total, wallet_score
            FROM wallets
@@ -1575,7 +1606,10 @@ def _elite_text() -> str:
         return ("Aún no hay billeteras clasificadas. Se irán graduando cuando "
                 "la IA re-evalúe cada billetera (cada ~3 días o con /analizar).")
     emo = {"Elite": "⭐", "Seguimiento": "🟢", "Observación": "🟡"}
-    out, actual = ["🏆 *Clasificación de billeteras*\n"], None
+    titulo = ("🏆 *Clasificación de billeteras*"
+              + (f"  _(top {len(rows)} de {graduadas})_"
+                 if graduadas > len(rows) else "") + "\n")
+    out, actual = [titulo], None
     for r in rows:
         if r["grade"] != actual:
             actual = r["grade"]
@@ -1586,7 +1620,9 @@ def _elite_text() -> str:
         sc = f" · score {round(r['wallet_score'])}" if r["wallet_score"] is not None else ""
         out.append(f"• {nombre}{sc}{pnl}{cons}")
     out.append("\n_C = Consistency Score. Elite = rentable, consistente y "
-               "líder. Usa /adn <address> para el detalle._")
+               "líder. PnL y score son de la última evaluación de cada "
+               "billetera (se refrescan cada 3-14 días). "
+               "Usa /adn <address> para el detalle._")
     return "\n".join(out)
 
 
@@ -1717,14 +1753,23 @@ def _saldos_text():
     if True:
         import requests as _rq
         conn = get_conn()
+        # (Ola 8, 21/8) Antes el encabezado decia "billeteras vigiladas" y
+        # el pie "Total combinado" cuando la query cortaba a 25 de miles
+        # (1.209 en la base el 21/8) y el total sumaba solo las consultadas
+        # sin error. Ahora el corte y el alcance del total se dicen.
+        poblacion = conn.execute(
+            """SELECT COUNT(*) c FROM wallets
+               WHERE is_tracked=1
+                  OR (is_bot=0 AND winning_tokens_count >= 2)""").fetchone()["c"]
         rows = conn.execute(
             """SELECT address, alias, is_tracked FROM wallets
                WHERE is_tracked=1
                   OR (is_bot=0 AND winning_tokens_count >= 2)
                ORDER BY is_tracked DESC, score DESC LIMIT 25""").fetchall()
         conn.close()
-        out = ["💰 *Saldos de billeteras vigiladas:*\n"]
+        out = [f"💰 *Saldos — top {len(rows)} de {poblacion} vigiladas:*\n"]
         total = 0.0
+        errores = 0
         for r in rows:
             try:
                 resp = _rq.post(config.HELIUS_RPC,
@@ -1738,12 +1783,16 @@ def _saldos_text():
             nombre = _alias_md(r["alias"] or r["address"][:8])
             icono = "⭐" if r["is_tracked"] else "👁"
             if sol is None:
+                errores += 1
                 out.append(f"{icono} {nombre}: _error al consultar_")
             else:
                 total += sol
                 out.append(f"{icono} {nombre}: *{sol:,.2f} SOL*"
                            f"  `{r['address'][:8]}…`")
-        out.append(f"\nTotal combinado: *{total:,.2f} SOL*")
+        consultadas = len(rows) - errores
+        out.append(f"\nTotal de las {consultadas} consultadas: "
+                   f"*{total:,.2f} SOL*"
+                   + (f"  _({errores} con error)_" if errores else ""))
 
     return "\n".join(out)
 

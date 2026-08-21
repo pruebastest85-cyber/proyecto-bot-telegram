@@ -74,6 +74,11 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
             SELECT wallet, mint, buy_sol, buy_time, buy_rank, delay_s,
                    price_at_buy, mc_at_buy, entry_multiple
             FROM appearances""")
+        # (Ola 8, 21/8) Con mas de 100k señales el export recortaba en
+        # silencio mientras /datos anunciaba el total completo. El corte
+        # se registra y el manifiesto lo dice.
+        senales_total = conn.execute(
+            "SELECT COUNT(*) c FROM signals").fetchone()["c"]
         senales = _filas(conn, """
             SELECT signature, wallet, mint, symbol, side, sol, ts,
                    price_usd, mc, liq, chg_1h, chg_24h, signal_score,
@@ -91,8 +96,11 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
     try:
         # Intento 1: todo junto comprimido. Si cabe, un solo archivo.
         unico = f"{prefijo}.json.gz"
+        nota_senales = (f"ultimas {len(senales)} de {senales_total}"
+                        if senales_total > len(senales) else "completas")
         mb = _escribir_gz(unico, {
             "generado": cabecera, "parte": 1, "partes": 1,
+            "senales_alcance": nota_senales,
             "billeteras": billeteras, "apariciones": apariciones,
             "senales": senales, "tokens_ganadores": ganadores,
             "operaciones": operaciones})
@@ -109,6 +117,7 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
         base_ruta = f"{prefijo}_1_base.json.gz"
         mb_base = _escribir_gz(base_ruta, {
             "generado": cabecera, "parte": 1,
+            "senales_alcance": nota_senales,
             "billeteras": billeteras, "apariciones": apariciones,
             "senales": senales, "tokens_ganadores": ganadores})
         rutas.append(base_ruta)
@@ -151,10 +160,12 @@ def resumen() -> str:
         conn.close()
     return "\n".join([
         "📦 *Conocimiento acumulado*\n",
-        f"Billeteras analizadas: *{w:,}*",
+        f"Billeteras registradas: *{w:,}*",
         f"Operaciones guardadas: *{t:,}*",
         f"Apariciones en ganadores: *{a:,}*",
         f"Señales emitidas: *{s:,}* · con resultado medido: *{med:,}*",
-        "\n_Usa /exportar para bajarlo en JSON y analizarlo por tu cuenta "
-        "(por ejemplo con una IA local)._",
+        ("\n_Usa /exportar para bajarlo en JSON y analizarlo por tu cuenta "
+         "(por ejemplo con una IA local)._"
+         + (f"\n_El export incluye las últimas 100.000 señales "
+            f"de las {s:,}._" if s > 100000 else "")),
     ])

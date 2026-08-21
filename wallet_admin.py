@@ -88,7 +88,10 @@ def build_top_message(limit: int = 10):
             partes.append(f"30d: {p30:+.1f}")
         if ptot is not None:
             partes.append(f"hist: {ptot:+.1f}")
-        pnl = ("\n   💰 PnL (SOL) " + " · ".join(partes)) if partes else ""
+        # (Ola 8, 21/8) pnl_30d/pnl_total son de la ULTIMA evaluacion
+        # de la billetera (se refrescan cada 3-14 dias), no de hoy.
+        pnl = ("\n   💰 PnL (SOL, últ. evaluación) "
+               + " · ".join(partes)) if partes else ""
         lines.append(
             f"{i}. {nombre}`{w['address']}`\n"
             f"   ganadores: {w['winning_tokens_count']} · "

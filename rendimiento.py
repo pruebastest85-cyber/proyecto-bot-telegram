@@ -51,8 +51,10 @@ def rendimiento_text() -> str:
                 "más tiempo rastreando.")
 
     n, wr, media = _grupo(filas)
+    # (Ola 8, 21/8) El agregado mezcla señales medidas a 24h con señales
+    # que solo tienen 1h: se dice en la cabecera.
     out = ["📊 *Rendimiento de señales* "
-           f"({n} medidas)\n",
+           f"({n} medidas; 24h, o 1h si no hay)\n",
            f"Win rate: *{wr:.0f}%* · resultado medio: {media:+.1f}%\n"]
 
     # ── Por clase de billetera ──
@@ -137,7 +139,8 @@ def backtest_text(monto: float = 0.5, tp: float = 50.0) -> str:
     icono = "🟢" if gan >= 0 else "🔴"
     return ("🧪 *Backtest de señales*\n\n"
             f"Señales copiadas: {len(filas)} × {monto} SOL\n"
-            f"Regla de salida: vender a +{tp:.0f}% o al cierre de 24h\n\n"
+            f"Regla de salida: TP +{tp:.0f}% solo si el CIERRE de 24h "
+            f"lo alcanza; si no, resultado a 24h (o 1h si no hay)\n\n"
             f"Invertido: {invertido:.2f} SOL\n"
             f"Resultado: {icono} {gan:+.2f} SOL ({_pct(gan, invertido):+.1f}%)\n"
             f"Capital final: {final:.2f} SOL · win rate {wr:.0f}%\n\n"

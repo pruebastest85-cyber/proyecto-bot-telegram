@@ -97,7 +97,9 @@ def token_dna_text(mint: str) -> str:
     if t.get("top10_pct") is not None:
         seg.append(f"top10 {t['top10_pct']:.0f}%")
     lines.append("🔐 " + " · ".join(seg))
-    lines.append(f"\n🛡 *Probabilidad de supervivencia (estimada): {survival}%*")
+    # (Ola 8, 21/8) Es una formula fija de liquidez y riesgo, no una
+    # probabilidad calibrada con historicos: se llama indice.
+    lines.append(f"\n🛡 *Índice de supervivencia (fórmula fija): {survival}/100*")
     if smart:
         quienes = ", ".join((r["alias"] or r["wallet"][:6]) for r in smart[:6])
         lines.append(f"\n_Comprado por billeteras de calidad: {quienes}._")

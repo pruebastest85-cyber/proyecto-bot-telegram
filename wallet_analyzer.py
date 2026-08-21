@@ -254,8 +254,14 @@ def analyze_token(conn, token) -> int:
                       f"token subió x{mult_entrada:.1f} desde su entrada "
                       f"(tx {sig}…)")
         else:
-            reason = (f"Compró {buy['sol']:.2f} SOL de {symbol} como comprador "
-                      f"#{rank + 1} antes de subida de "
+            # (Ola 8, 21/8) Sin historial completo el "#puesto" seria el
+            # puesto dentro del lote incompleto — el dato inventado que
+            # rank_real ya evita. El texto de /evidencia tampoco lo dice.
+            _puesto = (f"como comprador #{rank + 1} "
+                       if historial_completo else
+                       "entre los primeros compradores observados ")
+            reason = (f"Compró {buy['sol']:.2f} SOL de {symbol} {_puesto}"
+                      f"antes de subida de "
                       f"+{token['price_change_24h']:.0f}% en 24h (tx {sig}…)")
         upsert_wallet_appearance(conn, buy["wallet"], mint, buy["sol"],
                                  buy_time, rank_real, reason, delay,

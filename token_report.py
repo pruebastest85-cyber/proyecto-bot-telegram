@@ -171,7 +171,10 @@ def token_report(mint: str) -> dict:
                      f"({len(elite)} ⭐ Elite)")
         lines.append(f"   _{quienes}_")
     else:
-        lines.append("🧠 Smart-money: ninguna billetera de tu red lo compró aún")
+        # (Ola 8) Solo consulta compradores TEMPRANOS registrados
+        # (appearances): una compra reciente de una ⭐ puede no constar.
+        lines.append("🧠 Smart-money: ninguna consta como compradora "
+                     "temprana de este token")
 
     if t.get("vol24"):
         extra = f"📊 Vol 24h {_mc(t.get('vol24'))}"

@@ -70,6 +70,10 @@ def find_links() -> str:
 
     links = {}
     revisadas = 0
+    # (Ola 8, 21/8) La MISMA transferencia A->B aparece en el historial
+    # de A y en el de B: sin dedupe se sumaba DOS veces y el SOL mostrado
+    # podia salir duplicado (o x1/x2 segun que historiales bajaran bien).
+    vistas = set()
     for addr in tracked:
         try:
             txs = _txs(addr)
@@ -79,12 +83,17 @@ def find_links() -> str:
             continue
         time.sleep(config.HELIUS_DELAY)
         for tx in txs or []:
-            for nt in tx.get("nativeTransfers") or []:
+            firma = tx.get("signature") or ""
+            for i, nt in enumerate(tx.get("nativeTransfers") or []):
                 a = nt.get("fromUserAccount")
                 b = nt.get("toUserAccount")
                 if a in tracked and b in tracked and a != b:
                     sol = (nt.get("amount") or 0) / 1e9
                     if sol >= MIN_SOL_LINK:
+                        huella = (firma, i, a, b, nt.get("amount"))
+                        if huella in vistas:
+                            continue
+                        vistas.add(huella)
                         k = tuple(sorted((a, b)))
                         links[k] = links.get(k, 0.0) + sol
 

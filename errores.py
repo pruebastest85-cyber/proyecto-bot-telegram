@@ -55,13 +55,22 @@ def resumen(horas: int = 24) -> list[dict]:
         conn = get_conn()
         try:
             _ensure(conn)
+            # (Ola 8, 21/8) MAX(mensaje) era el maximo ALFABETICO del
+            # grupo: el "ejemplo" mostrado podia no corresponder al
+            # ultimo incidente aunque el "hace X h" si fuera de el.
+            # Subconsulta correlacionada: el mensaje del ts mas reciente.
+            # (Funciona igual en SQLite y Postgres.)
             rows = conn.execute(
-                """SELECT modulo, tipo, COUNT(*) n, MAX(ts) ultimo,
-                          MAX(mensaje) ejemplo
-                   FROM errors WHERE ts >= ?
-                   GROUP BY modulo, tipo
+                """SELECT e.modulo, e.tipo, COUNT(*) n, MAX(e.ts) ultimo,
+                          (SELECT e2.mensaje FROM errors e2
+                           WHERE e2.modulo = e.modulo AND e2.tipo = e.tipo
+                             AND e2.ts >= ?
+                           ORDER BY e2.ts DESC LIMIT 1) ejemplo
+                   FROM errors e WHERE e.ts >= ?
+                   GROUP BY e.modulo, e.tipo
                    ORDER BY n DESC""",
-                (time.time() - horas * 3600,)).fetchall()
+                (time.time() - horas * 3600,
+                 time.time() - horas * 3600)).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()

@@ -33,16 +33,26 @@ WATCH_HOURS = 48   # cuánto tiempo vigilamos el precio tras la señal
 MIN_MULTIPLE = 2   # empezar a avisar desde el doble (x2) en adelante
 
 
-def _price_mc(mint: str):
-    """(precio_usd, market_cap) actuales según DexScreener, del par de mayor
+def _price_mc_ex(mint: str):
+    """(precio_usd, market_cap, muerto) según DexScreener, del par de mayor
     liquidez. Se devuelven JUNTOS porque el MC no se puede deducir del
     precio: si el suministro cambia (típico al migrar un token de pump.fun),
-    extrapolar el MC da cifras falsas."""
+    extrapolar el MC da cifras falsas.
+
+    (Ola 8, 21/8) `muerto=True` SOLO cuando DexScreener responde 200 sin
+    ningún par listado: el token dejó de cotizar (rug/par retirado). Un
+    fallo de red o un 429 NO es muerte — devuelve (None, None, False) y
+    se reintenta. Antes ambos casos eran indistinguibles y las señales de
+    tokens muertos quedaban sin medir PARA SIEMPRE: las peores pérdidas
+    desaparecían del win rate y todos los % de acierto salían inflados."""
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
                          timeout=15)
         _api_rec("dexscreener")
+        r.raise_for_status()
         pairs = (r.json() or {}).get("pairs") or []
+        if not pairs:
+            return (None, None, True)
         mejor, mejor_liq = None, -1.0
         for p in pairs:
             try:
@@ -55,16 +65,24 @@ def _price_mc(mint: str):
             if liq > mejor_liq:
                 mejor_liq, mejor = liq, p
         if not mejor:
-            return (None, None)
+            # Hay pares pero ninguno con precio usable: sin dato, no muerte.
+            return (None, None, False)
         px = float(mejor.get("priceUsd") or 0) or None
         mc = mejor.get("marketCap") or mejor.get("fdv")
         try:
             mc = float(mc) if mc else None
         except (TypeError, ValueError):
             mc = None
-        return (px, mc)
+        return (px, mc, False)
     except (requests.RequestException, ValueError, TypeError):
-        return (None, None)
+        return (None, None, False)
+
+
+def _price_mc(mint: str):
+    """(precio_usd, market_cap) — compatibilidad con los llamadores que no
+    necesitan saber si el token murió."""
+    px, mc, _ = _price_mc_ex(mint)
+    return (px, mc)
 
 
 def _price(mint: str) -> float | None:
@@ -173,7 +191,13 @@ def _alert_milestone(conn, s, pct: float, price: float,
     hace = (time.time() - ts_base) / 3600
     from card_image import _fmt_price, _ago, _fmt_mc
     simbolo = s["symbol"] or s["mint"][:8]
-    subida = pct if pct > 0 else (mult - 1) * 100
+    # (Ola 8, 21/8) El % SIEMPRE contra la MISMA base anclada que produce
+    # el xN. Antes se usaba el pct del llamador (calculado contra la señal
+    # vigente de la primera ⭐, que puede diferir del ancla) y, si pct<=0,
+    # un fallback con el multiplo TRUNCADO ((mult-1)*100: ratio real 2,9
+    # → "+100%" en vez de +190%). Resultado: tarjetas tipo "x5 (+90%)"
+    # con dos números incompatibles en la misma línea.
+    subida = (price / base - 1) * 100 if base else (mult - 1) * 100
     # Market Cap: el de la llamada (guardado) y el REAL de ahora.
     # ANTES se extrapolaba (mc0 × subida del precio) y eso daba cifras
     # falsas: si el suministro cambia —lo normal al migrar un token de
@@ -408,7 +432,7 @@ def track_outcomes() -> int:
 
     def _px_mc(mint):
         if mint not in prices:
-            prices[mint] = _price_mc(mint)
+            prices[mint] = _price_mc_ex(mint)
             time.sleep(config.DEXSCREENER_DELAY)
         return prices[mint]
 
@@ -430,10 +454,16 @@ def track_outcomes() -> int:
     updated = 0
     for s in list(pend) + list(pend_ventas):
         base = s["price_usd"]
-        p = _px(s["mint"])
+        p, _mc, muerto = _px_mc(s["mint"])
         if not p:
-            continue
-        pct = (p / base - 1) * 100
+            if not muerto:
+                continue
+            # (Ola 8) Token sin ningún par en DexScreener: dejó de cotizar.
+            # Se registra como pérdida total (-100%) en vez de dejar la
+            # señal sin medir para siempre e inflar el win rate.
+            p, pct = 0.0, -100.0
+        else:
+            pct = (p / base - 1) * 100
         age = now - s["ts"]
         if s["price_1h"] is None and HOUR <= age <= 3 * HOUR:
             conn.execute(
@@ -453,7 +483,7 @@ def track_outcomes() -> int:
             continue
         _ya_visto.add(s["mint"])
         base = s["price_usd"]
-        p, mc_now = _px_mc(s["mint"])
+        p, mc_now, _muerto = _px_mc(s["mint"])
         if not p:
             continue
         pct = (p / base - 1) * 100
@@ -488,10 +518,12 @@ def wallet_track_record(conn, wallet: str) -> dict | None:
         out["tasa_acierto_1h_pct"] = round(
             100 * sum(1 for x in c1 if x > 0) / len(c1))
         out["cambio_promedio_1h_pct"] = round(sum(c1) / len(c1), 1)
+        out["n_1h"] = len(c1)
     if c24:
         out["tasa_acierto_24h_pct"] = round(
             100 * sum(1 for x in c24 if x > 0) / len(c24))
         out["cambio_promedio_24h_pct"] = round(sum(c24) / len(c24), 1)
+        out["n_24h"] = len(c24)
     return out
 
 
@@ -499,14 +531,20 @@ def format_track_record(tr: dict | None) -> str:
     """Línea corta para mensajes de Telegram."""
     if not tr:
         return ""
+    # (Ola 8, 21/8) El n mostrado es el del HORIZONTE usado, no el total
+    # de filas con cualquier medición: antes se leía "20 señales: acierto
+    # 24h 40%" cuando el 40% salía de solo 5 medidas a 24 h.
     partes = []
+    n = tr["senales_medidas"]
     if "tasa_acierto_24h_pct" in tr:
+        n = tr.get("n_24h", n)
         partes.append(f"acierto 24h: {tr['tasa_acierto_24h_pct']}% "
                       f"({tr['cambio_promedio_24h_pct']:+.0f}% prom)")
     elif "tasa_acierto_1h_pct" in tr:
+        n = tr.get("n_1h", n)
         partes.append(f"acierto 1h: {tr['tasa_acierto_1h_pct']}% "
                       f"({tr['cambio_promedio_1h_pct']:+.0f}% prom)")
     if not partes:
         return ""
-    return (f"🎯 Track record ({tr['senales_medidas']} señales): "
+    return (f"🎯 Track record ({n} señales medidas): "
             + " · ".join(partes))

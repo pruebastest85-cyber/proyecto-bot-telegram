@@ -673,6 +673,19 @@ def _proc(txs: list[dict], conn):
                             if len(_mana) >= _n_min:
                                 _t_lider = dict(trade)
                                 _t_lider["wallet"] = _mana[0]["wallet"]
+                                # (Ola 8) El monto del trade es del
+                                # comprador que completo el quorum, no de
+                                # la lider: mostrarlo atribuido a ella era
+                                # un dato falso. Se busca SU compra; si no
+                                # esta, mejor sin monto que con uno ajeno.
+                                _sl = conn.execute(
+                                    "SELECT sol FROM signals WHERE wallet=? "
+                                    "AND mint=? AND side='compra' "
+                                    "ORDER BY ts ASC LIMIT 1",
+                                    (_mana[0]["wallet"],
+                                     trade["mint"])).fetchone()
+                                _t_lider["sol"] = (
+                                    _sl["sol"] if _sl else None)
                                 _accion = ("abrir", _t_lider, "consenso")
                     else:
                         # Venta: se sigue si es del top O si esta billetera
@@ -990,7 +1003,15 @@ def _proc(txs: list[dict], conn):
             partes.append(f"30d: {_money_signed(pnl30, su)}")
         if pnltot is not None:
             partes.append(f"histórico: {_money_signed(pnltot, su)}")
-        pnl_txt = ("\n💰 PnL billetera → " + " · ".join(partes)) if partes else ""
+        # (Ola 8) El PnL esta guardado en SOL; el $ mostrado usa el cambio
+        # de HOY sobre ganancias historicas — cifra que nunca existio tal
+        # cual. Se muestra el SOL real y el $ queda como aproximacion.
+        pnl_txt = (("\n💰 PnL billetera → " + " · ".join(partes)
+                    + f"\n_(SOL: 30d {pnl30:+.1f} · hist {pnltot:+.1f}"
+                      f" · $ ≈ al cambio actual)_")
+                   if partes and pnl30 is not None and pnltot is not None
+                   else ("\n💰 PnL billetera → " + " · ".join(partes)
+                         + " _( ≈ al cambio actual)_") if partes else "")
         track_txt = f"\n{track_line}" if track_line else ""
         pat_txt = f"\n{patron_line}" if patron_line else ""
 
@@ -1014,11 +1035,17 @@ def _proc(txs: list[dict], conn):
                 else:
                     resto = (f"📦 Le queda: *{_fmt_amount(pos['remaining_tokens'])} {sym}*"
                              f"  ·  vendió *{pos['pct_sold']:.0f}%*")
+                # (Ola 8) Si vendio mas de lo que el bot le vio comprar,
+                # el PnL solo cubre la parte rastreada — y se dice.
+                extra = pos.get("tokens_no_rastreados") or 0.0
+                nota = (f"\n_(vendió además {_fmt_amount(extra)} {sym} "
+                        f"comprados antes del rastreo; su PnL no se cuenta)_"
+                        if extra > 0 else "")
                 pos_txt = (
                     f"\n📤 Vendió: *{_fmt_amount(pos['tokens_sold'])} {sym}*"
                     f"\n{pl_icon} Profit realizado: *{_money_signed(pl, su)}*"
                     f"  (total {_money_signed(pos['realized_total'], su)})"
-                    f"\n{resto}")
+                    f"\n{resto}{nota}")
             else:
                 pos_txt = (
                     f"\n📤 Vendió: *{_fmt_amount(pos['tokens_sold'])} {sym}*"

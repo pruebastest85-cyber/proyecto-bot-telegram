@@ -86,26 +86,41 @@ def _c_senales(conn):
 def _c_medicion(conn):
     """¿Se mide el resultado de las señales? (sin esto no hay aprendizaje)"""
     try:
+        # (Ola 8, 21/8) Antes el denominador era TODA la historia de
+        # señales de compra, pero el medidor solo mide por diseño las de
+        # billeteras vigilables (⭐ o >=2 ganadores) CON precio base, y
+        # solo dentro de su ventana. El % convergia a la tasa historica
+        # acumulada (62%) y gritaba aviso aunque la medicion de HOY
+        # funcionara al 94%. Ahora: misma poblacion que el medidor,
+        # ventana movil de 7 dias, y solo señales cuya ventana ya vencio.
         ahora = int(time.time())
-        viejas = conn.execute(
-            "SELECT COUNT(*) c FROM signals WHERE side='compra' AND ts<=?",
-            (ahora - 86400,)).fetchone()["c"]
-        medidas = conn.execute(
-            "SELECT COUNT(*) c FROM signals WHERE side='compra' AND ts<=? "
-            "AND (chg_24h IS NOT NULL OR chg_1h IS NOT NULL)",
-            (ahora - 86400,)).fetchone()["c"]
+        r = conn.execute(
+            "SELECT COUNT(*) v, "
+            "COALESCE(SUM(CASE WHEN s.chg_24h IS NOT NULL "
+            "OR s.chg_1h IS NOT NULL THEN 1 ELSE 0 END), 0) m "
+            "FROM signals s JOIN wallets w ON w.address = s.wallet "
+            "AND COALESCE(w.is_bot, 0) = 0 "
+            "AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2) "
+            "WHERE s.side='compra' AND s.price_usd IS NOT NULL "
+            "AND s.ts BETWEEN ? AND ?",
+            (ahora - 7 * 86400, ahora - 30 * 3600)).fetchone()
+        viejas, medidas = r["v"], r["m"]
         if viejas == 0:
-            return _chk("Medición", OK, "aún no hay señales con 24 h")
+            return _chk("Medición", OK,
+                        "sin señales medibles vencidas en 7 días")
         pct = 100.0 * medidas / viejas
         if pct < 30:
             return _chk("Medición", CRIT,
-                        f"solo {pct:.0f}% de las señales medidas "
-                        f"({medidas}/{viejas})",
+                        f"solo {pct:.0f}% de las señales medibles de 7 días "
+                        f"medidas ({medidas}/{viejas})",
                         "sin medición no hay aprendizaje ni backtest fiable")
         if pct < 70:
             return _chk("Medición", WARN,
-                        f"{pct:.0f}% medidas ({medidas}/{viejas})")
-        return _chk("Medición", OK, f"{pct:.0f}% medidas ({medidas}/{viejas})")
+                        f"{pct:.0f}% medidas ({medidas}/{viejas} "
+                        f"medibles, 7 días)")
+        return _chk("Medición", OK,
+                    f"{pct:.0f}% medidas ({medidas}/{viejas} "
+                    f"medibles, 7 días)")
     except Exception as e:
         return _chk("Medición", WARN, f"no se pudo comprobar ({e})")
 

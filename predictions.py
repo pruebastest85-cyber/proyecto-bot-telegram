@@ -75,7 +75,12 @@ def _leader_health(conn, leader: str) -> dict:
     if n == 0:
         return {"n": 0, "accuracy": None, "estado": "sin historial", "factor": 0.6}
     acc = sum((r["outcome_pct"] or 0) for r in rows) / n
-    if n >= 5 and acc >= 70:
+    if n < 5:
+        # (Ola 8) Con menos de 5 evaluadas no se sentencia "en declive"
+        # ni "caliente": muestra insuficiente, factor neutro.
+        return {"n": n, "accuracy": round(acc),
+                "estado": f"🟡 Muestra corta ({n})", "factor": 0.65}
+    if acc >= 70:
         estado, factor = "🟢 Caliente", 1.0
     elif acc < 50:
         estado, factor = "🔴 En declive", 0.3
@@ -424,10 +429,13 @@ def metrics_text() -> str:
         ).fetchone()["c"]
         tiers = {r["tier"]: r["c"] for r in conn.execute(
             "SELECT tier, COUNT(*) c FROM predictions GROUP BY tier").fetchall()}
+        # (Ola 8, 21/8) "Mas fiables" exigia n>=1: un lider con 100% en
+        # UNA prediccion encabezaba por delante de 90% en veinte. Minimo
+        # 5 evaluadas para entrar al ranking.
         leaders = conn.execute(
             """SELECT leader, COUNT(*) n, AVG(outcome_pct) acc
                FROM predictions WHERE status='evaluada'
-               GROUP BY leader HAVING COUNT(*)>=1
+               GROUP BY leader HAVING COUNT(*)>=5
                ORDER BY acc DESC, n DESC LIMIT 5"""
         ).fetchall()
         gmap = graph()["wallets"]
@@ -443,7 +451,8 @@ def metrics_text() -> str:
         return f"{round(100*a/b)}%" if b else "—"
 
     out = ["📊 *Panel del motor predictivo*\n",
-           f"Emitidas: {emit_1d} hoy · {emit_7d} en 7d · {total} total",
+           f"Creadas: {emit_1d} en 24h · {emit_7d} en 7d · {total} total "
+           f"(incluye las que no llegaron a alertarse)",
            f"Alcanzan Nivel 2: {pct(n2, total)} · Nivel 3: {pct(n3, total)}"]
     if ev and ev["n"]:
         out.append(f"Precisión final: *{round(ev['acc'] or 0)}%* "
@@ -451,7 +460,8 @@ def metrics_text() -> str:
         if ev["t"] is not None:
             out.append(f"Tiempo medio a confirmación: {round(ev['t'])}s")
         if ev["chg"] is not None:
-            out.append(f"Rendimiento medio del token: {round(ev['chg']):+d}%")
+            out.append(f"Rendimiento medio del token a la fecha de "
+                       f"medición: {round(ev['chg']):+d}%")
         out.append(f"Falsos positivos (alertó y 0 llegó): {fp}/{alerted}")
     out.append(f"\nNiveles → 🟢 {tiers.get('alpha',0)} · "
                f"🟡 {tiers.get('watchlist',0)} · 🔴 {tiers.get('ignored',0)}")

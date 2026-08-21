@@ -39,9 +39,21 @@ def _ventas_medidas(conn, wallet=None):
     return conn.execute(sql, args).fetchall()
 
 
-def _perfil(chgs_1h: list, chgs_24h: list) -> dict:
-    """Estadistica y clasificacion a partir de las derivas crudas."""
-    n = max(len(chgs_1h), len(chgs_24h))
+def _perfil(filas: list) -> dict:
+    """Estadistica y clasificacion a partir de las ventas medidas.
+
+    `filas` es una lista de pares (chg_1h, chg_24h), UNO POR VENTA.
+    (Ola 8, 21/8) Antes el numerador de pct_sigue_subiendo salia de una
+    lista (24h si existia, si no 1h) y el denominador era el maximo de
+    las dos: con 10 ventas medidas a 1h y 3 a 24h daba 3 aciertos entre
+    10 → porcentaje falso. Ahora cada venta aporta UNA medida (24h si la
+    tiene, si no 1h) y numerador y denominador salen de la misma lista;
+    ventas_medidas es de verdad el numero de ventas medidas."""
+    chgs_1h = [a for a, b in filas if a is not None]
+    chgs_24h = [b for a, b in filas if b is not None]
+    ref_por_venta = [b if b is not None else a for a, b in filas
+                     if a is not None or b is not None]
+    n = len(ref_por_venta)
     med_1h = median(chgs_1h) if chgs_1h else None
     med_24h = median(chgs_24h) if chgs_24h else None
     # La referencia es la mediana a 24h si existe (mas señal, menos ruido);
@@ -55,7 +67,7 @@ def _perfil(chgs_1h: list, chgs_24h: list) -> dict:
         clase = "sale en la cima"      # vender ya (o antes)
     else:
         clase = "neutral"              # copiar su venta tal cual
-    pos = [c for c in (chgs_24h or chgs_1h) if c > UMBRAL_PCT]
+    pos = [c for c in ref_por_venta if c > UMBRAL_PCT]
     return {
         "ventas_medidas": n,
         "deriva_1h": round(med_1h, 1) if med_1h is not None else None,
@@ -69,27 +81,23 @@ def deriva_post_venta(conn, min_ventas: int = MIN_VENTAS) -> dict:
     """{wallet: perfil} para todas las ⭐ con suficientes ventas medidas."""
     por_wallet: dict = {}
     for r in _ventas_medidas(conn):
-        d = por_wallet.setdefault(r["wallet"], {"h1": [], "h24": []})
-        if r["chg_1h"] is not None:
-            d["h1"].append(r["chg_1h"])
-        if r["chg_24h"] is not None:
-            d["h24"].append(r["chg_24h"])
+        por_wallet.setdefault(r["wallet"], []).append(
+            (r["chg_1h"], r["chg_24h"]))
     out = {}
-    for w, d in por_wallet.items():
-        if max(len(d["h1"]), len(d["h24"])) >= min_ventas:
-            out[w] = _perfil(d["h1"], d["h24"])
+    for w, filas in por_wallet.items():
+        if len(filas) >= min_ventas:
+            out[w] = _perfil(filas)
     return out
 
 
 def perfil_salida(conn, wallet: str) -> dict | None:
     """Perfil de UNA billetera (para inyectar a la IA de salidas), o None
     si aun no tiene suficientes ventas medidas."""
-    filas = _ventas_medidas(conn, wallet)
-    h1 = [r["chg_1h"] for r in filas if r["chg_1h"] is not None]
-    h24 = [r["chg_24h"] for r in filas if r["chg_24h"] is not None]
-    if max(len(h1), len(h24)) < MIN_VENTAS:
+    filas = [(r["chg_1h"], r["chg_24h"])
+             for r in _ventas_medidas(conn, wallet)]
+    if len(filas) < MIN_VENTAS:
         return None
-    return _perfil(h1, h24)
+    return _perfil(filas)
 
 
 def salidas_text(conn) -> str:

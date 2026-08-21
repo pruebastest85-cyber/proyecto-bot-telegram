@@ -143,9 +143,17 @@ def resumen(address: str) -> str | None:
     if f.get("ts"):
         dias = (time.time() - float(f["ts"])) / 86400
         partes.append(f"hace {dias:.0f} días")
-    hs = hermanas(address)
-    if hs:
-        partes.append(f"⚠️ {len(hs)} billetera(s) del mismo origen")
+    # (Ola 8, 21/8) Antes esto usaba hermanas(), que NO filtra fondeadores
+    # impersonales (hot-wallets de exchange, pump.fun) ni el tamaño del
+    # grupo: media Solana sale de la hot-wallet de un exchange y aparecia
+    # como "⚠️ mismo origen" insinuando mismo dueño. familia() existe
+    # justo para eso; si el fondeador es un servicio, se dice sin alarma.
+    fam = familia(address)
+    if fam:
+        partes.append(f"⚠️ {len(fam)} billetera(s) del mismo origen")
+    elif _es_impersonal(f):
+        partes.append("origen impersonal (exchange/servicio; "
+                      "no implica mismo dueño)")
     return "  ·  ".join(partes)
 
 

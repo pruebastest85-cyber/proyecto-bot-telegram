@@ -78,14 +78,16 @@ def _ago(h) -> str:
         h = float(h)
     except (TypeError, ValueError):
         return ""
-    mins = h * 60
-    if mins < 1:
+    # (Ola 8, 21/8) Primero minutos ENTEROS y luego las ramas sobre ese
+    # total: antes h=1.99 daba "hace 1h 60min" (redondeo sin acarreo) y
+    # 59,6 min daba "hace 60 min" en la rama de minutos.
+    total = int(round(h * 60))
+    if total < 1:
         return "recién"
-    if mins < 60:
-        return f"hace {mins:.0f} min"
-    if h < 24:
-        hh = int(h)
-        mm = int(round((h - hh) * 60))
+    if total < 60:
+        return f"hace {total} min"
+    if total < 24 * 60:
+        hh, mm = divmod(total, 60)
         return f"hace {hh}h {mm}min" if mm else f"hace {hh}h"
     return f"hace {h / 24:.0f} d"
 

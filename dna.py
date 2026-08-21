@@ -86,7 +86,11 @@ def wallet_dna_text(address: str) -> str | None:
         lines.append(f"Win Rate: {s['win_rate']}% · "
                      f"{m.get('closed', s.get('trades', 0))} ops cerradas")
     if m.get("profit_factor") is not None:
-        lines.append(f"Profit Factor: {m['profit_factor']} · "
+        # (Ola 8, 21/8) 99.99 es un CENTINELA interno ("sin perdidas
+        # cerradas"), no una medicion: mostrarlo como dato era mentir.
+        _pf = m["profit_factor"]
+        _pf_txt = ("∞ (sin pérdidas cerradas)" if _pf >= 99 else f"{_pf}")
+        lines.append(f"Profit Factor: {_pf_txt} · "
                      f"Expectancy: {m.get('expectancy_sol', 0):+.3f} SOL/op")
     if m.get("sharpe") is not None or m.get("max_drawdown_sol") is not None:
         seg = []
@@ -97,7 +101,11 @@ def wallet_dna_text(address: str) -> str | None:
         lines.append(" · ".join(seg))
 
     # PnL
-    lines.append(f"PnL realizado: {p['pnl_total_sol']:+.1f} SOL")
+    # (Ola 8, 21/8) pnl_total_sol es Σ(sol_out − sol_in) por token,
+    # incluyendo bolsas aun retenidas cuyo costo resta entero: es flujo
+    # neto de caja, no "PnL realizado" en sentido estricto.
+    lines.append(f"Flujo neto (ventas − compras): "
+                 f"{p['pnl_total_sol']:+.1f} SOL")
     if p.get("held_tokens"):
         lines.append(f"En cartera: {p.get('unrealized_sol', 0):+.1f} SOL · "
                      f"Neto: {p.get('net_pnl_sol', p['pnl_total_sol']):+.1f} SOL")
