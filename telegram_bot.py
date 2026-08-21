@@ -651,6 +651,19 @@ async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· resumen diario falló: {e}")
 
 
+async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Ola 11) Semanal: la IA revisa sus decisiones vs lo medido."""
+    if not ADMIN_ID:
+        return
+    try:
+        from post_mortem import generar
+        txt = await asyncio.to_thread(generar)
+        await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
+                                   parse_mode="Markdown")
+    except Exception as e:
+        print(f"· post-mortem semanal falló: {e}")
+
+
 async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: corre el ciclo y avisa al admin."""
     resumen = await asyncio.to_thread(run_full_cycle)
@@ -1706,6 +1719,19 @@ async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_postmortem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/postmortem — decisiones vs resultado medido. 'ya' = regenerar."""
+    fresco = bool(ctx.args and ctx.args[0].lower() in ("ya", "ahora"))
+    if fresco:
+        await update.message.reply_text(
+            "⏳ Generando el post-mortem (la IA puede tardar un par de "
+            "minutos)…")
+    from post_mortem import post_mortem_text
+    txt = await asyncio.to_thread(post_mortem_text, fresco)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
 async def cmd_salidas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Deriva post-venta por billetera: ¿vende temprano o sale en la cima?"""
     from salidas import salidas_text, hold_report
@@ -1830,6 +1856,7 @@ def main():
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("ialocal", cmd_ialocal))
     app.add_handler(CommandHandler("salidas", cmd_salidas))
+    app.add_handler(CommandHandler("postmortem", cmd_postmortem))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
     app.add_handler(CommandHandler("clusters", cmd_clusters))
@@ -1971,6 +1998,12 @@ def main():
         interval=7 * 86400,
         first=_reloj_first("weekly_learning", 7 * 86400, 3 * 86400),
         name="weekly_learning")
+    # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
+    app.job_queue.run_repeating(
+        _con_reloj("post_mortem", post_mortem_job),
+        interval=7 * 86400,
+        first=_reloj_first("post_mortem", 7 * 86400, 4 * 86400),
+        name="post_mortem")
     # Cierre del ciclo: el rendimiento medido degrada ⭐ cada 24 h
     app.job_queue.run_repeating(
         _con_reloj("performance_review", performance_review_job),

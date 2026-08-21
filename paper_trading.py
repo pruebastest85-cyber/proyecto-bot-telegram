@@ -234,6 +234,21 @@ def open_trade(conn, trade: dict, token: dict, score,
          cot.get("slippage_pct") if cot else None,
          costo_entrada, round(demora, 2), gestion, origen))
     conn.commit()
+    # (Ola 12) Resolver el creador del token EN FONDO (1 llamada RPC):
+    # la vigilancia dev-sell necesita saber quien es el dev, y el camino
+    # caliente no espera a nadie.
+    try:
+        _fila = conn.execute(
+            "SELECT id FROM paper_trades WHERE signature=? "
+            "ORDER BY id DESC LIMIT 1", (trade["signature"],)).fetchone()
+        if _fila:
+            import threading as _th
+            from dev_watch import guardar_dev
+            _th.Thread(target=guardar_dev,
+                       args=(_fila["id"], trade["mint"]),
+                       daemon=True).start()
+    except Exception as e:
+        print(f"· dev_watch: no pude lanzar la resolución del dev: {e}")
     monto = (f"{_usd(stake_usd)} ({stake:.2f} SOL)" if stake_usd is not None
              else f"{stake:.2f} SOL")
     print(f"🧪 Paper: compra simulada {monto} en {sym} "
@@ -802,6 +817,13 @@ def update_open_trades() -> int:
             _close(conn, row, price, "tiempo", "⏰")
             cerradas += 1
     conn.close()
+    # (Ola 12) Vigilancia dev-sell: ¿el creador de algún token con
+    # posición abierta vendió? Una alerta por posición, nunca cierra solo.
+    try:
+        from dev_watch import revisar_devs
+        revisar_devs()
+    except Exception as e:
+        print(f"· dev_watch falló (no afecta al paper): {e}")
     return cerradas
 
 

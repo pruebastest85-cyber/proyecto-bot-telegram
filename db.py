@@ -571,7 +571,11 @@ def _preparar_pg(pg):
             # ahorrado rechazar. Si el numero da, el executor real la
             # usara como puerta de verdad.
             ("paper_trades", "ia_entrada", "TEXT"),
-            ("paper_trades", "ia_entrada_razon", "TEXT")]:
+            ("paper_trades", "ia_entrada_razon", "TEXT"),
+            # Vigilancia del dev (Ola 12): creador del token y si ya se
+            # aviso de que vendio (una alerta por posicion).
+            ("paper_trades", "dev_wallet", "TEXT"),
+            ("paper_trades", "dev_alerted", "INTEGER")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -631,7 +635,8 @@ def _preparar_sqlite(conn):
                      ("pnl_realizado_usd", "REAL"),
                      ("gestion", "TEXT"), ("decidido_por", "TEXT"),
                      ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT"),
-                     ("origen", "TEXT"), ("ultima_venta_sig", "TEXT")]:
+                     ("origen", "TEXT"), ("ultima_venta_sig", "TEXT"),
+                     ("dev_wallet", "TEXT"), ("dev_alerted", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
