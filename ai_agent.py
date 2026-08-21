@@ -98,6 +98,14 @@ TOOLS = [
                      "description": ("una de: paper, posiciones, "
                                      "rendimiento, salud, helius")}},
          "required": ["seccion"]}},
+    {"name": "ver_ajustes",
+     "description": ("Los AJUSTES ACTUALES del bot leídos de la base en "
+                     "este momento: umbral de señal, top de alertas, "
+                     "paper (encendido, tope, TP/SL) y los últimos "
+                     "cambios hechos por chat. ÚSALA SIEMPRE antes de "
+                     "afirmar el valor de un ajuste o de proponer "
+                     "cambiarlo — nunca cites un ajuste de memoria."),
+     "input_schema": {"type": "object", "properties": {}}},
     # ── Ajustes con confirmación (Ola 9): lista blanca y rangos duros. ──
     {"name": "cambiar_top_alertas",
      "description": ("Cambia cuántas billeteras del top alertan y disparan "
@@ -158,6 +166,10 @@ SYSTEM = (
     "lo pide (p. ej. buscar_billetera para resolver un alias y luego "
     "senales_de_billetera con la dirección). Cita SOLO números que salgan "
     "de los resultados de las herramientas: si no consultaste, no inventes. "
+    "Antes de afirmar el valor de un ajuste (umbral, top de alertas, "
+    "paper) o de proponer cambiarlo, consulta ver_ajustes: puede que ya "
+    "esté en el valor pedido y entonces basta con decirlo, sin proponer "
+    "nada. "
     "Para acciones que modifican, invoca la herramienta directamente: el "
     "sistema le pedirá confirmación al usuario, no tú. El bot NO puede "
     "mover dinero real; el paper trading es simulación.")
@@ -326,6 +338,44 @@ def _exec_read(name: str, args: dict) -> str:
                 return "Sin evidencia registrada para esa dirección."
             return json.dumps([r["reason"] for r in rows[:10]],
                               ensure_ascii=False)[:4000]
+        if name == "ver_ajustes":
+            from db import get_setting
+            conn = get_conn()
+            try:
+                umbral = float(get_setting(conn, "min_signal_score",
+                                           "0") or 0)
+                manual = (get_setting(conn, "umbral_manual", "0")
+                          or "0").strip() == "1"
+                top = int(float(get_setting(conn, "top_alertas",
+                                            "30") or 30))
+                out = {
+                    "umbral_senal": {
+                        "valor": umbral,
+                        "modo": "manual" if manual else "automático",
+                        "nota": ("0 en modo manual = alerta TODO"
+                                 if manual and umbral == 0 else "")},
+                    "top_alertas": {"valor": top,
+                                    "nota": "0 = sin límite, todas las ⭐"
+                                    if top == 0 else ""},
+                    "paper": {
+                        "encendido": (get_setting(conn, "paper_enabled",
+                                                  "1") or "1") != "0",
+                        "max_sol": float(get_setting(
+                            conn, "paper_max_sol", "1.0") or 1.0),
+                        "tp_pct": float(get_setting(
+                            conn, "paper_tp_pct", "100") or 100),
+                        "sl_pct": float(get_setting(
+                            conn, "paper_sl_pct", "50") or 50)},
+                }
+                try:
+                    log = json.loads(get_setting(conn, "ajustes_log",
+                                                 "[]") or "[]")
+                    out["ultimos_cambios_por_chat"] = log[-5:]
+                except (ValueError, TypeError):
+                    pass
+            finally:
+                conn.close()
+            return json.dumps(out, ensure_ascii=False)[:3000]
         if name == "estado_sistema":
             seccion = (args.get("seccion") or "").lower().strip()
             if seccion == "paper":
@@ -528,8 +578,11 @@ def chat(user_text: str):
                 _save_turn(user_text,
                            respuesta or f"Propuse ejecutar {accion['tool']}")
             return respuesta, accion
-    return ("Ninguna IA respondió: revisa que LM Studio esté corriendo "
-            "(/ialocal <url>) o configura ANTHROPIC_API_KEY."), None
+    return ("Ninguna IA respondió en este momento. Lo más probable es "
+            "que la IA local esté ocupada (un ciclo de evaluación la "
+            "acapara varios minutos): reintenta en un rato. Si persiste, "
+            "revisa que LM Studio esté corriendo (/ialocal <url>) o "
+            "configura ANTHROPIC_API_KEY."), None
 
 
 def _registrar_ajuste(conn, clave: str, antes, despues):
@@ -622,6 +675,9 @@ def execute_action(action: dict) -> str:
             conn = get_conn()
             try:
                 antes = get_setting(conn, "top_alertas", "30")
+                if str(int(float(antes or 30))) == str(n):
+                    return (f"El top de alertas YA estaba en {antes}. "
+                            f"No cambié nada.")
                 set_setting(conn, "top_alertas", str(n))
                 _registrar_ajuste(conn, "top_alertas", antes, str(n))
             finally:
@@ -637,6 +693,10 @@ def execute_action(action: dict) -> str:
                 if acc in ("encender", "apagar"):
                     antes = get_setting(conn, "paper_enabled", "1")
                     nuevo = "1" if acc == "encender" else "0"
+                    if (antes or "1").strip() == nuevo:
+                        return ("El paper YA estaba "
+                                + ("encendido." if nuevo == "1"
+                                   else "apagado.") + " No cambié nada.")
                     set_setting(conn, "paper_enabled", nuevo)
                     _registrar_ajuste(conn, "paper_enabled", antes, nuevo)
                     return ("🧪 Paper trading ENCENDIDO." if nuevo == "1"
@@ -676,8 +736,17 @@ def execute_action(action: dict) -> str:
                         "optimizarse solo con el historial medido.")
             v = max(0, min(100, v_raw))
             conn = get_conn()
+            from db import get_setting as _gs
             try:
-                from db import get_setting as _gs
+                _antes = float(_gs(conn, "min_signal_score", "0") or 0)
+                _manual = (_gs(conn, "umbral_manual", "0") or "0") == "1"
+                if _antes == v and _manual:
+                    conn.close()
+                    return (f"El umbral YA estaba en {v:.0f}/100 (modo "
+                            f"manual). No cambié nada.")
+            except Exception:
+                pass
+            try:
                 _registrar_ajuste(conn, "min_signal_score",
                                   _gs(conn, "min_signal_score", "0"), str(v))
             except Exception:
