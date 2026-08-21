@@ -901,6 +901,15 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await q.edit_message_text("❌ Acción cancelada.")
             except Exception:
                 pass
+            # (21/8) El agente también debe recordar los rechazos.
+            if accion:
+                try:
+                    from ai_agent import _save_turn, describe_action
+                    await asyncio.to_thread(
+                        _save_turn, "(cancelé la acción propuesta)",
+                        f"(acción CANCELADA: {describe_action(accion)})")
+                except Exception:
+                    pass
             return
         await q.answer("Ejecutando…")
         from ai_agent import execute_action
@@ -909,6 +918,17 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"✅ {resultado}")
         except Exception:
             pass
+        # (21/8) Guardar el DESENLACE en la memoria del chat: sin esto,
+        # el agente recordaba que propuso la acción pero no que se
+        # ejecutó, y ante un "¿listo?" la volvía a proponer.
+        try:
+            from ai_agent import _save_turn, describe_action
+            await asyncio.to_thread(
+                _save_turn,
+                f"(confirmé la acción: {describe_action(accion)})",
+                f"(acción EJECUTADA — resultado: {resultado})")
+        except Exception as e:
+            print(f"· No pude guardar el desenlace en el historial: {e}")
         return
 
     # Botones del /top: descartar (d:) o cambiar tamaño (t:)
