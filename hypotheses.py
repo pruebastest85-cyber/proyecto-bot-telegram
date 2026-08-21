@@ -106,15 +106,9 @@ def generate_hypotheses() -> str | None:
         text = (completar(prompt, max_tokens=700, timeout=120) or "").strip()
         if not text:
             raise RuntimeError("IA no disponible (ni local ni nube)")
-        try:
-            from ai_budget import record_call
-            _c = get_conn()
-            try:
-                record_call(_c)
-            finally:
-                _c.close()
-        except Exception:
-            pass
+        # (Ola 7) Sin record_call aqui: el puente cuenta la nube solo
+        # cuando la nube responde; contar cada llamada local inflaba el
+        # marcador de presupuesto con gasto que no existe.
     except Exception as e:
         print(f"· Motor de hipótesis falló: {e}")
         return None

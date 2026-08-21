@@ -133,9 +133,41 @@ def _c_embudo(conn):
             return _chk("Embudo", WARN,
                         f"{evaluadas} evaluadas pero 0 ⭐",
                         "puede que los umbrales estén muy exigentes")
-        return _chk("Embudo", OK,
-                    f"{wallets} candidatas · {evaluadas} evaluadas · "
-                    f"{estrellas} ⭐")
+        # Desglose REAL del embudo (Ola 7): "16.104 candidatas" a secas
+        # asustaba — el 93% son billeteras de UN solo ganador que esperan
+        # reincidir, no una cola de trabajo. Aquí va la cola de examen de
+        # verdad (los mismos filtros de la evaluación) y el enfriamiento.
+        try:
+            from datetime import datetime, timedelta, timezone
+            _c3 = (datetime.now(timezone.utc) - timedelta(days=3)
+                   ).isoformat(timespec="seconds")
+            _c14 = (datetime.now(timezone.utc) - timedelta(days=14)
+                    ).isoformat(timespec="seconds")
+            en_cola = conn.execute(
+                """SELECT COUNT(*) c FROM wallets w
+                   WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= 2
+                     AND (ai_class IS NULL OR pnl_updated IS NULL
+                          OR (is_tracked=1 AND pnl_updated < ?)
+                          OR (is_tracked=0 AND pnl_updated < ?))
+                     AND EXISTS (SELECT 1 FROM appearances a
+                                 WHERE a.wallet = w.address
+                                   AND COALESCE(a.buy_sol, 0) >= 1
+                                   AND (a.entry_multiple IS NULL
+                                        OR a.entry_multiple >= 3))""",
+                (_c3, _c14)).fetchone()["c"]
+            enfriando = conn.execute(
+                """SELECT COUNT(*) c FROM wallets
+                   WHERE COALESCE(is_bot,0)=0 AND is_tracked=0
+                     AND ai_class IS NOT NULL AND pnl_updated >= ?""",
+                (_c14,)).fetchone()["c"]
+            return _chk("Embudo", OK,
+                        f"{wallets} conocidas · {en_cola} en cola de "
+                        f"examen · {enfriando} en enfriamiento · "
+                        f"{estrellas} ⭐")
+        except Exception:
+            return _chk("Embudo", OK,
+                        f"{wallets} candidatas · {evaluadas} evaluadas · "
+                        f"{estrellas} ⭐")
     except Exception as e:
         return _chk("Embudo", WARN, f"no se pudo comprobar ({e})")
 
@@ -219,15 +251,18 @@ def _c_apis():
 def _c_helius(conn):
     """¿Se está gastando la cuota de Helius a buen ritmo o de más?"""
     try:
+        # v2 (Ola 7): créditos EXACTOS del CICLO de facturación (los que
+        # cuadran con el panel de Helius), no la vieja suma doble sobre
+        # el mes calendario que llegó a mostrar 2,2 M con 328 k reales.
         from helius_budget import (creditos_usados, pct_usado, CUOTA_MENSUAL,
-                                   FRENO_PCT, _dia_ciclo)
+                                   FRENO_PCT, dia_del_ciclo)
         usados = creditos_usados(conn)
         pct = pct_usado(conn)
-        dia = max(1, _dia_ciclo())
+        dia = max(1, dia_del_ciclo(conn))
         proy = usados / dia * 30
         proy_pct = 100.0 * proy / CUOTA_MENSUAL if CUOTA_MENSUAL else 0
-        det = (f"{usados:,} créditos ({pct:.0f}%) · proyección "
-               f"{proy_pct:.0f}% a fin de mes")
+        det = (f"{usados:,} créditos en {dia} día(s) de ciclo ({pct:.0f}%) "
+               f"· ritmo → {proy_pct:.0f}% del plan · el panel manda")
         if pct >= FRENO_PCT:
             return _chk("Créditos Helius", CRIT, det,
                         "descargas pausadas para no quedarte sin cuota")

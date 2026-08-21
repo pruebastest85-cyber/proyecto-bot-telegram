@@ -335,19 +335,15 @@ def evaluate_tracked(conn) -> int:
             (addr,)).fetchall()
         track = wallet_track_record(conn, addr) if wallet_track_record else None
         avoid = sorted(a for a, o in owner.items() if o != addr)
-        # Presupuesto de IA: si se agotó, verdict=None → respaldo grading.
-        try:
-            from ai_budget import can_call, record_call
-            if can_call(conn):
-                verdict = ai_verdict(profile, [e["reason"] for e in ev],
-                                     track, avoid_aliases=avoid)
-                record_call(conn)
-            else:
-                verdict = None
-                print("  💤 Presupuesto de IA agotado → clasificación por grading")
-        except Exception:
-            verdict = ai_verdict(profile, [e["reason"] for e in ev], track,
-                                 avoid_aliases=avoid)
+        # La IA local es titular y GRATIS; el puente gestiona solo el
+        # presupuesto de nube y se cuenta a si mismo (Ola 7, 21/8). El
+        # peaje can_call/record_call de la era-nube contaba aqui CADA
+        # evaluacion contra el cupo de 300 aunque respondiera la local:
+        # el marcador mentia (229/300 con la nube sin credito) y, al
+        # "agotarse" el contador falso, las evaluaciones corrian SIN IA
+        # el resto del dia (clasificacion por grading a ciegas).
+        verdict = ai_verdict(profile, [e["reason"] for e in ev],
+                             track, avoid_aliases=avoid)
         if not verdict:
             # Sin IA (sin ANTHROPIC_API_KEY o sin créditos): RESPALDO por
             # grading — la rentabilidad decide, sin gastar IA. El bot sigue
