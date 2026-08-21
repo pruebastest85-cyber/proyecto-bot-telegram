@@ -52,8 +52,44 @@ def guardar_dev(trade_id: int, mint: str) -> None:
         finally:
             conn.close()
         print(f"· dev_watch: dev de {mint[:8]}… = {dev[:8]}…")
+        # (Ola 12b) Refrescar la lista vigilada: el dev entra a
+        # LaserStream en su proximo chequeo (<=60 s).
+        try:
+            from realtime import invalidar_vigiladas
+            invalidar_vigiladas()
+        except Exception:
+            pass
     except Exception as e:
         print(f"· dev_watch: no pude guardar el dev: {e}")
+
+
+def alerta_dev_inmediata(conn, trade: dict) -> int:
+    """(Ola 12b) El dev acaba de VENDER en tiempo real (LaserStream o
+    webhook): alerta al instante para las posiciones abiertas de ese
+    token que aun no avisaron. Devuelve cuantas marco."""
+    rows = conn.execute(
+        """SELECT id, symbol, mint FROM paper_trades
+           WHERE status='abierta' AND dev_wallet=? AND mint=?
+             AND COALESCE(dev_alerted, 0) = 0""",
+        (trade["wallet"], trade["mint"])).fetchall()
+    if not rows:
+        return 0
+    for r in rows:
+        conn.execute("UPDATE paper_trades SET dev_alerted=1 WHERE id=?",
+                     (r["id"],))
+    conn.commit()
+    try:
+        from realtime import tg_send
+        sym = rows[0]["symbol"] or trade["mint"][:8]
+        tg_send(f"🚨 *DEV VENDIÓ (en vivo)* — *{sym}*\n"
+                f"El creador del token (`{trade['wallet'][:8]}…`) acaba "
+                f"de vender ~{trade.get('sol') or 0:.2f} SOL de su bolsa. "
+                f"Suele preceder al desplome inmediato.\n"
+                f"Tienes posición de paper abierta: revisa /paper.\n"
+                f"`{trade['mint']}`")
+    except Exception as e:
+        print(f"· dev_watch: no pude avisar en vivo: {e}")
+    return len(rows)
 
 
 def _dev_vendio(dev: str, mint: str) -> bool:

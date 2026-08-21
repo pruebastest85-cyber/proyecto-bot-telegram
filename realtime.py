@@ -185,11 +185,23 @@ def watch_addresses(conn=None) -> list[str]:
             "WHERE status='abierta'").fetchall()]
     except Exception:
         huerfanas = []            # tabla aún sin crear
+    # (Ola 12b, 21/8) Devs de tokens con posición abierta: entran a la
+    # VIGILANCIA EN TIEMPO REAL. El sondeo de 15 min llegaba tarde por
+    # definición — cuando el dev vende, el desplome es inmediato. Con el
+    # dev suscrito en LaserStream la alerta llega en segundos.
+    try:
+        devs = [r["dev_wallet"] for r in conn.execute(
+            "SELECT DISTINCT dev_wallet FROM paper_trades "
+            "WHERE status='abierta' AND dev_wallet IS NOT NULL").fetchall()]
+    except Exception:
+        devs = []                 # tabla/columna aún sin crear
     if propia:
         conn.close()
     fuera = [c for c in cands if c not in stars]
     extra = [h for h in huerfanas if h not in stars and h not in fuera]
-    return stars + fuera + extra
+    ya = set(stars) | set(fuera) | set(extra)
+    extra_devs = [d for d in devs if d not in ya]
+    return stars + fuera + extra + extra_devs
 
 
 def _guardar_huella(huella: str) -> None:
@@ -512,17 +524,26 @@ _VIG_CACHE = {"ts": 0.0, "watch": None, "stars": None}
 
 
 def _listas_vigiladas(conn):
-    """(vigiladas, ⭐) reutilizando `conn` y con cache de 60 s."""
+    """(vigiladas, ⭐, devs) reutilizando `conn` y con cache de 60 s."""
     ahora = time.time()
     with _VIG_LOCK:
         if (_VIG_CACHE["watch"] is not None
                 and ahora - _VIG_CACHE["ts"] < _VIG_TTL):
-            return _VIG_CACHE["watch"], _VIG_CACHE["stars"]
+            return (_VIG_CACHE["watch"], _VIG_CACHE["stars"],
+                    _VIG_CACHE.get("devs") or set())
     w = watch_addresses(conn)
     e = tracked_addresses(conn)
+    # (Ola 12b) El conjunto de devs por separado: sus transacciones NO son
+    # señales de candidatas — se interceptan antes del registro normal.
+    try:
+        d = {r["dev_wallet"] for r in conn.execute(
+            "SELECT DISTINCT dev_wallet FROM paper_trades "
+            "WHERE status='abierta' AND dev_wallet IS NOT NULL").fetchall()}
+    except Exception:
+        d = set()
     with _VIG_LOCK:
-        _VIG_CACHE.update({"ts": ahora, "watch": w, "stars": e})
-    return w, e
+        _VIG_CACHE.update({"ts": ahora, "watch": w, "stars": e, "devs": d})
+    return w, e, d
 
 
 def invalidar_vigiladas():
@@ -555,7 +576,7 @@ def process_transactions(txs: list[dict]):
 
 
 def _proc(txs: list[dict], conn):
-    lista_w, lista_e = _listas_vigiladas(conn)
+    lista_w, lista_e, devs = _listas_vigiladas(conn)
     tracked = set(lista_w)
     stars = set(lista_e)
     if not tracked:
@@ -568,6 +589,18 @@ def _proc(txs: list[dict], conn):
     for tx in txs:
         trade = _detect_trade(tx, tracked)
         if not trade:
+            continue
+        # (Ola 12b) Interceptar a los DEVS antes del registro normal: sus
+        # transacciones no son señales de candidatas ni de ⭐ — son la
+        # alarma de rug. Si el dev vende el token de una posición abierta,
+        # la alerta sale AQUÍ, en segundos, no en el sondeo de 15 min.
+        if trade["wallet"] in devs and trade["wallet"] not in stars:
+            if trade["side"] == "venta":
+                try:
+                    from dev_watch import alerta_dev_inmediata
+                    alerta_dev_inmediata(conn, trade)
+                except Exception as e:
+                    print(f"· dev_watch inmediato falló: {e}")
             continue
         # Candado anti-duplicados: solo un hilo puede "ganar" el registro
         # de esta firma; el resto la ve ya existente y no re-alerta.
