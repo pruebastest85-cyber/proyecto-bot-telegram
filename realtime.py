@@ -777,8 +777,16 @@ def _proc(txs: list[dict], conn):
         if patron and t.get("mc"):
             patron_ok = (patron["mc_p25"] * 0.5 <= t["mc"]
                          <= patron["mc_p75"] * 2)
+        # (Ola 10) Rol de liderazgo, SOLO del cache del grafo: en el hilo
+        # del webhook jamas se construye (candado + RAM). Sin cache = s/d.
+        try:
+            from influence import influencia_ligera
+            _rol = influencia_ligera(trade["wallet"])
+        except Exception:
+            _rol = None
         score_sig, desglose = compute_signal_score(
-            t, _wget(w, "wallet_score"), track, consensus, patron_ok)
+            t, _wget(w, "wallet_score"), track, consensus, patron_ok,
+            inf=_rol)
 
         # Guardar el score (barato, sin IA). El veredicto de IA se calcula
         # MÁS ABAJO, solo si la señal supera TODOS los filtros — así no se

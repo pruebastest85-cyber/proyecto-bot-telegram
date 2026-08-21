@@ -378,6 +378,24 @@ def _indice_aristas(g) -> tuple[dict, dict]:
     return idx
 
 
+def influencia_ligera(address: str) -> dict | None:
+    """Rol de liderazgo SOLO desde el cache (Ola 10, 21/8): NUNCA
+    construye el grafo. Apta para el hilo del webhook, donde disparar la
+    construccion significaria candado + pico de RAM en el camino
+    caliente. None si el cache esta frio o la billetera no figura — el
+    llamador trata None como 'sin dato', no como 'neutral confirmado'."""
+    g = _CACHE.get("g")
+    if not g:
+        return None
+    w = g.get("wallets", {}).get(address)
+    if not w:
+        return None
+    return {"leader_score": w.get("leader_score"),
+            "follower_score": w.get("follower_score"),
+            "pct_first": w.get("pct_first"),
+            "avg_lag_s": w.get("avg_lag_s")}
+
+
 def influence(address: str) -> dict | None:
     g = graph()
     if address not in g["wallets"]:

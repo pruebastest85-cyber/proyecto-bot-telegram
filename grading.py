@@ -58,6 +58,9 @@ ELITE_NET = _env("MIN_REALIZED_PNL_ELITE_SOL", 20.0)  # PnL neto min Elite
 # (el grafo tarda semanas en poblarse). Ahora liderar SUMA, pero no manda.
 ELITE_NET_SOLO = _env("ELITE_NET_SIN_LIDERAZGO", 60.0)   # PnL neto excepcional
 CONS_ELITE_SOLO = _env("CONS_ELITE_SIN_LIDERAZGO", 80)   # consistencia alta
+# Seguidora crónica (Ola 10): follower_score alto + casi nunca primera.
+FOLLOWER_CRONICA = _env("FOLLOWER_CRONICA_MIN", 70)
+PCT_FIRST_SEGUIDORA = _env("PCT_FIRST_SEGUIDORA_MAX", 20)
 
 
 def _conc(p) -> float | None:
@@ -216,8 +219,20 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
     excepcional = net >= ELITE_NET_SOLO and cons >= CONS_ELITE_SOLO
     if excepcional and not leads:
         reasons.append("rendimiento excepcional (sin liderazgo aún)")
+    # (Ola 10, 21/8) Seguidora crónica: va sistemáticamente DETRÁS de su
+    # cluster (dato del grafo de influencia). Puede ser rentable, pero su
+    # señal es el eco de la compra de otra y llega tarde por definición:
+    # como fuente de copia vale menos. Tope: Seguimiento, nunca Elite.
+    seguidora = bool(
+        inf and (inf.get("follower_score") or 0) >= FOLLOWER_CRONICA
+        and (inf.get("pct_first") or 0) <= PCT_FIRST_SEGUIDORA)
+    if seguidora:
+        _lag = inf.get("avg_lag_s")
+        reasons.append("seguidora crónica: entra detrás de su cluster"
+                       + (f" (~{_lag:.0f}s tarde)" if _lag else ""))
     if (quality and diversified and cons >= CONS_ELITE
-            and net >= ELITE_NET and (leads or excepcional)):
+            and net >= ELITE_NET and (leads or excepcional)
+            and not seguidora):
         return _res("⭐", "Elite", cons, reasons)
     if quality and cons >= CONS_SEG:
         return _res("🟢", "Seguimiento", cons, reasons)

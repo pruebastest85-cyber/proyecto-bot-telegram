@@ -160,6 +160,25 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
             ctx["perfil_salida_billetera"] = pf
     except Exception:
         pass
+    # (Ola 10, 21/8) Rol en el cluster, solo del cache del grafo: una
+    # seguidora cronica copia tarde — la IA de entrada debe saberlo.
+    try:
+        from influence import influencia_ligera
+        rol = influencia_ligera(trade["wallet"])
+        if rol and rol.get("follower_score") is not None:
+            ctx["rol_en_cluster"] = {
+                "leader_score": rol.get("leader_score"),
+                "follower_score": rol["follower_score"],
+                "pct_veces_primera": rol.get("pct_first"),
+                "nota": ("seguidora cronica: su compra es el eco de otra "
+                         "y llega tarde"
+                         if rol["follower_score"] >= 70
+                         and (rol.get("pct_first") or 0) <= 20 else
+                         "lider: suele comprar antes que su cluster"
+                         if (rol.get("leader_score") or 0) >= 70 else
+                         "sin sesgo claro")}
+    except Exception:
+        pass
     try:
         if token and token.get("mc"):
             ctx["market_cap_usd"] = round(token["mc"])

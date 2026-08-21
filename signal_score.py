@@ -8,6 +8,8 @@ Componentes:
   Momentum (0-10): edad, volumen, flujo de compras 5min
   Consenso (0-10): cuántas billeteras ⭐ hicieron lo mismo
   Patrón (±5): si el MC está dentro del rango habitual de la billetera
+  Adelanto (±6, Ola 10): líder de cluster suma; seguidora crónica resta
+    — su señal es el eco de la compra de otra y llega tarde por diseño.
 
 El umbral mínimo para alertar se guarda en settings ('min_signal_score',
 0 por defecto = alertar todo) y se cambia desde el chat del bot.
@@ -15,7 +17,8 @@ El umbral mínimo para alertar se guarda en settings ('min_signal_score',
 
 
 def compute_signal_score(t: dict, wallet_score, track: dict | None,
-                         consensus: int, patron_ok) -> tuple[int, str]:
+                         consensus: int, patron_ok,
+                         inf: dict | None = None) -> tuple[int, str]:
     """Devuelve (score 0-100, desglose legible)."""
     # Billetera (0-35)
     ws = wallet_score if wallet_score is not None else 50.0
@@ -63,9 +66,25 @@ def compute_signal_score(t: dict, wallet_score, track: dict | None,
     # Patrón (±5)
     p_pat = 5.0 if patron_ok is True else (-5.0 if patron_ok is False else 0.0)
 
+    # Adelanto (±6, Ola 10): copiar al copión es comprar más caro. El dato
+    # sale del grafo de influencia (solo cache: sin dato = 0, y se dice).
+    p_lead, lead_txt = 0.0, "s/d"
+    if inf:
+        fol = inf.get("follower_score")
+        pf = inf.get("pct_first")
+        lid = inf.get("leader_score")
+        if fol is not None and fol >= 70 and (pf or 0) <= 20:
+            p_lead, lead_txt = -6.0, "-6 (seguidora)"
+        elif (lid is not None and lid >= 70) or (pf or 0) >= 50:
+            p_lead, lead_txt = 3.0, "+3 (líder)"
+        else:
+            lead_txt = "0"
+
     total = int(round(max(0.0, min(
-        100.0, p_wallet + p_track + p_seg + p_mom + p_cons + p_pat))))
+        100.0, p_wallet + p_track + p_seg + p_mom + p_cons + p_pat
+        + p_lead))))
     desglose = (f"billetera {p_wallet:.0f} · track {p_track:.0f} · "
                 f"token {p_seg:.0f} · momentum {p_mom:.0f} · "
-                f"consenso {p_cons:.0f} · patrón {p_pat:+.0f}")
+                f"consenso {p_cons:.0f} · patrón {p_pat:+.0f} · "
+                f"adelanto {lead_txt}")
     return total, desglose
