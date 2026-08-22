@@ -197,6 +197,28 @@ def _rpc(address: str, *, orden: str = "desc", limite: int = 1000,
     return (salida, res.get("paginationToken"))
 
 
+def simbolo_token(mint: str) -> str | None:
+    """(22/8) Ticker del token via Helius DAS (getAsset). Existe desde el
+    SEGUNDO CERO del mint — a diferencia de DexScreener, que indexa el par
+    con retraso y deja a los tokens recien nacidos sin nombre ("EjAuFt").
+    Cuesta ~10 creditos y se apunta en el contador exacto."""
+    try:
+        r = requests.post(config.HELIUS_RPC, json={
+            "jsonrpc": "2.0", "id": 1, "method": "getAsset",
+            "params": {"id": mint}}, timeout=5)
+        r.raise_for_status()
+        _api_rec("helius_credits", 10)
+        _api_rec("helius")
+        contenido = ((r.json() or {}).get("result") or {}).get(
+            "content") or {}
+        s = ((contenido.get("metadata") or {}).get("symbol") or "").strip()
+        if s and not mint.startswith(s):
+            return s
+    except Exception as e:
+        print(f"· simbolo_token({mint[:8]}…) fallo: {e}")
+    return None
+
+
 def primeras_txs(mint: str, max_txs: int = 1500) -> tuple[list[dict], bool]:
     """
     Las PRIMERAS transacciones del token, en orden cronológico real.
