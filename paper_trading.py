@@ -110,23 +110,6 @@ def _usd_firmado(x) -> str:
 
 # ───────────────────────── Apertura ───────────────────────────────────────
 
-def _symbol_db(conn, mint: str) -> str | None:
-    """(21/8) Ticker desde la PROPIA base: señales previas del mint o el
-    catalogo de ganadores ya lo traen casi siempre. Cero red, cero espera.
-    Descarta los placebos guardados que son el trozo del contrato."""
-    try:
-        for sql in ("SELECT symbol FROM signals WHERE mint=? AND symbol "
-                    "IS NOT NULL AND symbol<>'' ORDER BY ts DESC LIMIT 1",
-                    "SELECT symbol FROM winning_tokens WHERE mint=? "
-                    "AND symbol IS NOT NULL AND symbol<>''"):
-            r = conn.execute(sql, (mint,)).fetchone()
-            if r and r["symbol"] and not mint.startswith(r["symbol"]):
-                return str(r["symbol"]).strip()
-    except Exception:
-        pass
-    return None
-
-
 def _symbol_rapido(mint: str) -> str | None:
     """Ticker del token en una consulta corta a DexScreener (para que la
     tarjeta del camino caliente no salga con el pedazo de contrato)."""
@@ -201,17 +184,8 @@ def open_trade(conn, trade: dict, token: dict, score,
     # salia con el pedazo de contrato ("7xKq4B"). Consulta relampago del
     # simbolo (19/8): ~300 ms que no frenan la copia; si falla, el
     # backfill posterior corrige la base igual que siempre.
-    # (21/8) El camino caliente manda el PEDAZO DE CONTRATO como
-    # "symbol" (mint[:6]) y el `or` lo daba por bueno: el buscador
-    # rapido nunca corria y la tarjeta decia "X4PLbt" en vez de
-    # "EARNBOT". Ahora ese placebo se descarta, y antes de ir a
-    # DexScreener se mira la PROPIA base (señales previas del mint ya
-    # traen el ticker): gratis e instantaneo.
-    _sym_tok = (token.get("symbol") or "").strip()
-    if _sym_tok and trade["mint"].startswith(_sym_tok):
-        _sym_tok = None                      # es el trozo del contrato
-    sym = (_sym_tok or _symbol_db(conn, trade["mint"])
-           or _symbol_rapido(trade["mint"]) or trade["mint"][:6])
+    sym = token.get("symbol") or _symbol_rapido(trade["mint"]) \
+        or trade["mint"][:6]
     # Importe en dólares al cambio de AHORA. Se guarda, no se recalcula
     # al cerrar: lo que quieres saber es cuánto dinero habrías puesto.
     su = _sol_a_usd()
@@ -260,21 +234,6 @@ def open_trade(conn, trade: dict, token: dict, score,
          cot.get("slippage_pct") if cot else None,
          costo_entrada, round(demora, 2), gestion, origen))
     conn.commit()
-    # (Ola 12) Resolver el creador del token EN FONDO (1 llamada RPC):
-    # la vigilancia dev-sell necesita saber quien es el dev, y el camino
-    # caliente no espera a nadie.
-    try:
-        _fila = conn.execute(
-            "SELECT id FROM paper_trades WHERE signature=? "
-            "ORDER BY id DESC LIMIT 1", (trade["signature"],)).fetchone()
-        if _fila:
-            import threading as _th
-            from dev_watch import guardar_dev
-            _th.Thread(target=guardar_dev,
-                       args=(_fila["id"], trade["mint"]),
-                       daemon=True).start()
-    except Exception as e:
-        print(f"· dev_watch: no pude lanzar la resolución del dev: {e}")
     monto = (f"{_usd(stake_usd)} ({stake:.2f} SOL)" if stake_usd is not None
              else f"{stake:.2f} SOL")
     print(f"🧪 Paper: compra simulada {monto} en {sym} "
@@ -494,7 +453,16 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None):
     _fill_resultado(conn, row["id"], firma, "total", reason,
                     round(frac, 4), price, _usd_fill, _fee_fill)
 
-    res = "🟢" if pnl >= 0 else "🔴"
+    # (22/8) El icono decide por la MISMA cifra que se muestra: antes
+    # usaba pnl (SOL) y el texto pnl_usd — con ventas parciales previas
+    # podian discrepar y salia "🔴 PnL: +$18.50" (caso real TEST, 22/8).
+    _cifra = pnl_usd if pnl_usd is not None else pnl
+    res = "🟢" if _cifra >= 0 else "🔴"
+    # Con parciales previos, el % del precio no cuenta la historia
+    # completa: se dice.
+    nota_parciales = ("\n_(el PnL incluye ventas parciales previas; el % "
+                      "es solo del precio de entrada a salida)_"
+                      if frac < 1 else "")
     if pnl_usd is not None:
         linea_pnl = (f"{res} PnL: *{_usd_firmado(pnl_usd)}*  "
                      f"sobre {_usd(stake_usd)} invertidos")
@@ -511,7 +479,7 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None):
                    if reason == "sin liquidez" else "")
     _tg(f"{icon} *Paper cerrada* ({reason}): *{row['symbol']}*\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
-        f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}\n"
+        f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}{nota_parciales}\n"
         f"{linea_pnl}{linea_neto}\n"
         f"Resumen: /paper")
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: "
@@ -843,13 +811,6 @@ def update_open_trades() -> int:
             _close(conn, row, price, "tiempo", "⏰")
             cerradas += 1
     conn.close()
-    # (Ola 12) Vigilancia dev-sell: ¿el creador de algún token con
-    # posición abierta vendió? Una alerta por posición, nunca cierra solo.
-    try:
-        from dev_watch import revisar_devs
-        revisar_devs()
-    except Exception as e:
-        print(f"· dev_watch falló (no afecta al paper): {e}")
     return cerradas
 
 

@@ -33,8 +33,30 @@ WATCH_HOURS = 48   # cuánto tiempo vigilamos el precio tras la señal
 MIN_MULTIPLE = 2   # empezar a avisar desde el doble (x2) en adelante
 
 
+# Suelos de liquidez (22/8): un par con liquidez ~0 imprime CUALQUIER
+# precio con una operacion de polvo, y DexScreener extrapola MCs absurdos
+# (caso real: tarjeta "x15699, MC $10.2M" de un token con MC real de $2 y
+# liquidez $0). Bajo LIQ_MUERTO el token se da por muerto (perdida total);
+# entre medias hay precio pero NO es fiable para tarjetas.
+import os as _os_liq
+
+
+def _f_env(n, d):
+    try:
+        return float(_os_liq.getenv(n, d))
+    except (TypeError, ValueError):
+        return d
+
+
+LIQ_MUERTO_USD = _f_env("LIQ_MUERTO_USD", 100.0)
+LIQ_FIABLE_USD = _f_env("LIQ_FIABLE_USD", 1000.0)
+# Tarjetas de hito: base con MC de polvo o multiplo imposible = no fiable
+MC_BASE_MIN_USD = _f_env("MC_BASE_MIN_USD", 1000.0)
+MULT_TARJETA_MAX = _f_env("MULT_TARJETA_MAX", 1000.0)
+
+
 def _price_mc_ex(mint: str):
-    """(precio_usd, market_cap, muerto) según DexScreener, del par de mayor
+    """(precio_usd, market_cap, muerto, liq_usd) según DexScreener, del par de mayor
     liquidez. Se devuelven JUNTOS porque el MC no se puede deducir del
     precio: si el suministro cambia (típico al migrar un token de pump.fun),
     extrapolar el MC da cifras falsas.
@@ -52,7 +74,7 @@ def _price_mc_ex(mint: str):
         r.raise_for_status()
         pairs = (r.json() or {}).get("pairs") or []
         if not pairs:
-            return (None, None, True)
+            return (None, None, True, 0.0)
         mejor, mejor_liq = None, -1.0
         for p in pairs:
             try:
@@ -66,22 +88,26 @@ def _price_mc_ex(mint: str):
                 mejor_liq, mejor = liq, p
         if not mejor:
             # Hay pares pero ninguno con precio usable: sin dato, no muerte.
-            return (None, None, False)
+            return (None, None, False, 0.0)
         px = float(mejor.get("priceUsd") or 0) or None
         mc = mejor.get("marketCap") or mejor.get("fdv")
         try:
             mc = float(mc) if mc else None
         except (TypeError, ValueError):
             mc = None
-        return (px, mc, False)
+        if mejor_liq < LIQ_MUERTO_USD:
+            # Liquidez de polvo: intradeable. Para la medicion es una
+            # perdida total, igual que un par retirado.
+            return (None, None, True, mejor_liq)
+        return (px, mc, False, mejor_liq)
     except (requests.RequestException, ValueError, TypeError):
-        return (None, None, False)
+        return (None, None, False, 0.0)
 
 
 def _price_mc(mint: str):
     """(precio_usd, market_cap) — compatibilidad con los llamadores que no
     necesitan saber si el token murió."""
-    px, mc, _ = _price_mc_ex(mint)
+    px, mc, _m, _l = _price_mc_ex(mint)
     return (px, mc)
 
 
@@ -132,6 +158,19 @@ def _alert_milestone(conn, s, pct: float, price: float,
         pass
     mult = int(price / base)          # 2 = x2 (doble), 3 = x3, …
     if mult < MIN_MULTIPLE:
+        return
+    # (22/8) Cordura de la base y del multiplo: una base anclada con MC
+    # de $652 no es un estado real de mercado (par recien creado, sin
+    # liquidez) y de ahi salen "x15699" — tecnicamente consistentes,
+    # practicamente falsos (caso real UNKNOWN, MC real $2). Mejor ninguna
+    # tarjeta que una absurda.
+    if mc_base is not None and mc_base < MC_BASE_MIN_USD:
+        print(f"  · {s['mint'][:8]}… sin tarjeta: base con MC "
+              f"${mc_base:,.0f} (< ${MC_BASE_MIN_USD:,.0f}, no fiable)")
+        return
+    if mult > MULT_TARJETA_MAX:
+        print(f"  · {s['mint'][:8]}… sin tarjeta: x{mult} supera el tope "
+              f"de cordura (x{MULT_TARJETA_MAX:,.0f})")
         return
 
     # El candado va PRIMERO y es MONOTONICO: el marcador del token solo
@@ -454,7 +493,7 @@ def track_outcomes() -> int:
     updated = 0
     for s in list(pend) + list(pend_ventas):
         base = s["price_usd"]
-        p, _mc, muerto = _px_mc(s["mint"])
+        p, _mc, muerto, _liq = _px_mc(s["mint"])
         if not p:
             if not muerto:
                 continue
@@ -483,8 +522,15 @@ def track_outcomes() -> int:
             continue
         _ya_visto.add(s["mint"])
         base = s["price_usd"]
-        p, mc_now, _muerto = _px_mc(s["mint"])
+        p, mc_now, _muerto, _liq = _px_mc(s["mint"])
         if not p:
+            continue
+        if _liq < LIQ_FIABLE_USD:
+            # (22/8) Sin liquidez real no hay precio fiable: ninguna
+            # tarjeta de hito puede salir de un par en el que $500 de
+            # volumen mueven el precio x1000.
+            print(f"  · {s['mint'][:8]}… sin tarjeta: liquidez "
+                  f"${_liq:,.0f} < ${LIQ_FIABLE_USD:,.0f}")
             continue
         pct = (p / base - 1) * 100
         _alert_milestone(conn, s, pct, p, mc_actual=mc_now)
