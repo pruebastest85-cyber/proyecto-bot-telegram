@@ -593,7 +593,9 @@ def _preparar_pg(pg):
             # Vigilancia del dev (Ola 12): creador del token y si ya se
             # aviso de que vendio (una alerta por posicion).
             ("paper_trades", "dev_wallet", "TEXT"),
-            ("paper_trades", "dev_alerted", "INTEGER")]:
+            ("paper_trades", "dev_alerted", "INTEGER"),
+            # Radar 14b: precio al examinar, para promover ganadores
+            ("radar_tokens", "price0", "DOUBLE PRECISION")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -659,6 +661,11 @@ def _preparar_sqlite(conn):
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
+    # Radar 14b: precio al examinar (la tabla salio sin la columna)
+    try:
+        conn.execute("ALTER TABLE radar_tokens ADD COLUMN price0 REAL")
+    except sqlite3.OperationalError:
+        pass
     # Tabla predictions (motor predictivo): columnas añadidas después de
     # su creación inicial.
     for col, typ in [("stage", "INTEGER DEFAULT 1"), ("confidence", "INTEGER"),

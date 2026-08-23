@@ -46,6 +46,12 @@ MIN_LIQ = _int_env("RADAR_MIN_LIQ", 8000)
 TOKENS_PASADA = _int_env("RADAR_TOKENS_PASADA", 8)
 RADAR_TXS = _int_env("RADAR_TXS", 500)
 MIN_CONOCIDAS = _int_env("RADAR_MIN_CONOCIDAS", 1)
+# Conexion con el embudo (14b): si el token del radar hace xN, se promueve
+# al catalogo de ganadores y el ciclo analiza a TODOS sus compradores
+# tempranos — los desconocidos que compraron junto a tus conocidas entran
+# al embudo horas antes que con el descubrimiento clasico.
+GANADOR_X = float(os.getenv("RADAR_GANADOR_X", "3.0") or 3.0)
+SEG_MAX_H = _int_env("RADAR_SEG_MAX_H", 48)
 
 
 def _frescos() -> list[dict]:
@@ -191,6 +197,14 @@ def escanear() -> int:
                 print(f"· Radar: seguridad de {c['mint'][:8]} falló: {e}")
                 t = {}
             aprueba, linea_seg = _semaforo(t)
+            try:
+                _p0 = float(t.get("price") or 0) or None
+            except (TypeError, ValueError):
+                _p0 = None
+            conn.execute(
+                "UPDATE radar_tokens SET price0=? WHERE mint=?",
+                (_p0, c["mint"]))
+            conn.commit()
             if not aprueba:
                 conn.execute(
                     "UPDATE radar_tokens SET resultado=? WHERE mint=?",
@@ -235,11 +249,76 @@ def escanear() -> int:
                 (f"alertado:{len(conocidas)}", c["mint"]))
             conn.commit()
             alertas += 1
+        # ── 14b: seguimiento de los ya examinados → promover ganadores ──
+        try:
+            _seguimiento(conn)
+        except Exception as e:
+            print(f"· Radar: seguimiento falló: {e}")
     finally:
         conn.close()
     if alertas:
         print(f"📡 Radar: {alertas} alertas de smart money temprana")
     return alertas
+
+
+def _seguimiento(conn) -> int:
+    """Re-visita los tokens examinados (1-48 h): el que hizo xN se
+    promueve al catalogo de ganadores para que el ciclo analice a sus
+    compradores tempranos con la semantica de siempre. Devuelve cuantos
+    promovio."""
+    ahora = int(time.time())
+    filas = conn.execute(
+        """SELECT mint, symbol, ts, price0 FROM radar_tokens
+           WHERE price0 IS NOT NULL AND price0 > 0
+             AND resultado NOT IN ('descartado_seguridad',
+                 'ganador_promovido', 'expirado', 'murio', 'examinando')
+             AND ts BETWEEN ? AND ?
+           ORDER BY ts ASC LIMIT 15""",
+        (ahora - SEG_MAX_H * 3600, ahora - 3600)).fetchall()
+    promovidos = 0
+    for r in filas:
+        try:
+            from signal_tracker import _price_mc_ex
+            px, mc, muerto, liq = _price_mc_ex(r["mint"])
+        except Exception:
+            continue
+        if muerto:
+            conn.execute("UPDATE radar_tokens SET resultado=? "
+                         "WHERE mint=?", ("murio", r["mint"]))
+            conn.commit()
+            continue
+        if not px:
+            continue
+        mult = px / r["price0"]
+        if mult >= GANADOR_X and liq >= 1000:
+            from db import save_winning_token
+            save_winning_token(conn, {
+                "mint": r["mint"], "symbol": r["symbol"],
+                "name": r["symbol"],
+                "price_change_24h": round((mult - 1) * 100, 1),
+                "volume_24h_usd": None, "liquidity_usd": liq,
+                "pair_address": None})
+            conn.execute("UPDATE radar_tokens SET resultado=? "
+                         "WHERE mint=?", ("ganador_promovido", r["mint"]))
+            conn.commit()
+            promovidos += 1
+            try:
+                from realtime import tg_send
+                tg_send(f"🏆 *Radar → embudo*: *{r['symbol']}* hizo "
+                        f"x{mult:.1f} desde que el radar lo examinó. "
+                        f"Promovido a ganador: el próximo ciclo analizará "
+                        f"a sus compradores tempranos (los que entraron "
+                        f"junto a tus conocidas incluidos).\n"
+                        f"`{r['mint']}`")
+            except Exception:
+                pass
+        elif ahora - r["ts"] > SEG_MAX_H * 3600 - 3600:
+            conn.execute("UPDATE radar_tokens SET resultado=? "
+                         "WHERE mint=?", ("expirado", r["mint"]))
+            conn.commit()
+    if promovidos:
+        print(f"📡 Radar: {promovidos} token(s) promovidos a ganadores")
+    return promovidos
 
 
 def radar_text() -> str:
@@ -261,8 +340,18 @@ def radar_text() -> str:
         conn.close()
     if not ACTIVO:
         return "📡 El radar está APAGADO (RADAR_ACTIVO=0)."
+    conn2 = get_conn()
+    try:
+        prom = conn2.execute(
+            "SELECT COUNT(*) c FROM radar_tokens WHERE ts >= ? "
+            "AND resultado='ganador_promovido'",
+            (int(time.time()) - 7 * 86400,)).fetchone()["c"]
+    finally:
+        conn2.close()
     out = ["📡 *Radar de pares recién nacidos* (24 h)\n",
-           f"Tokens examinados: {tot} · descartados por seguridad: {seg}"]
+           f"Tokens examinados: {tot} · descartados por seguridad: {seg}",
+           f"🏆 Promovidos a ganadores (7 días): {prom} — sus compradores "
+           f"tempranos entran al embudo"]
     if alertados:
         out.append("\n🎯 Con smart money de tu base:")
         for r in alertados:
