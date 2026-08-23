@@ -13,6 +13,7 @@ import time
 
 import requests
 
+from config import DB_PATH
 from db import get_conn, get_setting, set_setting
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -34,6 +35,14 @@ def send_db_backup():
     cuenta como backup."""
     if not (BOT_TOKEN and ADMIN_ID):
         return
+
+    def _tg_texto(msg: str):
+        try:
+            from realtime import tg_send
+            tg_send(msg)
+        except Exception as e2:
+            print(f"· Aviso de backup no enviado: {e2}")
+
     try:
         import gzip
         import shutil
@@ -61,27 +70,60 @@ def send_db_backup():
             os.remove(path)
             path, nombre = gz, nombre + ".gz"
 
+        # ── (24/8) LA COPIA LOCAL ES EL BACKUP; Telegram es un extra. ──
+        # Con la base en 262 MB el .gz supero los 50 MB de Telegram y el
+        # envio moria con SSLError... y como enviar era el unico destino,
+        # el bot se quedo 3 DIAS sin ningun respaldo. Ahora: la copia
+        # verificada se guarda SIEMPRE junto a la base (carpeta backups/,
+        # rotacion de 5) y el reloj de /salud se marca ahi. El envio a
+        # Telegram solo se intenta si cabe, y su fallo ya no borra nada.
+        destino_dir = os.path.join(
+            os.path.dirname(os.path.abspath(DB_PATH)) or ".", "backups")
+        os.makedirs(destino_dir, exist_ok=True)
+        destino = os.path.join(destino_dir, nombre)
+        shutil.copyfile(path, destino)
+        try:                       # rotacion: conservar los 5 más nuevos
+            viejos = sorted(
+                (os.path.join(destino_dir, f)
+                 for f in os.listdir(destino_dir)
+                 if "backup_" in f),
+                key=os.path.getmtime, reverse=True)[5:]
+            for v in viejos:
+                os.remove(v)
+        except Exception as e:
+            print(f"· Backup: rotación falló (no crítico): {e}")
+        conn = get_conn()
+        try:
+            set_setting(conn, "last_backup_ts", time.time())
+        finally:
+            conn.close()
         mb = os.path.getsize(path) / 1e6
+        print(f"📦 Backup verificado guardado en {destino} ({mb:.1f} MB)")
+
         if mb > 49:
-            cap += (f"\n⚠️ {mb:.1f} MB: cerca del límite de 50 MB de "
-                    "Telegram")
-        with open(path, "rb") as f:
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                data={"chat_id": int(ADMIN_ID), "caption": cap[:1000]},
-                files={"document": (nombre, f)},
-                timeout=180)
+            _tg_texto(f"📦 Backup diario ✅ Verificado y guardado en el "
+                      f"equipo:\n`{destino}`\n({mb:.1f} MB — demasiado "
+                      f"grande para enviarlo por Telegram, que admite "
+                      f"50 MB)")
+        else:
+            try:
+                with open(path, "rb") as f:
+                    requests.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}"
+                        f"/sendDocument",
+                        data={"chat_id": int(ADMIN_ID),
+                              "caption": cap[:1000]},
+                        files={"document": (nombre, f)},
+                        timeout=180)
+                print("📦 Backup también enviado por Telegram")
+            except Exception as e:
+                # El backup YA está a salvo en disco: avisar, no fallar.
+                print(f"· Envío del backup a Telegram falló: {e}")
+                _tg_texto(f"📦 Backup diario ✅ guardado en el equipo:\n"
+                          f"`{destino}`\n(el envío por Telegram falló: "
+                          f"{str(e)[:120]})")
         try:
             os.remove(path)
-        except Exception:
-            pass
-        print(f"📦 Backup verificado enviado por Telegram ({mb:.1f} MB)")
-        try:
-            conn = get_conn()
-            try:
-                set_setting(conn, "last_backup_ts", time.time())
-            finally:
-                conn.close()
         except Exception:
             pass
     except Exception as e:
