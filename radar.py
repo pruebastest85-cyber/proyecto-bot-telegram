@@ -290,14 +290,37 @@ def _seguimiento(conn) -> int:
         if not px:
             continue
         mult = px / r["price0"]
-        if mult >= GANADOR_X and liq >= 1000:
+        if mult >= GANADOR_X:
+            # (14c) El x3 solo abre la puerta; la vara para "ganador" es
+            # LA MISMA del descubrimiento clasico: volumen, liquidez y MC
+            # minimos de config. Un token de $8k de MC hace x3 con dos
+            # compras — eso no es un ganador, es ruido chico. Si aun no
+            # da la talla, se queda en seguimiento (puede crecer hasta
+            # las 48 h); solo se promueve cuando el tamaño acompana.
+            import config as _cfg
+            try:
+                from token_check import analyze_token
+                t = analyze_token(r["mint"])
+            except Exception:
+                t = {}
+            vol = t.get("vol24") or 0
+            liq_full = t.get("liq") or liq or 0
+            mc_full = t.get("mc") or mc or 0
+            if not (vol >= _cfg.MIN_VOLUME_24H_USD
+                    and liq_full >= _cfg.MIN_LIQUIDITY_USD
+                    and mc_full >= _cfg.MIN_MC_USD):
+                print(f"  · Radar: {r['symbol']} hizo x{mult:.1f} pero "
+                      f"no da la talla (vol ${vol:,.0f} / liq "
+                      f"${liq_full:,.0f} / MC ${mc_full:,.0f}); sigue "
+                      f"en observación")
+                continue
             from db import save_winning_token
             save_winning_token(conn, {
                 "mint": r["mint"], "symbol": r["symbol"],
                 "name": r["symbol"],
                 "price_change_24h": round((mult - 1) * 100, 1),
-                "volume_24h_usd": None, "liquidity_usd": liq,
-                "pair_address": None})
+                "volume_24h_usd": vol, "liquidity_usd": liq_full,
+                "pair_address": t.get("pair")})
             conn.execute("UPDATE radar_tokens SET resultado=? "
                          "WHERE mint=?", ("ganador_promovido", r["mint"]))
             conn.commit()
@@ -305,11 +328,11 @@ def _seguimiento(conn) -> int:
             try:
                 from realtime import tg_send
                 tg_send(f"🏆 *Radar → embudo*: *{r['symbol']}* hizo "
-                        f"x{mult:.1f} desde que el radar lo examinó. "
-                        f"Promovido a ganador: el próximo ciclo analizará "
-                        f"a sus compradores tempranos (los que entraron "
-                        f"junto a tus conocidas incluidos).\n"
-                        f"`{r['mint']}`")
+                        f"x{mult:.1f} desde el radar Y da la talla de "
+                        f"ganador (vol ${vol:,.0f} · liq "
+                        f"${liq_full:,.0f} · MC ${mc_full:,.0f}). "
+                        f"El próximo ciclo analizará a sus compradores "
+                        f"tempranos.\n`{r['mint']}`")
             except Exception:
                 pass
         elif ahora - r["ts"] > SEG_MAX_H * 3600 - 3600:
