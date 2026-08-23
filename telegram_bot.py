@@ -664,6 +664,20 @@ async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
         print(f"· post-mortem semanal falló: {e}")
 
 
+async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Ola 14) Cada 15 min: tokens recién nacidos con smart money."""
+    try:
+        from radar import escanear
+        await asyncio.to_thread(escanear)
+    except Exception as e:
+        print(f"· radar_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "radar", e)
+        except Exception:
+            pass
+
+
 async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: corre el ciclo y avisa al admin."""
     resumen = await asyncio.to_thread(run_full_cycle)
@@ -1739,6 +1753,14 @@ async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_radar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/radar — qué vio el radar de pares recién nacidos en 24 h."""
+    from radar import radar_text
+    txt = await asyncio.to_thread(radar_text)
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
+
+@solo_admin
 async def cmd_postmortem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/postmortem — decisiones vs resultado medido. 'ya' = regenerar."""
     fresco = bool(ctx.args and ctx.args[0].lower() in ("ya", "ahora"))
@@ -1877,6 +1899,7 @@ def main():
     app.add_handler(CommandHandler("ialocal", cmd_ialocal))
     app.add_handler(CommandHandler("salidas", cmd_salidas))
     app.add_handler(CommandHandler("postmortem", cmd_postmortem))
+    app.add_handler(CommandHandler("radar", cmd_radar))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
     app.add_handler(CommandHandler("clusters", cmd_clusters))
@@ -2018,6 +2041,9 @@ def main():
         interval=7 * 86400,
         first=_reloj_first("weekly_learning", 7 * 86400, 3 * 86400),
         name="weekly_learning")
+    # Radar de pares recién nacidos (Ola 14): cada 15 min
+    app.job_queue.run_repeating(radar_job, interval=900, first=600,
+                                name="radar")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job),

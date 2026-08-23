@@ -174,6 +174,16 @@ CREATE TABLE IF NOT EXISTS paper_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_fills_trade ON paper_fills(trade_id);
 
+-- Radar de pares recien nacidos (Ola 14): un registro por token
+-- examinado. PK por mint = dedup por esquema entre pasadas.
+CREATE TABLE IF NOT EXISTS radar_tokens (
+    mint            TEXT PRIMARY KEY,
+    ts              INTEGER,
+    symbol          TEXT,
+    liq             REAL,
+    resultado       TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
@@ -354,6 +364,14 @@ CREATE INDEX IF NOT EXISTS idx_appearances_wallet ON appearances(wallet);
 -- apariciones por token para saber quien compro antes que quien. Sin el,
 -- ese calculo recorre la tabla entera.
 CREATE INDEX IF NOT EXISTS idx_appearances_mint ON appearances(mint);
+
+CREATE TABLE IF NOT EXISTS radar_tokens (
+    mint            TEXT PRIMARY KEY,
+    ts              BIGINT,
+    symbol          TEXT,
+    liq             DOUBLE PRECISION,
+    resultado       TEXT
+);
 """
 
 
