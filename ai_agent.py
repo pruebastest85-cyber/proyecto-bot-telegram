@@ -187,6 +187,7 @@ def _load_history(conn) -> list[dict]:
 
 
 def _save_turn(user_text: str, reply: str):
+    conn = None
     try:
         conn = get_conn()
         conn.execute(
@@ -199,9 +200,14 @@ def _save_turn(user_text: str, reply: str):
             """DELETE FROM chat_history WHERE id NOT IN
                (SELECT id FROM chat_history ORDER BY id DESC LIMIT 40)""")
         conn.commit()
-        conn.close()
     except Exception as e:
         print(f"· No se pudo guardar historial de chat: {e}")
+    finally:
+        if conn is not None:          # (Ola 15 - M7) cerrar siempre
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _exec_read(name: str, args: dict) -> str:
@@ -219,9 +225,11 @@ def _exec_read(name: str, args: dict) -> str:
             p = profile_wallet(addr)
             if not p["tx_sampled"]:
                 return "Sin transacciones recuperadas para esa dirección."
-            conn = get_conn()
-            tr = wallet_track_record(conn, addr)
-            conn.close()
+            conn = get_conn()          # (Ola 15 - M7) sin fugas
+            try:
+                tr = wallet_track_record(conn, addr)
+            finally:
+                conn.close()
             s = compute_score(p, tr)
             comp = {"wallet_score": s,
                     "txs_muestreadas": p["tx_sampled"],
@@ -342,12 +350,13 @@ def _exec_read(name: str, args: dict) -> str:
             from db import get_setting
             conn = get_conn()
             try:
+                from db import TOP_ALERTAS_DEFAULT as _TAD
                 umbral = float(get_setting(conn, "min_signal_score",
                                            "0") or 0)
                 manual = (get_setting(conn, "umbral_manual", "0")
                           or "0").strip() == "1"
                 top = int(float(get_setting(conn, "top_alertas",
-                                            "30") or 30))
+                                            _TAD) or _TAD))
                 out = {
                     "umbral_senal": {
                         "valor": umbral,
@@ -479,22 +488,42 @@ def _chat_local(messages: list[dict]):
                     print(f"· Agente local respondio VACIO (finish={fin})")
                     return None
                 return text, None
-            tc = tcs[0]
-            name = tc.get("function", {}).get("name", "")
-            raw = tc.get("function", {}).get("arguments") or "{}"
-            try:
-                args = raw if isinstance(raw, dict) else json.loads(raw)
-            except json.JSONDecodeError:
-                args = {}
-            if name in MODIFYING:
-                return text, {"tool": name, "args": args}
-            resultado = _exec_read(name, args)
+            # (Ola 15 - M4) Responder TODOS los tool_calls del turno:
+            # antes solo se ejecutaba tcs[0] pero se reinyectaban todos,
+            # y el proveedor rechazaba la peticion siguiente (tool_call
+            # sin resultado) → "Ninguna IA respondio" con las dos IA
+            # sanas. Si alguno modifica, se propone tras responder las
+            # lecturas del mismo turno.
+            _pendiente = None
+            _resultados = []
+            for _tc in tcs:
+                _name = _tc.get("function", {}).get("name", "")
+                _raw = _tc.get("function", {}).get("arguments") or "{}"
+                try:
+                    _args = (_raw if isinstance(_raw, dict)
+                             else json.loads(_raw))
+                except json.JSONDecodeError:
+                    _args = {}
+                if _name in MODIFYING:
+                    if _pendiente is None:
+                        _pendiente = {"tool": _name, "args": _args}
+                    _resultados.append((_tc.get("id", ""),
+                                        "Propuesta al usuario; espera "
+                                        "su confirmación."))
+                    continue
+                _resultados.append((_tc.get("id", ""),
+                                    _exec_read(_name, _args)))
+            if _pendiente is not None and len(tcs) == 1:
+                return text, _pendiente
             # Reinyectar el turno LIMPIO: sin el bloque <think>, que si
             # existiera se acumularia paso a paso (hallazgo 18/8).
             msgs.append({"role": "assistant", "content": text,
                          "tool_calls": tcs})
-            msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                         "content": resultado})
+            for _tid, _res in _resultados:
+                msgs.append({"role": "tool", "tool_call_id": _tid,
+                             "content": _res})
+            if _pendiente is not None:
+                return text, _pendiente
         return "Necesité demasiados pasos; intenta ser más específico.", None
     except Exception as e:
         print(f"· Agente local no disponible: {e}")
@@ -549,17 +578,21 @@ def chat(user_text: str):
     if user_text.lower().strip() in ("olvida", "olvida todo", "reset",
                                      "borra la conversacion",
                                      "borra la conversación"):
-        conn = get_conn()
-        conn.execute("DELETE FROM chat_history")
-        conn.commit()
-        conn.close()
+        conn = get_conn()          # (Ola 15 - M7) sin fugas
+        try:
+            conn.execute("DELETE FROM chat_history")
+            conn.commit()
+        finally:
+            conn.close()
         return "🧹 Memoria de conversación borrada. Empezamos de cero.", None
     conn = get_conn()
-    history = _load_history(conn)
-    from ia_puente import _setting
-    orden = str(_setting("ia_proveedor", "local_primero", conn)
-                or "local_primero")
-    conn.close()
+    try:
+        history = _load_history(conn)
+        from ia_puente import _setting
+        orden = str(_setting("ia_proveedor", "local_primero", conn)
+                    or "local_primero")
+    finally:
+        conn.close()
     messages = history + [{"role": "user", "content": user_text}]
 
     if orden == "nube":
@@ -585,17 +618,28 @@ def chat(user_text: str):
             "configura ANTHROPIC_API_KEY."), None
 
 
-def _registrar_ajuste(conn, clave: str, antes, despues):
-    """Bitácora de ajustes hechos por chat (Ola 9): pila de hasta 10 en
-    settings 'ajustes_log', para poder deshacer el último."""
+def _registrar_ajuste(conn, cambios, antes=None, despues=None):
+    """Bitácora de ajustes hechos por chat. Pila de 10 en 'ajustes_log'.
+
+    (Ola 15 - M1) Un ajuste puede tocar VARIAS claves a la vez: fijar el
+    umbral escribe min_signal_score Y umbral_manual. Antes solo se
+    registraba la primera, y "deshacer" restauraba el valor dejando el
+    auto-ajuste apagado para siempre: el estado restaurado no era el
+    estado anterior. Ahora `cambios` es {clave: (antes, despues)}; se
+    admite la forma vieja (clave, antes, despues) por compatibilidad.
+    Un `antes` None significa "el setting NO existía" y deshacer lo
+    borra en vez de escribir un default inventado."""
     import time as _t
     from db import get_setting, set_setting
+    if isinstance(cambios, str):
+        cambios = {cambios: (antes, despues)}
     try:
         log = json.loads(get_setting(conn, "ajustes_log", "[]") or "[]")
     except (ValueError, TypeError):
         log = []
-    log.append({"ts": int(_t.time()), "clave": clave,
-                "antes": antes, "despues": despues})
+    log.append({"ts": int(_t.time()),
+                "claves": {k: {"antes": v[0], "despues": v[1]}
+                           for k, v in cambios.items()}})
     set_setting(conn, "ajustes_log", json.dumps(log[-10:],
                                                 ensure_ascii=False))
 
@@ -609,10 +653,27 @@ def _deshacer_ultimo(conn) -> str:
     if not log:
         return "No hay ajustes hechos por chat que deshacer."
     ult = log.pop()
-    set_setting(conn, ult["clave"], str(ult["antes"]))
+    # Formato viejo (una clave suelta) y nuevo (varias) conviven.
+    claves = ult.get("claves")
+    if not claves:
+        claves = {ult.get("clave"): {"antes": ult.get("antes"),
+                                     "despues": ult.get("despues")}}
+    partes = []
+    for k, v in claves.items():
+        if not k:
+            continue
+        if v.get("antes") is None:
+            try:
+                conn.execute("DELETE FROM settings WHERE key=?", (k,))
+                conn.commit()
+            except Exception:
+                set_setting(conn, k, "")
+            partes.append(f"{k} vuelve a su valor por defecto")
+        else:
+            set_setting(conn, k, str(v["antes"]))
+            partes.append(f"{k}: {v.get('despues')} → {v['antes']}")
     set_setting(conn, "ajustes_log", json.dumps(log, ensure_ascii=False))
-    return (f"↩️ Deshecho: {ult['clave']} vuelve de "
-            f"{ult['despues']} a {ult['antes']}.")
+    return "↩️ Deshecho — " + " · ".join(partes) + "."
 
 
 def describe_action(action: dict) -> str:
@@ -674,12 +735,18 @@ def execute_action(action: dict) -> str:
                 return "Valor inválido para top de alertas (usa 0-100)."
             conn = get_conn()
             try:
-                antes = get_setting(conn, "top_alertas", "30")
-                if str(int(float(antes or 30))) == str(n):
-                    return (f"El top de alertas YA estaba en {antes}. "
+                # (Ola 15 - M2) El default REAL del sistema es
+                # TOP_ALERTAS_DEFAULT (15), no 30: con el setting sin
+                # fijar, el agente informaba 30 mientras el filtro usaba
+                # 15, y un "deshacer" escribía un valor que nunca existió.
+                from db import TOP_ALERTAS_DEFAULT as _TAD
+                antes = get_setting(conn, "top_alertas", None)
+                _efectivo = int(float(antes if antes is not None else _TAD))
+                if _efectivo == n:
+                    return (f"El top de alertas YA estaba en {_efectivo}. "
                             f"No cambié nada.")
                 set_setting(conn, "top_alertas", str(n))
-                _registrar_ajuste(conn, "top_alertas", antes, str(n))
+                _registrar_ajuste(conn, {"top_alertas": (antes, str(n))})
             finally:
                 conn.close()
             return ("📡 Sin límite: ahora alertan TODAS las ⭐." if n == 0
@@ -691,14 +758,15 @@ def execute_action(action: dict) -> str:
             conn = get_conn()
             try:
                 if acc in ("encender", "apagar"):
-                    antes = get_setting(conn, "paper_enabled", "1")
+                    antes = get_setting(conn, "paper_enabled", None)
                     nuevo = "1" if acc == "encender" else "0"
                     if (antes or "1").strip() == nuevo:
                         return ("El paper YA estaba "
                                 + ("encendido." if nuevo == "1"
                                    else "apagado.") + " No cambié nada.")
                     set_setting(conn, "paper_enabled", nuevo)
-                    _registrar_ajuste(conn, "paper_enabled", antes, nuevo)
+                    _registrar_ajuste(conn,
+                                      {"paper_enabled": (antes, nuevo)})
                     return ("🧪 Paper trading ENCENDIDO." if nuevo == "1"
                             else "🧪 Paper trading APAGADO (las posiciones "
                                  "abiertas se siguen gestionando).")
@@ -710,9 +778,10 @@ def execute_action(action: dict) -> str:
                     if not (0.05 <= v <= 10):
                         return ("Fuera de rango: el tope debe estar entre "
                                 "0.05 y 10 SOL. No lo cambié.")
-                    antes = get_setting(conn, "paper_max_sol", "1.0")
+                    antes = get_setting(conn, "paper_max_sol", None)
                     set_setting(conn, "paper_max_sol", str(v))
-                    _registrar_ajuste(conn, "paper_max_sol", antes, str(v))
+                    _registrar_ajuste(conn,
+                                      {"paper_max_sol": (antes, str(v))})
                     return (f"🧪 Tope del paper: {v:g} SOL por señal "
                             f"(antes: {antes}).")
                 return ("Acción de paper no reconocida: usa encender, "
@@ -726,36 +795,47 @@ def execute_action(action: dict) -> str:
             finally:
                 conn.close()
         if tool == "cambiar_umbral_senal":
-            from db import set_setting
+            from db import get_setting as _gs, set_setting
             v_raw = float(args.get("valor", 0))
             if v_raw < 0:
+                # (Ola 15 - M1) Volver a AUTOMÁTICO también se registra:
+                # antes no era deshacible y un "deshacer" posterior
+                # revertía un ajuste más viejo con resultado confuso.
                 conn = get_conn()
-                set_setting(conn, "umbral_manual", "0")
-                conn.close()
+                try:
+                    _man_antes = _gs(conn, "umbral_manual", None)
+                    if (_man_antes or "0") == "0":
+                        return ("El umbral YA estaba en modo automático. "
+                                "No cambié nada.")
+                    _registrar_ajuste(conn,
+                                      {"umbral_manual": (_man_antes, "0")})
+                    set_setting(conn, "umbral_manual", "0")
+                finally:
+                    conn.close()
                 return ("🎚️ Auto-ajuste del umbral reactivado: volverá a "
                         "optimizarse solo con el historial medido.")
             v = max(0, min(100, v_raw))
             conn = get_conn()
-            from db import get_setting as _gs
             try:
-                _antes = float(_gs(conn, "min_signal_score", "0") or 0)
-                _manual = (_gs(conn, "umbral_manual", "0") or "0") == "1"
-                if _antes == v and _manual:
-                    conn.close()
+                _antes_raw = _gs(conn, "min_signal_score", None)
+                _man_antes = _gs(conn, "umbral_manual", None)
+                try:
+                    _antes = float(_antes_raw or 0)
+                except (TypeError, ValueError):
+                    _antes = None
+                if _antes == v and (_man_antes or "0") == "1":
                     return (f"El umbral YA estaba en {v:.0f}/100 (modo "
                             f"manual). No cambié nada.")
-            except Exception:
-                pass
-            try:
-                _registrar_ajuste(conn, "min_signal_score",
-                                  _gs(conn, "min_signal_score", "0"), str(v))
-            except Exception:
-                pass
-            set_setting(conn, "min_signal_score", v)
-            # El ajuste MANUAL manda (19/8): sin esta marca, el auto-
-            # ajustador de signal_tracker lo pisaba a los 15 minutos.
-            set_setting(conn, "umbral_manual", "1")
-            conn.close()
+                # Las DOS claves que toca este ajuste, juntas.
+                _registrar_ajuste(conn, {
+                    "min_signal_score": (_antes_raw, str(v)),
+                    "umbral_manual": (_man_antes, "1")})
+                set_setting(conn, "min_signal_score", v)
+                # El ajuste MANUAL manda (19/8): sin esta marca, el auto-
+                # ajustador de signal_tracker lo pisaba a los 15 minutos.
+                set_setting(conn, "umbral_manual", "1")
+            finally:
+                conn.close()
             return (f"🎯 Umbral fijado en {v:.0f}/100 (modo manual: el "
                     f"auto-ajuste queda apagado; di «umbral automático» "
                     f"para reactivarlo). Señales de compra con score "

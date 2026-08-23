@@ -19,18 +19,29 @@ TOP_SIZES = (10, 20, 30)
 def discard_wallet(address: str) -> str:
     """Marca la billetera como bot, le quita la ⭐ y resincroniza el webhook."""
     conn = get_conn()
-    row = conn.execute("SELECT address FROM wallets WHERE address=?",
-                       (address,)).fetchone()
-    if not row:
+    try:                       # (Ola 15 - M7) sin fugas de conexión
+        row = conn.execute("SELECT address FROM wallets WHERE address=?",
+                           (address,)).fetchone()
+        if not row:
+            return "No existe esa dirección en la base."
+        conn.execute(
+            """UPDATE wallets SET is_bot=1, is_tracked=0,
+               ai_class='descartada', ai_follow=0,
+               ai_reason='Descartada manualmente por el admin'
+               WHERE address=?""", (address,))
+        conn.commit()
+    finally:
         conn.close()
-        return "No existe esa dirección en la base."
-    conn.execute(
-        """UPDATE wallets SET is_bot=1, is_tracked=0,
-           ai_class='descartada', ai_follow=0,
-           ai_reason='Descartada manualmente por el admin'
-           WHERE address=?""", (address,))
-    conn.commit()
-    conn.close()
+    # (Ola 15 - B5) Invalidar el conjunto operativo YA: sin esto, la
+    # billetera recién descartada seguía alertando y disparando copias
+    # hasta 60 s (el TTL de la caché).
+    try:
+        from db import invalidar_copiables
+        invalidar_copiables()
+        from realtime import invalidar_vigiladas
+        invalidar_vigiladas()
+    except Exception as e:
+        print(f"· No pude invalidar cachés tras descartar: {e}")
     hook = sync_helius_webhook()
     return f"❌ {address[:8]}… descartada. {hook}"
 
@@ -38,8 +49,12 @@ def discard_wallet(address: str) -> str:
 def restore_wallet(address: str) -> str:
     """Revierte un descarte: vuelve a rastrear y la IA la reevaluará."""
     conn = get_conn()
-    row = conn.execute("SELECT address FROM wallets WHERE address=?",
-                       (address,)).fetchone()
+    row = None
+    try:
+        row = conn.execute("SELECT address FROM wallets WHERE address=?",
+                           (address,)).fetchone()
+    except Exception:
+        pass
     if not row:
         conn.close()
         return "No existe esa dirección en la base."
@@ -53,6 +68,13 @@ def restore_wallet(address: str) -> str:
            WHERE address=?""", (address,))
     conn.commit()
     conn.close()
+    try:                       # (Ola 15 - B5) que alerte desde YA
+        from db import invalidar_copiables
+        invalidar_copiables()
+        from realtime import invalidar_vigiladas
+        invalidar_vigiladas()
+    except Exception as e:
+        print(f"· No pude invalidar cachés tras restaurar: {e}")
     hook = sync_helius_webhook()
     return f"⭐ {address[:8]}… vuelve a rastrearse. {hook}"
 

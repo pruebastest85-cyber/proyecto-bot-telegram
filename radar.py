@@ -140,6 +140,14 @@ def _semaforo(t: dict) -> tuple[bool, str]:
     riesgos = t.get("risks") or []
     if riesgos:
         problemas.append("riesgos: " + ", ".join(str(r) for r in riesgos[:2]))
+    # (Ola 15) Si el chequeo NO trajo datos (fallo de red/RugCheck), no
+    # se puede aprobar: antes salia "🟢 seguridad ok" sin haber
+    # comprobado nada.
+    sin_datos = (t.get("mint_auth") is None and t.get("freeze_auth") is None
+                 and t.get("lp_locked_pct") is None
+                 and t.get("top10_pct") is None and not riesgos)
+    if sin_datos:
+        return False, "⚪ sin datos de seguridad (chequeo falló)"
     aprueba = not (t.get("mint_auth") or t.get("freeze_auth")
                    or len(riesgos) >= 3)
     linea = ("🟢 seguridad ok" if not problemas
@@ -206,9 +214,11 @@ def escanear() -> int:
                 (_p0, c["mint"]))
             conn.commit()
             if not aprueba:
+                _res = ("sin_seguridad" if "sin datos" in linea_seg
+                        else "descartado_seguridad")
                 conn.execute(
                     "UPDATE radar_tokens SET resultado=? WHERE mint=?",
-                    ("descartado_seguridad", c["mint"]))
+                    (_res, c["mint"]))
                 conn.commit()
                 continue
 
@@ -267,13 +277,17 @@ def _seguimiento(conn) -> int:
     compradores tempranos con la semantica de siempre. Devuelve cuantos
     promovio."""
     ahora = int(time.time())
+    # (Ola 15) Muestreo ALEATORIO, no "los 15 mas viejos": con volumen,
+    # el orden fijo hacia que un token que hizo x5 a la hora 3 no se
+    # re-visitara hasta casi expirar (inanicion). RANDOM() existe igual
+    # en SQLite y en Postgres.
     filas = conn.execute(
         """SELECT mint, symbol, ts, price0 FROM radar_tokens
            WHERE price0 IS NOT NULL AND price0 > 0
              AND resultado NOT IN ('descartado_seguridad',
                  'ganador_promovido', 'expirado', 'murio', 'examinando')
              AND ts BETWEEN ? AND ?
-           ORDER BY ts ASC LIMIT 15""",
+           ORDER BY RANDOM() LIMIT 15""",
         (ahora - SEG_MAX_H * 3600, ahora - 3600)).fetchall()
     promovidos = 0
     for r in filas:

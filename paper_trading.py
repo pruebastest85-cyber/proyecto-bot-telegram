@@ -166,6 +166,13 @@ def open_trade(conn, trade: dict, token: dict, score,
     if not price or price <= 0:
         print("· Paper: sin precio del token; no se abre posición")
         return False
+    # (Ola 15) Suelo de liquidez tambien en ESTA via: el camino caliente
+    # ya rechazaba abrir con liquidez de polvo, pero la via normal abria
+    # la misma posicion segundos despues a un precio sin mercado real.
+    _liq = token.get("liq")
+    if _liq is not None and _liq < 1000:
+        print(f"· Paper: liquidez de polvo (${_liq:,.0f}); no se abre")
+        return False
 
     # Una posición abierta por token
     ya = conn.execute(
@@ -828,9 +835,17 @@ def update_open_trades() -> int:
         price = _price(row["mint"])
         time.sleep(config.DEXSCREENER_DELAY)
         if not price:
-            # Sin precio (¿par muerto?): si además venció el tiempo,
-            # cerramos como pérdida total para no dejarla zombi.
-            if now - row["entry_ts"] > timeout:
+            # (Ola 15) Par MUERTO confirmado (DexScreener sin pares o
+            # liquidez de polvo): cierre inmediato como perdida total —
+            # antes quedaba zombi hasta 48 h ocupando cupo. Un fallo de
+            # RED (muerto=False) si espera al timeout, como siempre.
+            _muerto = False
+            try:
+                from signal_tracker import _price_mc_ex
+                _px2, _mc2, _muerto, _l2 = _price_mc_ex(row["mint"])
+            except Exception:
+                pass
+            if _muerto or now - row["entry_ts"] > timeout:
                 _close(conn, row, row["entry_price"] * 0.01,
                        "sin liquidez", "💀")
                 cerradas += 1
@@ -864,12 +879,21 @@ def update_open_trades() -> int:
             _close(conn, row, price, "tiempo", "⏰")
             cerradas += 1
     conn.close()
-    # (Ola 12, restaurado 22/8) Vigilancia dev-sell de respaldo: ¿el
-    # creador de algun token con posicion abierta vendio? Una alerta por
-    # posicion, nunca cierra solo. (La via principal es en tiempo real.)
+    # (Ola 12, afinado Ola 15) Vigilancia dev-sell de respaldo EN HILO
+    # DE FONDO: hasta 15 posiciones x llamadas de red podian alargar
+    # ESTE job media hora y retrasar los chequeos de TP/SL. El candado
+    # evita dos pasadas solapadas; la via principal sigue siendo la
+    # intercepcion en tiempo real.
     try:
-        from dev_watch import revisar_devs
-        revisar_devs()
+        import threading as _th
+        from dev_watch import revisar_devs, _REV_LOCK
+        if _REV_LOCK.acquire(blocking=False):
+            def _rev_fondo():
+                try:
+                    revisar_devs()
+                finally:
+                    _REV_LOCK.release()
+            _th.Thread(target=_rev_fondo, daemon=True).start()
     except Exception as e:
         print(f"· dev_watch falló (no afecta al paper): {e}")
     return cerradas

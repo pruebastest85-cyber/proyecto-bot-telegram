@@ -344,7 +344,8 @@ def _senales_text() -> str:
         except (KeyError, IndexError):
             marca = ""
         lines.append(
-            f"{emoji} *{simbolo}*  ·  {verbo}  ·  {s['sol']:.2f} SOL"
+            f"{emoji} *{simbolo}*  ·  {verbo}  ·  "
+            f"{(s['sol'] or 0):.2f} SOL"
             f"  {marca}\n    🕒 {cuando}{res}\n")
     return "\n".join(lines).rstrip()
 
@@ -658,8 +659,11 @@ async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         from post_mortem import generar
         txt = await asyncio.to_thread(generar)
-        await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
-                                   parse_mode="Markdown")
+        try:
+            await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
+                                       parse_mode="Markdown")
+        except Exception:               # (Ola 15 - M8) sin perder el informe
+            await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt)
     except Exception as e:
         print(f"· post-mortem semanal falló: {e}")
 
@@ -711,8 +715,13 @@ async def sync_webhook_job(ctx: ContextTypes.DEFAULT_TYPE):
 def solo_admin(func):
     """Decorador: ignora mensajes de cualquiera que no sea el dueño."""
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if ADMIN_ID and update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("⛔ No autorizado.")
+        if ADMIN_ID and (not update.effective_user
+                         or update.effective_user.id != ADMIN_ID):
+            try:
+                if update.message:
+                    await update.message.reply_text("⛔ No autorizado.")
+            except Exception:
+                pass
             return
         return await func(update, ctx)
     return wrapper
@@ -725,7 +734,8 @@ async def _hub_run(q, name: str):
     chat = q.message.chat
     if name == "status":
         await q.answer()
-        await q.edit_message_text(_status_text(), parse_mode="Markdown",
+        _txt = await asyncio.to_thread(_status_text)    # (Ola 15 - M5)
+        await q.edit_message_text(_txt, parse_mode="Markdown",
                                   reply_markup=kb_solo_inicio())
     elif name in ("top10", "top20"):
         limit = 10 if name == "top10" else 20
@@ -757,7 +767,8 @@ async def _hub_run(q, name: str):
                                   reply_markup=kb_solo_inicio())
     elif name == "senales":
         await q.answer()
-        await q.edit_message_text(_senales_text(), parse_mode="Markdown",
+        _txt = await asyncio.to_thread(_senales_text)   # (Ola 15 - M5)
+        await q.edit_message_text(_txt, parse_mode="Markdown",
                                   reply_markup=kb_solo_inicio())
     elif name == "ciclo":
         await q.answer("⏳ Iniciando ciclo…")
@@ -907,9 +918,23 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # Confirmación de acciones del agente IA
-    if data == "agc:y" or data == "agc:n":
-        accion = PENDING_ACTIONS.pop(q.from_user.id, None)
-        if data == "agc:n" or not accion:
+    if data.startswith("agc:y") or data.startswith("agc:n"):
+        _partes = data.split(":")
+        _tok_msg = _partes[2] if len(_partes) > 2 else ""
+        _pend = PENDING_ACTIONS.get(q.from_user.id)
+        if _pend is not None and _pend.get("tok") != _tok_msg:
+            # (Ola 15 - A2) Boton de una propuesta VIEJA: no ejecutar la
+            # nueva por accidente.
+            await q.answer("Esta propuesta caducó (hay una más nueva)")
+            try:
+                await q.edit_message_text(
+                    "⌛ Propuesta caducada: hay una más reciente abajo.")
+            except Exception:
+                pass
+            return
+        _pend = PENDING_ACTIONS.pop(q.from_user.id, None)
+        accion = _pend.get("accion") if _pend else None
+        if data.startswith("agc:n") or not accion:
             await q.answer("Cancelado")
             try:
                 await q.edit_message_text("❌ Acción cancelada.")
@@ -1190,12 +1215,15 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if args[0] == "max" and len(args) > 1:
             try:
                 v = float(args[1])
-                if v <= 0:
+                # (Ola 15 - B1) NaN e inf pasaban: `nan <= 0` es False.
+                # Un stake NaN envenena pnl_usd y el win rate del paper.
+                if not (0.05 <= v <= 10):
                     raise ValueError
             except ValueError:
                 conn.close()
                 await update.message.reply_text(
-                    "Uso: /paper max <SOL>  (ej: /paper max 1.5)")
+                    "Uso: /paper max <SOL> entre 0.05 y 10  "
+                    "(ej: /paper max 1.5)")
                 return
             set_setting(conn, "paper_max_sol", v)
             conn.close()
@@ -1249,6 +1277,7 @@ async def _extract_buyers_bg(chat, mint: str, symbol, chg24):
         print(f"· _extract_buyers_bg falló: {e}")
 
 
+@solo_admin
 async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Chat libre. Si el hub estaba esperando un dato, lo consume aquí;
     si no, cualquier texto sin /comando activa al agente IA."""
@@ -1293,14 +1322,26 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from ai_agent import chat, describe_action
     respuesta, accion = await asyncio.to_thread(chat, texto)
     if accion:
-        PENDING_ACTIONS[update.effective_user.id] = accion
+        # (Ola 15 - A2) Cada propuesta lleva su propio token: el boton
+        # Confirmar solo ejecuta LA propuesta de SU mensaje. Antes, dos
+        # propuestas seguidas compartian el slot y confirmar el mensaje
+        # viejo ejecutaba la accion nueva.
+        import secrets as _sec
+        _tok = _sec.token_hex(4)
+        PENDING_ACTIONS[update.effective_user.id] = {"tok": _tok,
+                                                     "accion": accion}
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Confirmar", callback_data="agc:y"),
-            InlineKeyboardButton("❌ Cancelar", callback_data="agc:n")]])
+            InlineKeyboardButton("✅ Confirmar",
+                                 callback_data=f"agc:y:{_tok}"),
+            InlineKeyboardButton("❌ Cancelar",
+                                 callback_data=f"agc:n:{_tok}")]])
         msg = (respuesta + "\n\n" if respuesta else "") + \
             f"¿Ejecuto esta acción?\n{describe_action(accion)}"
-        await update.message.reply_text(msg, parse_mode="Markdown",
-                                        reply_markup=kb)
+        try:
+            await update.message.reply_text(msg, parse_mode="Markdown",
+                                            reply_markup=kb)
+        except Exception:      # (Ola 15 - M8) un "_" impar del modelo no
+            await update.message.reply_text(msg, reply_markup=kb)
     else:
         await update.message.reply_text(respuesta)
 
@@ -1682,6 +1723,17 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with open(path, "rb") as fh:
             await update.message.reply_document(document=fh, filename=fname,
                                                 caption=caption)
+        # (Ola 15 - B6) El backup manual TAMBIÉN cuenta como backup:
+        # antes /salud podía decir "último hace 50 h" con una copia recién
+        # descargada, porque solo el job marcaba el reloj.
+        def _marcar():
+            from db import set_setting
+            _c = get_conn()
+            try:
+                set_setting(_c, "last_backup_ts", _t.time())
+            finally:
+                _c.close()
+        await asyncio.to_thread(_marcar)
         try:
             os.remove(path)
         except OSError:
@@ -1757,7 +1809,7 @@ async def cmd_radar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/radar — qué vio el radar de pares recién nacidos en 24 h."""
     from radar import radar_text
     txt = await asyncio.to_thread(radar_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message, txt)     # (Ola 15 - M8) con fallback
 
 
 @solo_admin
@@ -1770,22 +1822,23 @@ async def cmd_postmortem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "minutos)…")
     from post_mortem import post_mortem_text
     txt = await asyncio.to_thread(post_mortem_text, fresco)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message, txt)     # (Ola 15 - M8) con fallback
 
 
 @solo_admin
 async def cmd_salidas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Deriva post-venta por billetera: ¿vende temprano o sale en la cima?"""
-    from salidas import salidas_text, hold_report
-    conn = get_conn()
-    try:
-        txt = salidas_text(conn)
-        extra = hold_report(conn)
-        if extra:
-            txt += "\n" + extra
-    finally:
-        conn.close()
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    def _calcular():                       # (Ola 15 - M5) fuera del loop
+        from salidas import salidas_text, hold_report
+        conn = get_conn()
+        try:
+            txt = salidas_text(conn)
+            extra = hold_report(conn)
+            return txt + ("\n" + extra if extra else "")
+        finally:
+            conn.close()
+    txt = await asyncio.to_thread(_calcular)
+    await _send_md(update.message, txt)
 
 
 @solo_admin
@@ -1871,7 +1924,13 @@ def main():
     if not ADMIN_ID:
         print("⚠️  TELEGRAM_ADMIN_ID no configurado: el bot responderá a "
               "CUALQUIERA. Configúralo antes de usarlo en serio.")
-    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
+    # (Ola 15 - M6) concurrent_updates: sin esto PTB procesa los updates
+    # EN FILA, y una consulta al agente con la IA local ocupada (hasta
+    # ~150 s) dejaba mudo al bot entero — comandos y botones incluidos.
+    # El estado compartido va por user_id (PENDING_ACTIONS, AWAITING),
+    # así que tolera concurrencia.
+    app = (Application.builder().token(BOT_TOKEN)
+           .concurrent_updates(True).post_init(_post_init).build())
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
@@ -1980,18 +2039,28 @@ def main():
 
     def _con_reloj(nombre: str, fn):
         async def _w(ctx):
+            # (Ola 15 - B3) El reloj se marca solo si el job SALIÓ BIEN:
+            # antes el finally lo marcaba aunque fallara, y un
+            # post_mortem/weekly_learning caído no reintentaba hasta el
+            # período siguiente (7 días de silencio por un fallo de red).
+            _ok = False
             try:
                 await fn(ctx)
+                _ok = True
             finally:
-                try:
-                    from db import set_setting
-                    _c = get_conn()
+                if _ok:
                     try:
-                        set_setting(_c, f"job_ts:{nombre}", _t.time())
-                    finally:
-                        _c.close()
-                except Exception:
-                    pass
+                        from db import set_setting
+                        _c = get_conn()
+                        try:
+                            set_setting(_c, f"job_ts:{nombre}", _t.time())
+                        finally:
+                            _c.close()
+                    except Exception:
+                        pass
+                else:
+                    print(f"· {nombre}: falló; el reloj NO se marca, "
+                          f"se reintentará antes")
         return _w
 
     # Ciclo automático: cada N horas DE VERDAD (reloj persistente)

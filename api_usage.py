@@ -16,11 +16,26 @@ para no abrir una conexión de base por cada llamada de red.
 import threading
 import time
 
-from db import get_conn, get_setting, set_setting
+from db import get_conn, get_setting
 
 _BUF: dict = {}
 _LAST = [0.0]
 _LOCK = threading.Lock()
+
+# (Ola 15 - M3) El búfer vive en memoria hasta 60 s: sin esto, cada
+# reinicio (deploy o excepción) tiraba los conteos pendientes — otro
+# subconteo silencioso del gasto real de Helius.
+import atexit as _atexit
+
+
+def _volcar_al_salir():
+    try:
+        flush()
+    except Exception:
+        pass
+
+
+_atexit.register(_volcar_al_salir)
 
 
 def _key(api: str) -> str:
@@ -40,6 +55,31 @@ def record(api: str, n: int = 1) -> None:
         pass
 
 
+def _incremento_atomico(conn, k: str, n: int) -> None:
+    """Suma n al contador `k` EN LA BASE, sin leer-modificar-escribir.
+
+    (Ola 15 - M3) El patrón viejo (get_setting + set_setting fuera del
+    candado) perdía conteos cuando dos hilos volcaban a la vez: siempre
+    SUBCONTEO, y como de aquí sale `api_helius_credits_*` — la familia
+    que alimenta el freno del 85% — el freno saltaría tarde. El UPSERT
+    hace la suma dentro del motor, sin ventana de carrera. Ramas
+    explícitas porque el SQL difiere (CLAUDE.md: vale en los dos)."""
+    import db as _db
+    if getattr(_db, "USE_PG", False):
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = "
+            "CAST((COALESCE(NULLIF(settings.value, '')::numeric, 0) "
+            "+ %s::numeric) AS TEXT)", (k, str(n), str(n)))
+    else:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = "
+            "CAST(CAST(COALESCE(NULLIF(value, ''), '0') AS REAL) + ? "
+            "AS TEXT)", (k, str(n), n))
+    conn.commit()
+
+
 def flush() -> None:
     """Vuelca los contadores acumulados a settings."""
     with _LOCK:
@@ -48,15 +88,32 @@ def flush() -> None:
         _LAST[0] = time.time()
     if not items:
         return
+    conn = None
+    pendientes = {}
     try:
         conn = get_conn()
         for api, n in items.items():
-            k = _key(api)
-            set_setting(conn, k,
-                        int(float(get_setting(conn, k, "0") or 0)) + n)
-        conn.close()
-    except Exception:
-        pass
+            try:
+                _incremento_atomico(conn, _key(api), n)
+            except Exception as e:
+                # Que falle UNA clave no debe perder las demás ni el lote.
+                pendientes[api] = n
+                print(f"· api_usage: no pude sumar {api} ({e})")
+    except Exception as e:
+        pendientes = items
+        print(f"· api_usage: volcado fallido ({e})")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if pendientes:
+        # (Ola 15) Lo que no se pudo escribir vuelve al búfer: antes se
+        # perdía en silencio.
+        with _LOCK:
+            for api, n in pendientes.items():
+                _BUF[api] = _BUF.get(api, 0) + n
 
 
 def used_today(conn, api: str) -> int:

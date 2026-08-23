@@ -37,6 +37,16 @@ def _snapshot() -> dict:
     """
     import time as _t
     conn = get_conn()
+    try:
+        return _snapshot_conn(conn, _t)
+    finally:                       # (Ola 15 - M7) la conexión se cierra
+        try:                       # pase lo que pase dentro
+            conn.close()
+        except Exception:
+            pass
+
+
+def _snapshot_conn(conn, _t) -> dict:
     hace24 = int(_t.time()) - 86400
 
     # El top 30 REAL (mismo orden que /top y que el copy trading)
@@ -87,7 +97,6 @@ def _snapshot() -> dict:
         "WHERE stake_usd IS NOT NULL").fetchone()["a"]
     _stake_txt = (f"stakes de ~{_stake:.0f} USD de media"
                   if _stake else "sin stakes registrados aun")
-    conn.close()
     return {
         "leyenda": {
             "pnl_onchain_sol": "ganancia DE ESA BILLETERA en la cadena, "

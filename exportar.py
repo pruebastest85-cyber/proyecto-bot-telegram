@@ -115,8 +115,12 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
         print(f"· Export de {mb:.1f} MB supera {limite_mb} MB → troceando")
 
         base_ruta = f"{prefijo}_1_base.json.gz"
+        # (Ola 15 - B7) La parte base tambien declara "partes": un
+        # recompositor que lo lea de la parte 1 fallaba (el docstring lo
+        # promete). Se calcula abajo y se reescribe el manifiesto.
         mb_base = _escribir_gz(base_ruta, {
             "generado": cabecera, "parte": 1,
+            "partes": None,
             "senales_alcance": nota_senales,
             "billeteras": billeteras, "apariciones": apariciones,
             "senales": senales, "tokens_ganadores": ganadores})
@@ -133,6 +137,12 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
                              "partes": total, "operaciones": trozo})
             rutas.append(r)
 
+        # Reescribir la base ya sabiendo cuantas partes hay en total.
+        _escribir_gz(base_ruta, {
+            "generado": cabecera, "parte": 1, "partes": total,
+            "senales_alcance": nota_senales,
+            "billeteras": billeteras, "apariciones": apariciones,
+            "senales": senales, "tokens_ganadores": ganadores})
         print(f"📦 Export en {len(rutas)} partes · base {mb_base:.1f} MB · "
               f"{len(operaciones)} operaciones en {len(trozos)} trozos")
         return rutas

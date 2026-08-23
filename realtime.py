@@ -533,11 +533,14 @@ def _listas_vigiladas(conn):
                     _VIG_CACHE.get("devs") or set())
     w = watch_addresses(conn)
     e = tracked_addresses(conn)
-    # (Ola 12b) El conjunto de devs por separado: sus transacciones NO son
-    # señales de candidatas — se interceptan antes del registro normal.
+    # (Ola 12b, afinado Ola 15 - H1) Devs como PARES (dev, mint): la
+    # intercepcion aplica solo a la operacion del dev SOBRE SU TOKEN.
+    # Antes se tragaba TODAS las operaciones de esa billetera — si el dev
+    # era ademas candidata u huerfana, perdia su registro de señales y su
+    # venta no cerraba el paper.
     try:
-        d = {r["dev_wallet"] for r in conn.execute(
-            "SELECT DISTINCT dev_wallet FROM paper_trades "
+        d = {(r["dev_wallet"], r["mint"]) for r in conn.execute(
+            "SELECT DISTINCT dev_wallet, mint FROM paper_trades "
             "WHERE status='abierta' AND dev_wallet IS NOT NULL").fetchall()}
     except Exception:
         d = set()
@@ -590,18 +593,31 @@ def _proc(txs: list[dict], conn):
         trade = _detect_trade(tx, tracked)
         if not trade:
             continue
-        # (Ola 12b) Interceptar a los DEVS antes del registro normal: sus
-        # transacciones no son señales de candidatas ni de ⭐ — son la
-        # alarma de rug. Si el dev vende el token de una posición abierta,
-        # la alerta sale AQUÍ, en segundos, no en el sondeo de 15 min.
-        if trade["wallet"] in devs and trade["wallet"] not in stars:
-            if trade["side"] == "venta":
+        # (Ola 12b, afinado Ola 15 - H1) Alarma de rug POR PAR: si el
+        # dev vende SU token con posición abierta, alerta en segundos.
+        # Sus operaciones en OTROS tokens solo se descartan si la
+        # billetera no está vigilada por derecho propio (candidata,
+        # ⭐ u huérfana del paper) — antes se tragaba todo su registro.
+        _devs_w = {w_ for w_, _m in devs}
+        if trade["wallet"] in _devs_w:
+            if (trade["wallet"], trade["mint"]) in devs                     and trade["side"] == "venta":
                 try:
                     from dev_watch import alerta_dev_inmediata
                     alerta_dev_inmediata(conn, trade)
                 except Exception as e:
                     print(f"· dev_watch inmediato falló: {e}")
-            continue
+            if trade["wallet"] not in stars:
+                _propia = conn.execute(
+                    "SELECT 1 FROM wallets WHERE address=? AND "
+                    "(is_tracked=1 OR (COALESCE(is_bot,0)=0 AND "
+                    "winning_tokens_count>=2))",
+                    (trade["wallet"],)).fetchone()
+                if not _propia:
+                    _propia = conn.execute(
+                        "SELECT 1 FROM paper_trades WHERE status='abierta' "
+                        "AND wallet=?", (trade["wallet"],)).fetchone()
+                if not _propia:
+                    continue      # dev puro: no contamina las señales
         # Candado anti-duplicados: solo un hilo puede "ganar" el registro
         # de esta firma; el resto la ve ya existente y no re-alerta.
         with _SIGNAL_LOCK:

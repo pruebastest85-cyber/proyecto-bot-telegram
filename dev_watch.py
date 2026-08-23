@@ -17,9 +17,14 @@ el dato queda en la fila para que la IA de salidas lo vea en contexto).
 Costo Helius: ~1 llamada por posición abierta cada 15 min + 1 al abrir.
 """
 
+import threading
 import time
 
 from db import get_conn
+
+# Candado de vuelo unico para la pasada de respaldo (Ola 15): el job del
+# paper la lanza en fondo y no debe haber dos a la vez.
+_REV_LOCK = threading.Lock()
 
 
 def resolver_dev(mint: str) -> str | None:
@@ -67,11 +72,15 @@ def alerta_dev_inmediata(conn, trade: dict) -> int:
     """(Ola 12b) El dev acaba de VENDER en tiempo real (LaserStream o
     webhook): alerta al instante para las posiciones abiertas de ese
     token que aun no avisaron. Devuelve cuantas marco."""
+    # (Ola 15) Solo posiciones abiertas ANTES de esta venta: una venta
+    # del dev previa a la apertura no es la alarma de ESTA posición.
     rows = conn.execute(
         """SELECT id, symbol, mint FROM paper_trades
            WHERE status='abierta' AND dev_wallet=? AND mint=?
-             AND COALESCE(dev_alerted, 0) = 0""",
-        (trade["wallet"], trade["mint"])).fetchall()
+             AND COALESCE(dev_alerted, 0) = 0
+             AND entry_ts <= ?""",
+        (trade["wallet"], trade["mint"],
+         int(trade.get("ts") or 0) or 2**62)).fetchall()
     if not rows:
         return 0
     for r in rows:
@@ -92,13 +101,21 @@ def alerta_dev_inmediata(conn, trade: dict) -> int:
     return len(rows)
 
 
-def _dev_vendio(dev: str, mint: str) -> bool:
-    """¿Hay una transacción reciente del dev sacando ese token?
-    Mira sus últimas ~25 txs: un envío/venta del mint DESDE el dev."""
+def _dev_vendio(dev: str, mint: str, desde_ts: int) -> bool:
+    """¿El dev sacó ese token DESPUÉS de `desde_ts`?
+
+    (Ola 15) El filtro temporal es lo que separa la alarma del ruido:
+    sin él, el seeding del pool o una venta VIEJA del dev (anteriores a
+    abrir la posición) disparaban "DEV VENDIÓ" — 18 falsos positivos
+    medidos en la base el 24/8 — y, como la alerta se marca una sola
+    vez, la venta REAL posterior ya nunca avisaba."""
     try:
         from helius_rpc import _rpc
         txs, _tok = _rpc(dev, orden="desc", limite=25)
         for tx in txs or []:
+            ts = tx.get("timestamp") or 0
+            if ts and ts <= desde_ts:
+                continue
             for tt in tx.get("tokenTransfers") or []:
                 if (tt.get("mint") == mint
                         and tt.get("fromUserAccount") == dev
@@ -115,7 +132,8 @@ def revisar_devs() -> int:
     conn = get_conn()
     try:
         rows = conn.execute(
-            """SELECT id, symbol, mint, dev_wallet FROM paper_trades
+            """SELECT id, symbol, mint, dev_wallet, entry_ts
+               FROM paper_trades
                WHERE status='abierta' AND dev_wallet IS NOT NULL
                  AND COALESCE(dev_alerted, 0) = 0
                ORDER BY entry_ts DESC LIMIT 15""").fetchall()
@@ -123,7 +141,8 @@ def revisar_devs() -> int:
         conn.close()
     avisadas = 0
     for r in rows:
-        if not _dev_vendio(r["dev_wallet"], r["mint"]):
+        if not _dev_vendio(r["dev_wallet"], r["mint"],
+                           int(r["entry_ts"] or 0)):
             time.sleep(0.3)
             continue
         conn = get_conn()
