@@ -14,6 +14,7 @@ siguiendo el setting "ia_proveedor" igual que ia_puente.
 import json
 import os
 import re
+import threading
 
 import requests
 
@@ -173,6 +174,16 @@ SYSTEM = (
     "Para acciones que modifican, invoca la herramienta directamente: el "
     "sistema le pedirá confirmación al usuario, no tú. El bot NO puede "
     "mover dinero real; el paper trading es simulación.")
+
+# (Ola 16) Candado del agente. Tres cosas lo necesitan desde que los
+# updates se procesan en paralelo:
+#   · LM Studio SERIALIZA las peticiones: dos chats a la vez hacen que el
+#     segundo agote su timeout y caiga a la nube (de pago) sin necesidad.
+#   · chat_history se lee al principio y se escribe al final: dos turnos
+#     solapados se pisan y el agente parece desmemoriado.
+#   · ajustes_log es leer-modificar-escribir: dos confirmaciones a la vez
+#     perdían una entrada y "deshacer" revertía el ajuste equivocado.
+_AGENTE_LOCK = threading.Lock()
 
 HISTORY_TURNS = 12   # mensajes de memoria (6 intercambios)
 MAX_PASOS = 4        # iteraciones máximas del loop de herramientas
@@ -574,7 +585,20 @@ def chat(user_text: str):
     Corre el loop del agente. Devuelve (respuesta, accion_pendiente).
     accion_pendiente es None o {"tool": ..., "args": {...}} si la IA quiere
     ejecutar una acción que modifica y hay que confirmar.
-    """
+
+    (Ola 16) Serializado: ver _AGENTE_LOCK. Si ya hay una consulta en
+    curso se avisa en vez de encolar en silencio (la IA local tarda
+    minutos y el usuario creería que el bot se colgó)."""
+    if not _AGENTE_LOCK.acquire(timeout=1):
+        return ("⏳ Estoy contestando tu pregunta anterior (la IA local "
+                "va de una en una). Dame un momento y repite."), None
+    try:
+        return _chat_serializado(user_text)
+    finally:
+        _AGENTE_LOCK.release()
+
+
+def _chat_serializado(user_text: str):
     if user_text.lower().strip() in ("olvida", "olvida todo", "reset",
                                      "borra la conversacion",
                                      "borra la conversación"):
@@ -716,6 +740,13 @@ def describe_action(action: dict) -> str:
 
 def execute_action(action: dict) -> str:
     """Ejecuta una acción de modificación ya confirmada por el usuario."""
+    # (Ola 16) Mismo candado: ajustes_log es leer-modificar-escribir y dos
+    # confirmaciones simultáneas perdían una entrada de la bitácora.
+    with _AGENTE_LOCK:
+        return _execute_action_serializado(action)
+
+
+def _execute_action_serializado(action: dict) -> str:
     tool, args = action["tool"], action.get("args", {})
     try:
         if tool == "descartar_billetera":
@@ -741,7 +772,11 @@ def execute_action(action: dict) -> str:
                 # 15, y un "deshacer" escribía un valor que nunca existió.
                 from db import TOP_ALERTAS_DEFAULT as _TAD
                 antes = get_setting(conn, "top_alertas", None)
-                _efectivo = int(float(antes if antes is not None else _TAD))
+                try:                       # (Ola 16) "" no debe lanzar
+                    _efectivo = int(float(
+                        antes if antes not in (None, "") else _TAD))
+                except (TypeError, ValueError):
+                    _efectivo = int(_TAD)
                 if _efectivo == n:
                     return (f"El top de alertas YA estaba en {_efectivo}. "
                             f"No cambié nada.")
@@ -783,7 +818,9 @@ def execute_action(action: dict) -> str:
                     _registrar_ajuste(conn,
                                       {"paper_max_sol": (antes, str(v))})
                     return (f"🧪 Tope del paper: {v:g} SOL por señal "
-                            f"(antes: {antes}).")
+                            f"(antes: "
+                            f"{antes if antes is not None else '1 por defecto'})"
+                            f".")
                 return ("Acción de paper no reconocida: usa encender, "
                         "apagar o max_sol.")
             finally:

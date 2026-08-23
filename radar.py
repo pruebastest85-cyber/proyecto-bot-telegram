@@ -140,13 +140,13 @@ def _semaforo(t: dict) -> tuple[bool, str]:
     riesgos = t.get("risks") or []
     if riesgos:
         problemas.append("riesgos: " + ", ".join(str(r) for r in riesgos[:2]))
-    # (Ola 15) Si el chequeo NO trajo datos (fallo de red/RugCheck), no
-    # se puede aprobar: antes salia "🟢 seguridad ok" sin haber
-    # comprobado nada.
-    sin_datos = (t.get("mint_auth") is None and t.get("freeze_auth") is None
-                 and t.get("lp_locked_pct") is None
-                 and t.get("top10_pct") is None and not riesgos)
-    if sin_datos:
+    # (Ola 15, corregido en Ola 16) Si el chequeo NO se hizo, no se puede
+    # aprobar. El indicador es `rug_ok` — que la fuente RESPONDIO —, no la
+    # ausencia de valores: RugCheck devuelve null en mint/freeze cuando la
+    # autoridad esta REVOCADA (el mejor estado), y un token de minutos aun
+    # no tiene topHolders ni markets. La version anterior rechazaba
+    # exactamente a los tokens limpios.
+    if not t.get("rug_ok"):
         return False, "⚪ sin datos de seguridad (chequeo falló)"
     aprueba = not (t.get("mint_auth") or t.get("freeze_auth")
                    or len(riesgos) >= 3)
@@ -284,7 +284,7 @@ def _seguimiento(conn) -> int:
     filas = conn.execute(
         """SELECT mint, symbol, ts, price0 FROM radar_tokens
            WHERE price0 IS NOT NULL AND price0 > 0
-             AND resultado NOT IN ('descartado_seguridad',
+             AND resultado NOT IN ('descartado_seguridad', 'sin_seguridad',
                  'ganador_promovido', 'expirado', 'murio', 'examinando')
              AND ts BETWEEN ? AND ?
            ORDER BY RANDOM() LIMIT 15""",

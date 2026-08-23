@@ -594,6 +594,9 @@ def _preparar_pg(pg):
             # aviso de que vendio (una alerta por posicion).
             ("paper_trades", "dev_wallet", "TEXT"),
             ("paper_trades", "dev_alerted", "INTEGER"),
+            # Ola 16: primer sondeo en que el par aparecio MUERTO; la
+            # posicion se cierra solo si sigue muerto en el siguiente.
+            ("paper_trades", "muerto_desde", "BIGINT"),
             # Radar 14b: precio al examinar, para promover ganadores
             ("radar_tokens", "price0", "DOUBLE PRECISION")]:
         try:
@@ -656,7 +659,8 @@ def _preparar_sqlite(conn):
                      ("gestion", "TEXT"), ("decidido_por", "TEXT"),
                      ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT"),
                      ("origen", "TEXT"), ("ultima_venta_sig", "TEXT"),
-                     ("dev_wallet", "TEXT"), ("dev_alerted", "INTEGER")]:
+                     ("dev_wallet", "TEXT"), ("dev_alerted", "INTEGER"),
+                     ("muerto_desde", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

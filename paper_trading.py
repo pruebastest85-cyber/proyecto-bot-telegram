@@ -35,6 +35,15 @@ import time
 from db import get_conn, get_setting
 
 HOUR = 3600
+# (Ola 16) Segundos que un par debe llevar MUERTO antes de cerrar la
+# posición: evita anotar -99% en el histórico por una migración de
+# pump.fun a Raydium, que deja el token sin par unos minutos.
+import os as _os_pt
+try:
+    _CONFIRMA_MUERTE_S = int(float(_os_pt.getenv("PAPER_CONFIRMA_MUERTE_S",
+                                                 "900")))
+except (TypeError, ValueError):
+    _CONFIRMA_MUERTE_S = 900
 
 
 def _g(conn, key: str, default):
@@ -832,24 +841,48 @@ def update_open_trades() -> int:
     from signal_tracker import _price
     cerradas = 0
     for row in rows:
-        price = _price(row["mint"])
+        # (Ola 16) UNA sola petición por posición: precio, muerte y
+        # liquidez del mismo sondeo.
+        try:
+            from signal_tracker import _price_mc_ex as _pmx
+            price, _mcx, _muerto, _liqx = _pmx(row["mint"])
+        except Exception:
+            price, _muerto = _price(row["mint"]), False
         time.sleep(config.DEXSCREENER_DELAY)
         if not price:
-            # (Ola 15) Par MUERTO confirmado (DexScreener sin pares o
-            # liquidez de polvo): cierre inmediato como perdida total —
-            # antes quedaba zombi hasta 48 h ocupando cupo. Un fallo de
-            # RED (muerto=False) si espera al timeout, como siempre.
-            _muerto = False
-            try:
-                from signal_tracker import _price_mc_ex
-                _px2, _mc2, _muerto, _l2 = _price_mc_ex(row["mint"])
-            except Exception:
-                pass
-            if _muerto or now - row["entry_ts"] > timeout:
+            # (Ola 15, corregido en Ola 16) Aquí NO se vuelve a llamar a
+            # la red: `_price` YA es `_price_mc_ex` por dentro, así que la
+            # segunda llamada era la misma petición duplicada y sin
+            # respetar el delay. El estado de muerte viene del mismo
+            # sondeo (`_muerto`, más arriba).
+            # Y la muerte se CONFIRMA en dos pasadas: un token de pump.fun
+            # que migra a Raydium se queda sin pares unos minutos, y
+            # cerrarlo al instante lo anotaba como -99% en el histórico
+            # medido, que es lo único irreversible del sistema.
+            if _muerto:
+                _antes = _campo(row, "muerto_desde")
+                if not _antes:
+                    conn.execute("UPDATE paper_trades SET muerto_desde=? "
+                                 "WHERE id=?", (now, row["id"]))
+                    conn.commit()
+                    print(f"· Paper: {row['symbol']} sin par; se confirma "
+                          f"en la próxima pasada antes de cerrar")
+                    continue
+                if now - float(_antes) >= _CONFIRMA_MUERTE_S:
+                    _close(conn, row, row["entry_price"] * 0.01,
+                           "sin liquidez", "💀")
+                    cerradas += 1
+                continue
+            if now - row["entry_ts"] > timeout:
                 _close(conn, row, row["entry_price"] * 0.01,
                        "sin liquidez", "💀")
                 cerradas += 1
             continue
+        elif _campo(row, "muerto_desde"):
+            # Revivió (era la migración, no un rug): se borra la marca.
+            conn.execute("UPDATE paper_trades SET muerto_desde=NULL "
+                         "WHERE id=?", (row["id"],))
+            conn.commit()
         pct = (price / row["entry_price"] - 1) * 100
         if pct >= tp:
             _close(conn, row, price, "take-profit", "🎯")
@@ -893,7 +926,14 @@ def update_open_trades() -> int:
                     revisar_devs()
                 finally:
                     _REV_LOCK.release()
-            _th.Thread(target=_rev_fondo, daemon=True).start()
+            try:
+                _th.Thread(target=_rev_fondo, daemon=True).start()
+            except Exception:
+                # (Ola 16) Si el hilo no arranca (pool agotado), soltar el
+                # candado: si no, la vigilancia dev-sell de respaldo no
+                # volvía a correr NUNCA hasta reiniciar el proceso.
+                _REV_LOCK.release()
+                raise
     except Exception as e:
         print(f"· dev_watch falló (no afecta al paper): {e}")
     return cerradas

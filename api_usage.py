@@ -29,6 +29,12 @@ import atexit as _atexit
 
 
 def _volcar_al_salir():
+    # (Ola 16) Sin bloqueo indefinido: los atexit corren ANTES de matar
+    # los hilos daemon, y si uno está dentro de record() con el candado
+    # tomado el apagado se quedaba colgado hasta el SIGKILL.
+    if not _LOCK.acquire(timeout=2):
+        return
+    _LOCK.release()
     try:
         flush()
     except Exception:
@@ -96,9 +102,25 @@ def flush() -> None:
             try:
                 _incremento_atomico(conn, _key(api), n)
             except Exception as e:
-                # Que falle UNA clave no debe perder las demás ni el lote.
-                pendientes[api] = n
-                print(f"· api_usage: no pude sumar {api} ({e})")
+                # (Ola 16) Distinguir transitorio de PERMANENTE: si la
+                # clave del día tiene basura no numérica, el UPSERT falla
+                # SIEMPRE y el búfer crecía sin fin reintentando cada 60 s.
+                # Ante un error de datos se sanea la clave y se sigue; solo
+                # los fallos de conexión vuelven al búfer.
+                _perm = e.__class__.__name__ in (
+                    "DataError", "ProgrammingError", "NumericValueOutOfRange",
+                    "InvalidTextRepresentation")
+                if _perm or "invalid input syntax" in str(e).lower():
+                    print(f"· api_usage: clave {api} con valor inválido; "
+                          f"la saneo y sigo ({e})")
+                    try:
+                        from db import set_setting
+                        set_setting(conn, _key(api), str(n))
+                    except Exception:
+                        pass
+                else:
+                    pendientes[api] = n
+                    print(f"· api_usage: no pude sumar {api} ({e})")
     except Exception as e:
         pendientes = items
         print(f"· api_usage: volcado fallido ({e})")

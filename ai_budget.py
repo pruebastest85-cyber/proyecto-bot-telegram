@@ -38,7 +38,11 @@ def _cap() -> int:
 
 def used_today(conn) -> int:
     try:
-        return int(get_setting(conn, "ai_calls_" + _today(), "0") or 0)
+        # (Ola 16) int(float(...)): si algún día este contador pasa al
+        # UPSERT atómico de api_usage, el valor queda como "124.0" e
+        # int("124.0") lanza ValueError. Barato blindarlo ahora.
+        return int(float(get_setting(conn, "ai_calls_" + _today(), "0")
+                         or 0))
     except Exception:
         return 0
 

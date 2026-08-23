@@ -48,26 +48,27 @@ def discard_wallet(address: str) -> str:
 
 def restore_wallet(address: str) -> str:
     """Revierte un descarte: vuelve a rastrear y la IA la reevaluará."""
+    # (Ola 16) Mismo patrón que discard_wallet: try/finally SIN except.
+    # Un fallo de base sube y se ve como lo que es; antes un except lo
+    # disfrazaba de "no existe esa dirección" y mandaba al dueño a buscar
+    # un problema que no era.
     conn = get_conn()
-    row = None
     try:
         row = conn.execute("SELECT address FROM wallets WHERE address=?",
                            (address,)).fetchone()
-    except Exception:
-        pass
-    if not row:
+        if not row:
+            return "No existe esa dirección en la base."
+        # ai_follow=1: sin esto, recompute_scores retiraba la ⭐ restaurada
+        # en el siguiente ciclo antes de que la IA la reevaluara.
+        # ai_class=NULL fuerza la reevaluacion igualmente.
+        conn.execute(
+            """UPDATE wallets SET is_bot=0, is_tracked=1,
+               ai_class=NULL, ai_follow=1,
+               ai_reason='Restaurada manualmente por el admin'
+               WHERE address=?""", (address,))
+        conn.commit()
+    finally:
         conn.close()
-        return "No existe esa dirección en la base."
-    # ai_follow=1: sin esto, recompute_scores retiraba la ⭐ restaurada en
-    # el siguiente ciclo antes de que la IA la reevaluara. ai_class=NULL
-    # fuerza la reevaluacion igualmente.
-    conn.execute(
-        """UPDATE wallets SET is_bot=0, is_tracked=1,
-           ai_class=NULL, ai_follow=1,
-           ai_reason='Restaurada manualmente por el admin'
-           WHERE address=?""", (address,))
-    conn.commit()
-    conn.close()
     try:                       # (Ola 15 - B5) que alerte desde YA
         from db import invalidar_copiables
         invalidar_copiables()

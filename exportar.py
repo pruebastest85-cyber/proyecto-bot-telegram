@@ -115,34 +115,26 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
         print(f"· Export de {mb:.1f} MB supera {limite_mb} MB → troceando")
 
         base_ruta = f"{prefijo}_1_base.json.gz"
-        # (Ola 15 - B7) La parte base tambien declara "partes": un
-        # recompositor que lo lea de la parte 1 fallaba (el docstring lo
-        # promete). Se calcula abajo y se reescribe el manifiesto.
-        mb_base = _escribir_gz(base_ruta, {
-            "generado": cabecera, "parte": 1,
-            "partes": None,
-            "senales_alcance": nota_senales,
-            "billeteras": billeteras, "apariciones": apariciones,
-            "senales": senales, "tokens_ganadores": ganadores})
-        rutas.append(base_ruta)
-
-        # Cuantas operaciones caben por trozo, estimado con lo ya medido.
+        # (Ola 15 - B7, afinado Ola 16) La parte base declara "partes"
+        # desde el principio: `total` solo depende de `mb`, que ya se
+        # conoce, asi que se calcula ANTES y la base (el archivo grande)
+        # se escribe UNA sola vez — antes se comprimia dos veces.
         por_trozo = max(50_000, int(len(operaciones) * (limite_mb / mb) * 0.8))
         trozos = [operaciones[i:i + por_trozo]
                   for i in range(0, len(operaciones), por_trozo)] or [[]]
         total = len(trozos) + 1
+        mb_base = _escribir_gz(base_ruta, {
+            "generado": cabecera, "parte": 1, "partes": total,
+            "senales_alcance": nota_senales,
+            "billeteras": billeteras, "apariciones": apariciones,
+            "senales": senales, "tokens_ganadores": ganadores})
+        rutas.append(base_ruta)
         for i, trozo in enumerate(trozos, start=2):
             r = f"{prefijo}_{i}_operaciones.json.gz"
             _escribir_gz(r, {"generado": cabecera, "parte": i,
                              "partes": total, "operaciones": trozo})
             rutas.append(r)
 
-        # Reescribir la base ya sabiendo cuantas partes hay en total.
-        _escribir_gz(base_ruta, {
-            "generado": cabecera, "parte": 1, "partes": total,
-            "senales_alcance": nota_senales,
-            "billeteras": billeteras, "apariciones": apariciones,
-            "senales": senales, "tokens_ganadores": ganadores})
         print(f"📦 Export en {len(rutas)} partes · base {mb_base:.1f} MB · "
               f"{len(operaciones)} operaciones en {len(trozos)} trozos")
         return rutas

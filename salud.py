@@ -358,13 +358,23 @@ def _c_errores():
 
 def _c_backup(conn):
     try:
+        # (Ola 16) El automático (copia verificada en disco, con rotación)
+        # y el manual (/backup, que solo manda el archivo y lo borra) son
+        # cosas distintas: mezclarlos escondía un job roto durante días.
         ts = get_setting(conn, "last_backup_ts", None)
+        tsm = get_setting(conn, "last_backup_manual_ts", None)
+        extra = ""
+        if tsm:
+            extra = f" · manual hace {_horas(tsm):.0f} h"
         if not ts:
-            return _chk("Backup", WARN, "sin registro de backup todavía")
+            return _chk("Backup", WARN,
+                        "sin backup automático todavía" + extra)
         h = _horas(ts)
         if h > 48:
-            return _chk("Backup", WARN, f"último hace {h:.0f} h")
-        return _chk("Backup", OK, f"hace {h:.0f} h")
+            return _chk("Backup", WARN,
+                        f"automático hace {h:.0f} h" + extra,
+                        "revisa la carpeta backups/ junto a la base")
+        return _chk("Backup", OK, f"hace {h:.0f} h" + extra)
     except Exception as e:
         return _chk("Backup", WARN, f"no se pudo comprobar ({e})")
 

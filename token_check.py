@@ -37,7 +37,7 @@ def analyze_token(mint: str) -> dict:
          "age_days": None, "vol24": None, "buys5": None, "sells5": None,
          "price_change_h1": None, "price_change_h24": None,
          "websites": [], "socials": [],
-         "rug_score": None, "risks": [], "mint_auth": None,
+         "rug_score": None, "risks": [], "rug_ok": False, "mint_auth": None,
          "freeze_auth": None, "top10_pct": None, "lp_locked_pct": None}
 
     d = _get(config.DEXSCREENER_TOKEN.format(address=mint))
@@ -89,6 +89,13 @@ def analyze_token(mint: str) -> dict:
 
     f = _get(RUG_FULL.format(mint=mint), timeout=25)
     if f:
+        # (Ola 16) La fuente RESPONDIO. Es el unico dato fiable para saber
+        # si el chequeo se hizo: mintAuthority/freezeAuthority en null
+        # significan REVOCADA (el mejor estado posible), y topHolders o
+        # markets vacios son normales en un token de minutos. Deducir
+        # "chequeo fallido" de esos nulos rechazaba justo los tokens
+        # limpios (regresion de la Ola 15 en el radar).
+        t["rug_ok"] = True
         tok = f.get("token") or {}
         t["mint_auth"] = tok.get("mintAuthority")
         t["freeze_auth"] = tok.get("freezeAuthority")

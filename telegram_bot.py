@@ -72,7 +72,12 @@ _BG_TASKS: set = set()
 async def _send_md(chat, text, **kw):
     """Envía en Markdown; si Telegram lo rechaza (símbolos raros del token),
     reintenta en texto plano para NO perder el mensaje en silencio.
-    Mismo criterio que realtime.tg_send."""
+    Mismo criterio que realtime.tg_send.
+
+    (Ola 16) Acepta Chat o Message: pasar `update.message` por error dejaba
+    /radar, /postmortem y /salidas MUDOS — AttributeError capturado por el
+    propio except, dos líneas de "Markdown rechazado" y silencio total."""
+    chat = getattr(chat, "chat", chat)
     try:
         return await chat.send_message(text, parse_mode="Markdown", **kw)
     except Exception as e:
@@ -934,6 +939,18 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         _pend = PENDING_ACTIONS.pop(q.from_user.id, None)
         accion = _pend.get("accion") if _pend else None
+        if accion is None and data.startswith("agc:y"):
+            # (Ola 16) El bot se reinició con la propuesta pendiente (vive
+            # en memoria): antes decía "❌ Acción cancelada", como si el
+            # dueño la hubiera cancelado él.
+            await q.answer("La propuesta expiró (el bot se reinició)")
+            try:
+                await q.edit_message_text(
+                    "⌛ Propuesta expirada (el bot se reinició). "
+                    "Vuelve a pedirla y la ejecuto.")
+            except Exception:
+                pass
+            return
         if data.startswith("agc:n") or not accion:
             await q.answer("Cancelado")
             try:
@@ -1723,14 +1740,16 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with open(path, "rb") as fh:
             await update.message.reply_document(document=fh, filename=fname,
                                                 caption=caption)
-        # (Ola 15 - B6) El backup manual TAMBIÉN cuenta como backup:
-        # antes /salud podía decir "último hace 50 h" con una copia recién
-        # descargada, porque solo el job marcaba el reloj.
+        # (Ola 15 - B6, corregido en Ola 16) El backup manual se anota en
+        # SU PROPIA clave: marcar `last_backup_ts` (la del automático)
+        # escondía justo el fallo que /salud existe para detectar — el job
+        # podía llevar días roto y /salud decir "hace 0 h" sin que
+        # quedara ninguna copia en disco.
         def _marcar():
             from db import set_setting
             _c = get_conn()
             try:
-                set_setting(_c, "last_backup_ts", _t.time())
+                set_setting(_c, "last_backup_manual_ts", _t.time())
             finally:
                 _c.close()
         await asyncio.to_thread(_marcar)
@@ -1809,7 +1828,7 @@ async def cmd_radar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/radar — qué vio el radar de pares recién nacidos en 24 h."""
     from radar import radar_text
     txt = await asyncio.to_thread(radar_text)
-    await _send_md(update.message, txt)     # (Ola 15 - M8) con fallback
+    await _send_md(update.message.chat, txt)     # (Ola 15 - M8) con fallback
 
 
 @solo_admin
@@ -1822,7 +1841,7 @@ async def cmd_postmortem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "minutos)…")
     from post_mortem import post_mortem_text
     txt = await asyncio.to_thread(post_mortem_text, fresco)
-    await _send_md(update.message, txt)     # (Ola 15 - M8) con fallback
+    await _send_md(update.message.chat, txt)     # (Ola 15 - M8) con fallback
 
 
 @solo_admin
@@ -1838,7 +1857,7 @@ async def cmd_salidas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         finally:
             conn.close()
     txt = await asyncio.to_thread(_calcular)
-    await _send_md(update.message, txt)
+    await _send_md(update.message.chat, txt)
 
 
 @solo_admin
@@ -1924,13 +1943,15 @@ def main():
     if not ADMIN_ID:
         print("⚠️  TELEGRAM_ADMIN_ID no configurado: el bot responderá a "
               "CUALQUIERA. Configúralo antes de usarlo en serio.")
-    # (Ola 15 - M6) concurrent_updates: sin esto PTB procesa los updates
-    # EN FILA, y una consulta al agente con la IA local ocupada (hasta
-    # ~150 s) dejaba mudo al bot entero — comandos y botones incluidos.
-    # El estado compartido va por user_id (PENDING_ACTIONS, AWAITING),
-    # así que tolera concurrencia.
+    # (Ola 15 - M6, acotado en Ola 16) concurrent_updates: sin esto PTB
+    # procesa los updates EN FILA y una consulta al agente con la IA local
+    # ocupada (~150 s) dejaba mudo al bot entero. Pero True = hasta 4096
+    # updates a la vez, y cada handler abre SU conexión (db.get_conn no
+    # tiene pool): una ráfaga agotaría el cupo de Postgres — el modo de
+    # fallo que ya documenta realtime.py. Un tope de 8 da capacidad de
+    # sobra para un solo usuario y acota las conexiones.
     app = (Application.builder().token(BOT_TOKEN)
-           .concurrent_updates(True).post_init(_post_init).build())
+           .concurrent_updates(8).post_init(_post_init).build())
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
@@ -2011,7 +2032,11 @@ def main():
             from db import get_setting
             _c = get_conn()
             try:
-                last = float(get_setting(_c, f"job_ts:{nombre}", 0) or 0)
+                # (Ola 16) El más reciente de éxito e intento: un job que
+                # falla no debe adelantar su próxima corrida en cada boot.
+                last = max(
+                    float(get_setting(_c, f"job_ts:{nombre}", 0) or 0),
+                    float(get_setting(_c, f"job_intento:{nombre}", 0) or 0))
             finally:
                 _c.close()
         except Exception:
@@ -2039,28 +2064,35 @@ def main():
 
     def _con_reloj(nombre: str, fn):
         async def _w(ctx):
-            # (Ola 15 - B3) El reloj se marca solo si el job SALIÓ BIEN:
-            # antes el finally lo marcaba aunque fallara, y un
-            # post_mortem/weekly_learning caído no reintentaba hasta el
-            # período siguiente (7 días de silencio por un fallo de red).
+            # (Ola 15 - B3, corregido en Ola 16) DOS relojes:
+            #   job_intento:<n>  → SIEMPRE, haya ido bien o mal.
+            #   job_ts:<n>       → solo cuando el job terminó BIEN.
+            # Con un solo reloj marcado en éxito, un auto_cycle que falla
+            # (429 de Helius, Gecko caído) dejaba el reloj viejo y CADA
+            # reinicio disparaba un ciclo completo a los 60 s — justo el
+            # bug de la Ola 5 que el reloj persistente vino a cerrar.
+            # `_reloj_first` usa el más reciente de los dos, así que un
+            # fallo ya no adelanta nada, y el éxito sigue siendo lo que
+            # marca el ritmo real.
             _ok = False
             try:
                 await fn(ctx)
                 _ok = True
             finally:
-                if _ok:
+                try:
+                    from db import set_setting
+                    _c = get_conn()
                     try:
-                        from db import set_setting
-                        _c = get_conn()
-                        try:
+                        set_setting(_c, f"job_intento:{nombre}", _t.time())
+                        if _ok:
                             set_setting(_c, f"job_ts:{nombre}", _t.time())
-                        finally:
-                            _c.close()
-                    except Exception:
-                        pass
-                else:
-                    print(f"· {nombre}: falló; el reloj NO se marca, "
-                          f"se reintentará antes")
+                    finally:
+                        _c.close()
+                except Exception:
+                    pass
+                if not _ok:
+                    print(f"· {nombre}: falló (el reloj de éxito no se "
+                          f"marca; el ritmo lo fija el intento)")
         return _w
 
     # Ciclo automático: cada N horas DE VERDAD (reloj persistente)

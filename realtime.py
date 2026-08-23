@@ -589,6 +589,7 @@ def _proc(txs: list[dict], conn):
     # Conjunto vacío = no se pudo calcular → no filtramos, para no dejar
     # el bot mudo por un fallo de consulta.
     top = top_addresses(conn)
+    _devs_w = {w_ for w_, _m in devs}      # (Ola 16) fuera del bucle
     for tx in txs:
         trade = _detect_trade(tx, tracked)
         if not trade:
@@ -598,7 +599,6 @@ def _proc(txs: list[dict], conn):
         # Sus operaciones en OTROS tokens solo se descartan si la
         # billetera no está vigilada por derecho propio (candidata,
         # ⭐ u huérfana del paper) — antes se tragaba todo su registro.
-        _devs_w = {w_ for w_, _m in devs}
         if trade["wallet"] in _devs_w:
             if (trade["wallet"], trade["mint"]) in devs                     and trade["side"] == "venta":
                 try:
@@ -754,11 +754,15 @@ def _proc(txs: list[dict], conn):
                             _accion = ("cerrar", trade, None)
                     if _accion:
                         import paper_trading as _pt
-                        from signal_tracker import _price_mc as _pm
-                        _p0, _mc0 = _pm(trade["mint"])
+                        from signal_tracker import _price_mc_ex as _pmx
+                        # (Ola 16) La LIQUIDEZ viaja en el token: sin ella
+                        # el suelo de open_trade (`liq < 1000`) se saltaba
+                        # entero en el camino caliente — justo al revés de
+                        # lo que decía su comentario.
+                        _p0, _mc0, _muerto0, _liq0 = _pmx(trade["mint"])
                         if _p0 and _p0 > 0:
                             _t0 = {"price": _p0, "symbol": trade["mint"][:6],
-                                   "mc": _mc0}
+                                   "mc": _mc0, "liq": _liq0}
                             # Candado por mint (M4): el "una posicion por
                             # token" de open_trade es SELECT-then-INSERT.
                             with _lock_mint(trade["mint"]):
