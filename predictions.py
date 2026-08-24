@@ -89,6 +89,12 @@ def _leader_health(conn, leader: str) -> dict:
     return {"n": n, "accuracy": round(acc), "estado": estado, "factor": factor}
 
 
+# (Ola 17-A) Valor neutro de la etapa 1 y cuántos puntos de los 100 de
+# "Confianza" representa. Se nombra para poder decirlo en la alerta.
+CONF_STAGE_NEUTRO = 0.5
+CONF_PTS_NEUTROS = round(15 * CONF_STAGE_NEUTRO, 1)
+
+
 def confidence_score(inf: dict, followers: list, liq, health: dict,
                      arrived: int = 0) -> int:
     """
@@ -112,10 +118,17 @@ def confidence_score(inf: dict, followers: list, liq, health: dict,
         # Etapa 1 (sin confirmaciones aun): valor neutro. Con 0, el maximo
         # teorico era 85 y el umbral por defecto (85) hacia practicamente
         # imposible alertar en la etapa inicial.
-        f_stage = 0.5
+        # (Ola 17-A) Se mantiene, pero la alerta ya DICE que estos puntos
+        # no estan medidos: son 7,5 de los 100 de "Confianza".
+        f_stage = CONF_STAGE_NEUTRO
     score = (25 * f_hist + 20 * f_stab + 15 * f_lead +
              10 * f_liq + 15 * f_health + 15 * f_stage)
     return round(min(100.0, score))
+
+
+# Peso 10 × 0.6 = 6 puntos fijos del Meta Score. Ver comentario abajo.
+META_TOKEN_NEUTRO = 0.6
+META_PTS_NEUTROS = round(10 * META_TOKEN_NEUTRO)
 
 
 def meta_score(inf: dict, cluster: dict | None, health: dict,
@@ -123,7 +136,8 @@ def meta_score(inf: dict, cluster: dict | None, health: dict,
     """
     Meta Score 0-100 de la señal (pesos del diseño):
       Leader 20 · Cluster 20 · Historial líder 15 · Propagación 20 ·
-      Liquidez 10 · Riesgo 5 · (Historial token 10 → neutro si no hay).
+      Liquidez 10 · Riesgo 5 · (Historial token 10 → SIEMPRE neutro:
+      no hay ninguna rama que lo calcule, son 6 puntos fijos).
     """
     f_lead = (inf.get("leader_score") or 0) / 100
     if cluster:
@@ -136,7 +150,11 @@ def meta_score(inf: dict, cluster: dict | None, health: dict,
     probs = [f.get("prob", 0) / 100 for f in followers] or [0]
     f_prop = sum(probs) / len(probs)
     f_liq = 1.0 if (liq or 0) >= 20000 else max(0.0, (liq or 0) / 20000)
-    f_token = 0.6      # neutro: sin histórico propio del token
+    # (Ola 17-A) Este componente NUNCA se ha calculado: no existe rama que
+    # lo mida. Son 6 de los 100 puntos que siempre valen lo mismo. Se deja
+    # el neutro (quitarlo moveria todos los umbrales ya calibrados), pero
+    # la alerta ahora lo DICE en vez de presentar 100 puntos como medidos.
+    f_token = META_TOKEN_NEUTRO
     f_risk = 1.0 - min(1.0, (risk_pct or 0) / 100)   # menos riesgo = mejor
     score = (20 * f_lead + 20 * f_cluster + 15 * f_hist + 20 * f_prop +
              10 * f_liq + 10 * f_token + 5 * f_risk)
@@ -179,6 +197,13 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
              f"🔮 *SEÑAL PREDICTIVA — {nivel}*",
              f"Líder: *{alias}* · Token: `{sym}`",
              f"Confianza: *{conf}%* · Meta Score: *{meta}/100*"]
+    # (Ola 17-A) Decir qué parte de esos números NO está medida.
+    _neutros = [f"{META_PTS_NEUTROS} pts del Meta Score (sin histórico "
+                f"propio del token: nunca se calcula)"]
+    if stage <= 1:
+        _neutros.append(f"{CONF_PTS_NEUTROS} pts de Confianza (etapa 1: "
+                        f"aún no ha confirmado ningún seguidor)")
+    lines.append("_⚪ Neutros por falta de datos: " + " · ".join(_neutros) + "._")
     if health.get("accuracy") is not None:
         lines.append(f"Salud del líder (30d): {health['estado']} "
                      f"({health['accuracy']}% en {health['n']})")
@@ -264,8 +289,16 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     cluster = None
     try:
         cluster = cluster_for(wallet)
-    except Exception:
-        pass
+    except Exception as e:
+        # (Ola 17-A) Antes era `pass`: si esto fallaba, f_cluster caia al
+        # neutro 0.3 (6 de 20 puntos) y se presentaba como medido, sin
+        # dejar ni una linea en el log. Ahora se ve.
+        print(f"· Predicción: no pude leer el cluster de {wallet[:8]}: {e}")
+        try:
+            from errores import record as _rec_err
+            _rec_err("predictions.cluster", e)
+        except Exception:
+            pass
     conf = confidence_score(inf, followers, token_ctx.get("liq"), health)
     meta = meta_score(inf, cluster, health, followers,
                       token_ctx.get("liq"), _risk_pct(token_ctx))
@@ -424,8 +457,17 @@ def metrics_text() -> str:
             "SELECT COUNT(*) c FROM predictions "
             "WHERE status='evaluada' AND alerted_stage>0 AND outcome_pct=0"
         ).fetchone()["c"]
+        # (Ola 17-A) El denominador contaba TODAS las alertadas, incluidas
+        # las que aun no se han evaluado, mientras el numerador solo cuenta
+        # evaluadas: la tasa salia sistematicamente mejor de lo real
+        # ("3/50" cuando quiza solo 6 de esas 50 estan evaluadas).
         alerted = conn.execute(
-            "SELECT COUNT(*) c FROM predictions WHERE alerted_stage>0"
+            "SELECT COUNT(*) c FROM predictions "
+            "WHERE alerted_stage>0 AND status='evaluada'"
+        ).fetchone()["c"]
+        alerted_abiertas = conn.execute(
+            "SELECT COUNT(*) c FROM predictions "
+            "WHERE alerted_stage>0 AND status<>'evaluada'"
         ).fetchone()["c"]
         tiers = {r["tier"]: r["c"] for r in conn.execute(
             "SELECT tier, COUNT(*) c FROM predictions GROUP BY tier").fetchall()}
@@ -462,7 +504,11 @@ def metrics_text() -> str:
         if ev["chg"] is not None:
             out.append(f"Rendimiento medio del token a la fecha de "
                        f"medición: {round(ev['chg']):+d}%")
-        out.append(f"Falsos positivos (alertó y 0 llegó): {fp}/{alerted}")
+        _fp = (f"Falsos positivos (alertó y 0 llegó): {fp}/{alerted} "
+               f"evaluadas ({pct(fp, alerted)})")
+        if alerted_abiertas:
+            _fp += f" · {alerted_abiertas} alertadas aún sin evaluar"
+        out.append(_fp)
     out.append(f"\nNiveles → 🟢 {tiers.get('alpha',0)} · "
                f"🟡 {tiers.get('watchlist',0)} · 🔴 {tiers.get('ignored',0)}")
     if leaders:

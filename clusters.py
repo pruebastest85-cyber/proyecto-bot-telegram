@@ -24,6 +24,13 @@ from db import get_conn
 EARLY_RANK = 30       # "temprano" = entre los primeros 30 compradores
 MIN_SHARED = 2        # nº mínimo de tokens ganadores compartidos por par
 
+# (Ola 17-A) Mínimo de comparaciones para poder decir quién lidera.
+# Sin esto, una billetera que coincidió con otra en UN token y compró
+# antes salía con "100% adelanta" y se coronaba 👑 por delante de una
+# con 95% sobre 400 comparaciones — y el bot llegaba a decir "vigila
+# esta billetera para adelantarte" a partir de una sola coincidencia.
+MIN_COMPS_LIDER = 6
+
 
 def _early_data(conn):
     """Devuelve (by_token: {mint:set(wallets)}, ranks: {(mint,wallet):rank})."""
@@ -82,11 +89,13 @@ def _leadership(members, shared_tokens, ranks):
                     precede[a][b] += 1
     order = []
     for m in members:
-        lead_pct = round(100 * leads[m] / comps[m]) if comps[m] else None
+        # Muestra insuficiente = NO se sabe, no "100%".
+        lead_pct = (round(100 * leads[m] / comps[m])
+                    if comps[m] >= MIN_COMPS_LIDER else None)
         avg_rank = round(rank_sum[m] / appears[m], 1) if appears[m] else None
         follows_w = (max(precede[m].items(), key=lambda kv: kv[1])[0]
                      if precede[m] else None)
-        order.append({"wallet": m, "lead_pct": lead_pct,
+        order.append({"wallet": m, "lead_pct": lead_pct, "comps": comps[m],
                       "avg_rank": avg_rank, "appears": appears[m],
                       "follows": follows_w})
     # líder primero: mayor lead_pct, luego menor rank medio
@@ -157,8 +166,14 @@ def find_clusters(min_shared: int = MIN_SHARED) -> list[dict]:
                 "shared_tokens": len(toks),
                 "strength": len(members) * len(toks),
                 "order": order,
-                "leader": order[0]["alias"] if order else None,
-                "leader_wallet": order[0]["wallet"] if order else None,
+                # (Ola 17-A) Solo hay 👑 si el primero tiene muestra
+                # suficiente; si no, el cluster existe pero SIN líder
+                # declarado, que es la verdad.
+                "leader": (order[0]["alias"] if order
+                           and order[0]["lead_pct"] is not None else None),
+                "leader_wallet": (order[0]["wallet"] if order
+                                  and order[0]["lead_pct"] is not None
+                                  else None),
             })
         clusters.sort(key=lambda c: c["strength"], reverse=True)
         return clusters
@@ -177,11 +192,17 @@ def clusters_text(limit: int = 6) -> str:
         out.append(f"*{i}. Cluster de {c['size']} billeteras* · "
                    f"{c['shared_tokens']} tokens en común")
         if c.get("leader"):
-            out.append(f"   👑 Líder: *{c['leader']}* (compra primero)")
+            _o0 = c["order"][0]
+            out.append(f"   👑 Líder: *{c['leader']}* (compra primero — "
+                       f"{_o0['lead_pct']}% sobre {_o0['comps']} comparaciones)")
+        else:
+            out.append(f"   ⚪ Sin líder claro todavía (hacen falta "
+                       f"{MIN_COMPS_LIDER}+ comparaciones por billetera)")
         seguidores = [o for o in c.get("order", [])
                       if o["wallet"] != c.get("leader_wallet")][:5]
         for o in seguidores:
-            lp = f"{o['lead_pct']}% adelanta" if o["lead_pct"] is not None else ""
+            lp = (f"{o['lead_pct']}% adelanta ({o['comps']} comp.)"
+                  if o["lead_pct"] is not None else "adelanto s/d")
             sig = f" · sigue a {o['follows_alias']}" if o.get("follows_alias") else ""
             out.append(f"   • {o['alias']} (rank medio {o['avg_rank']}{('; ' + lp) if lp else ''}{sig})")
         out.append("")

@@ -77,7 +77,13 @@ def format_metrics(m: dict) -> list[str]:
         out.append(f"ROI prom/mediano/máx: {m['roi_avg']:+d}% / "
                    f"{m['roi_median']:+d}% / {m['roi_max']:+d}%")
     if m.get("profit_factor") is not None:
-        out.append(f"Profit Factor: {m['profit_factor']}")
+        # (Ola 17-A) 99.99 es un CENTINELA interno ("sin pérdidas
+        # cerradas"), no una medición. dna.py ya lo enmascaraba desde la
+        # Ola 8 con el comentario "mostrarlo como dato era mentir"; el
+        # arreglo no se aplicó aquí, que es lo que imprime /perfil.
+        _pf = m["profit_factor"]
+        out.append("Profit Factor: " + ("∞ (sin pérdidas cerradas)"
+                                        if _pf >= 99 else f"{_pf}"))
     if m.get("expectancy_sol") is not None:
         out.append(f"Expectancy: {m['expectancy_sol']:+.3f} SOL/op")
     if m.get("sharpe") is not None:

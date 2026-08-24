@@ -132,15 +132,23 @@ def format_token_block(t: dict) -> str:
         extra.append(f"últimos 5min: {t['buys5']}c/{t['sells5']}v")
     if extra:
         lines.append(" · ".join(extra))
-    seg = ["mint: " + ("⚠️ ACTIVA" if t["mint_auth"] else "✅ revocada"),
-           "freeze: " + ("⚠️ ACTIVA" if t["freeze_auth"] else "✅ no")]
-    if t["lp_locked_pct"] is not None:
-        icono = "✅" if t["lp_locked_pct"] >= 80 else "⚠️"
-        seg.append(f"LP lock: {icono} {t['lp_locked_pct']:.0f}%")
-    if t["top10_pct"] is not None:
-        icono = "⚠️" if t["top10_pct"] >= 40 else "✅"
-        seg.append(f"top10 holders: {icono} {t['top10_pct']:.0f}%")
-    lines.append("🔐 " + " · ".join(seg))
+    # (Ola 17-A) Sin respuesta de RugCheck no se puede decir "revocada":
+    # mint_auth/freeze_auth valen None tanto si la autoridad esta
+    # REVOCADA como si el chequeo no llego a hacerse. Decir "✅ revocada"
+    # sobre lo segundo es inventarse un veredicto de seguridad.
+    if not t.get("rug_ok"):
+        lines.append("🔐 ⚪ Seguridad SIN COMPROBAR (RugCheck no respondió) "
+                     "— no es lo mismo que estar limpio")
+    else:
+        seg = ["mint: " + ("⚠️ ACTIVA" if t["mint_auth"] else "✅ revocada"),
+               "freeze: " + ("⚠️ ACTIVA" if t["freeze_auth"] else "✅ no")]
+        if t["lp_locked_pct"] is not None:
+            icono = "✅" if t["lp_locked_pct"] >= 80 else "⚠️"
+            seg.append(f"LP lock: {icono} {t['lp_locked_pct']:.0f}%")
+        if t["top10_pct"] is not None:
+            icono = "⚠️" if t["top10_pct"] >= 40 else "✅"
+            seg.append(f"top10 holders: {icono} {t['top10_pct']:.0f}%")
+        lines.append("🔐 " + " · ".join(seg))
     if t["risks"]:
         lines.append("⚠️ Riesgos: " + ", ".join(t["risks"]))
     return "\n".join(lines)
@@ -148,7 +156,10 @@ def format_token_block(t: dict) -> str:
 
 def ai_payload(t: dict) -> dict:
     """Versión compacta para pasarle a la IA."""
-    return {k: t[k] for k in
+    # (Ola 17-A) `rug_ok` va SIEMPRE: sin el, la IA ve mint_auth=null y
+    # concluye "autoridad revocada, token limpio" cuando lo cierto es
+    # que el chequeo no se pudo hacer.
+    return {k: t.get(k) for k in
             ("symbol", "liq", "mc", "price_change_h1", "age_days", "vol24",
-             "buys5", "sells5", "rug_score", "risks", "mint_auth",
+             "buys5", "sells5", "rug_score", "risks", "rug_ok", "mint_auth",
              "freeze_auth", "top10_pct", "lp_locked_pct")}

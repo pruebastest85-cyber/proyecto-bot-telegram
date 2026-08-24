@@ -245,6 +245,18 @@ def _build():
                       f"SELECT wallet AS k, COUNT(*) AS m "
                       f"FROM lider GROUP BY wallet")
 
+        # (Ola 17-A) Denominador correcto de pct_first. `first` solo se
+        # cuenta en tokens con 2+ compradores (el JOIN de n_tok), pero se
+        # dividia entre TODAS las apariciones, incluidos los tokens que la
+        # billetera compro sola: una billetera 1ª en el 100% de sus
+        # tokens compartidos salia como "1ª el 50% de las veces".
+        compart = _mapa(
+            f"WITH {ap}, n_tok2 AS (SELECT mint, COUNT(*) AS c FROM ap "
+            f"GROUP BY mint) "
+            f"SELECT p.wallet AS k, COUNT(*) AS m FROM ap p "
+            f"JOIN n_tok2 t ON t.mint = p.mint AND t.c >= 2 "
+            f"GROUP BY p.wallet")
+
         lead_s = _mapa(_mediana('tmp_pares', 'wa', 'gap'))
         lag_s = _mapa(_mediana('tmp_pares', 'wb', 'gap'))
 
@@ -282,7 +294,11 @@ def _build():
             "ai_class": (meta.get(w, {}) or {}).get("ai_class"),
             "appearances": n_ap,
             "first_count": fc,
-            "pct_first": round(100 * fc / n_ap) if n_ap else 0,
+            # Sobre los tokens COMPARTIDOS, que son los unicos donde
+            # "ser la primera" significa algo. None = aun no hay ninguno.
+            "shared_tokens": compart.get(w, 0),
+            "pct_first": (round(100 * fc / compart[w])
+                          if compart.get(w) else None),
             "leader_score": round(100 * lo / tot) if tot else None,
             "follower_score": round(100 * la / tot) if tot else None,
             "avg_lead_s": _redondear(lead_s.get(w)),
@@ -348,7 +364,7 @@ def role(address: str) -> str | None:
     w = g["wallets"].get(address)
     if not w or w["leader_score"] is None:
         return None
-    if w["pct_first"] >= 50 or w["leader_score"] >= 70:
+    if (w["pct_first"] or 0) >= 50 or w["leader_score"] >= 70:
         return "Líder"
     d = w.get("avg_delay_s")
     if d is None:
@@ -493,6 +509,8 @@ def hidden_leaders_text(limit: int = 8) -> str:
         out.append(f"{i}. *{h['alias']}* · Leader {h['leader_score']} · "
                    f"score propio {h['wallet_score']} · "
                    f"{h['top_followers']} seguidoras TOP · "
-                   f"1ª el {h['pct_first']}% de las veces")
+                   + (f"1ª el {h['pct_first']}% de sus tokens compartidos"
+                      if h.get("pct_first") is not None
+                      else "sin tokens compartidos aún"))
     out.append("\n_Vigílalas: entran temprano y las buenas van detrás._")
     return "\n".join(out)

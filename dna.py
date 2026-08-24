@@ -107,8 +107,20 @@ def wallet_dna_text(address: str) -> str | None:
     lines.append(f"Flujo neto (ventas − compras): "
                  f"{p['pnl_total_sol']:+.1f} SOL")
     if p.get("held_tokens"):
-        lines.append(f"En cartera: {p.get('unrealized_sol', 0):+.1f} SOL · "
-                     f"Neto: {p.get('net_pnl_sol', p['pnl_total_sol']):+.1f} SOL")
+        # (Ola 17-A) Si no se pudo valorar NINGUNA bolsa (DexScreener
+        # caido o sin precio de SOL), unrealized_sol vale 0.0 y antes se
+        # imprimia "En cartera: +0.0 SOL", que se lee como "no tiene
+        # nada". wallet_profiler ya mostraba la cobertura; aqui faltaba.
+        _pr = p.get("priced_tokens", 0)
+        _hd = p["held_tokens"]
+        if not _pr:
+            lines.append(f"En cartera: {_hd} token(s) · valor *sin datos* "
+                         f"(no se pudo obtener precio)")
+        else:
+            _cob = "" if _pr >= _hd else f" ({_pr}/{_hd} con precio)"
+            lines.append(f"En cartera: {p.get('unrealized_sol', 0):+.1f} SOL"
+                         f"{_cob} · Neto: "
+                         f"{p.get('net_pnl_sol', p['pnl_total_sol']):+.1f} SOL")
     lines.append(f"Horizonte (retención mediana): {horizonte}")
 
     # Calidad de salida (Birdeye, bajo demanda; solo si hay key)
@@ -145,8 +157,11 @@ def wallet_dna_text(address: str) -> str | None:
                        if o["wallet"] == address), None)
             if me is not None:
                 if c.get("leader_wallet") == address:
-                    lines.append("   👑 *Lidera el cluster* (compra primero; "
-                                 "vigila esta billetera para adelantarte)")
+                    # (Ola 17-A) Se dice sobre cuántas comparaciones va,
+                    # porque antes se coronaba con una sola coincidencia.
+                    lines.append(f"   👑 *Lidera el cluster* — compra primero "
+                                 f"el {me.get('lead_pct')}% de las veces "
+                                 f"({me.get('comps', 0)} comparaciones)")
                 elif me.get("follows_alias"):
                     lp = (f", ~{me['lead_pct']}% adelanta"
                           if me.get("lead_pct") is not None else "")
@@ -163,7 +178,9 @@ def wallet_dna_text(address: str) -> str | None:
             lines.append(
                 f"🧠 Rol en la red: *{inf.get('role') or '—'}* · "
                 f"Leader {inf['leader_score']} / Follower {inf['follower_score']} "
-                f"· 1ª el {inf['pct_first']}% de las veces")
+                + (f"· 1ª el {inf['pct_first']}% de sus tokens compartidos"
+                   if inf.get("pct_first") is not None
+                   else "· sin tokens compartidos aún"))
             try:
                 from predictions import leader_health_line
                 hl = leader_health_line(address)

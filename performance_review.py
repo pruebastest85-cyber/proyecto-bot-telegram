@@ -36,21 +36,44 @@ REVIEW_MIN_WR = _int_env("REVIEW_MIN_WR", 35)
 
 
 def _stats(conn, wallet: str):
-    """Señales de compra ya medidas de una billetera (hasta 30)."""
+    """Señales de compra ya medidas de una billetera (hasta 30).
+
+    (Ola 17-A) Antes esto metía en el MISMO saco los rendimientos medidos
+    a 1 h y a 24 h: un +5% en una hora pesaba igual que un +5% en un día,
+    y esa media mezclada era el criterio que RETIRA la ⭐. Ahora los dos
+    horizontes se calculan por separado y se usa uno solo — el de 24 h si
+    hay muestra suficiente, el de 1 h si no — diciendo siempre cuál.
+    """
     rows = conn.execute(
         """SELECT chg_1h, chg_24h FROM signals
            WHERE wallet=? AND side='compra'
              AND (chg_1h IS NOT NULL OR chg_24h IS NOT NULL)
            ORDER BY ts DESC LIMIT 30""", (wallet,)).fetchall()
-    vals = []
-    for r in rows:
-        v = r["chg_24h"] if r["chg_24h"] is not None else r["chg_1h"]
-        if v is not None:
-            vals.append(float(v))
-    if not vals:
+    v24 = [float(r["chg_24h"]) for r in rows if r["chg_24h"] is not None]
+    v1 = [float(r["chg_1h"]) for r in rows if r["chg_1h"] is not None]
+
+    def _agg(vals, etiqueta):
+        if not vals:
+            return None
+        return {"n": len(vals),
+                "wr": round(100.0 * sum(1 for v in vals if v > 0) / len(vals)),
+                "media": round(sum(vals) / len(vals), 1),
+                "horizonte": etiqueta}
+
+    s24, s1 = _agg(v24, "24h"), _agg(v1, "1h")
+    # Se prefiere 24 h; solo se cae a 1 h si 24 h no llega al mínimo.
+    if s24 and s24["n"] >= REVIEW_MIN_SIGNALS:
+        st = s24
+    elif s1 and s1["n"] >= REVIEW_MIN_SIGNALS:
+        st = s1
+    else:
+        st = s24 or s1
+    if st is None:
         return None
-    wr = round(100.0 * sum(1 for v in vals if v > 0) / len(vals))
-    return {"n": len(vals), "wr": wr, "media": round(sum(vals) / len(vals), 1)}
+    st = dict(st)
+    st["n_24h"] = s24["n"] if s24 else 0
+    st["n_1h"] = s1["n"] if s1 else 0
+    return st
 
 
 def perdedora_confirmada(conn, wallet: str) -> str | None:
@@ -72,7 +95,7 @@ def perdedora_confirmada(conn, wallet: str) -> str | None:
         return None                      # sin evidencia suficiente
     if st["wr"] < REVIEW_MIN_WR and st["media"] < 0:
         return (f"{st['wr']}% de acierto y {st['media']:+.1f}% promedio "
-                f"en {st['n']} señales")
+                f"en {st['n']} señales medidas a {st['horizonte']}")
     return None
 
 
@@ -97,7 +120,8 @@ def review_tracked(notify: bool = True) -> dict:
             if st["wr"] < REVIEW_MIN_WR and st["media"] < 0:
                 razon = (f"Degradada por rendimiento medido: "
                          f"{st['wr']}% de acierto y {st['media']:+.1f}% "
-                         f"promedio en {st['n']} señales")
+                         f"promedio en {st['n']} señales medidas a "
+                         f"{st['horizonte']}")
                 conn.execute(
                     """UPDATE wallets SET is_tracked=0, ai_follow=0,
                        grade='Observación', ai_reason=?
@@ -120,7 +144,8 @@ def review_tracked(notify: bool = True) -> dict:
         try:
             from realtime import tg_send
             lineas = [f"• *{d['alias']}* — {d['wr']}% acierto, "
-                      f"{d['media']:+.1f}% medio ({d['n']} señales)"
+                      f"{d['media']:+.1f}% medio "
+                      f"({d['n']} señales a {d['horizonte']})"
                       for d in degradadas[:8]]
             tg_send("📉 *Revisión de rendimiento*\n\n"
                     f"{len(degradadas)} billetera(s) perdieron la ⭐ porque "
@@ -158,7 +183,10 @@ def review_text() -> str:
     for alias, st in filas[:15]:
         ico = "🟢" if st["media"] > 0 else "🔴"
         out.append(f"{ico} *{alias}* — {st['wr']}% acierto · "
-                   f"{st['media']:+.1f}% medio · {st['n']} señales")
+                   f"{st['media']:+.1f}% medio · {st['n']} señales "
+                   f"medidas a {st['horizonte']}")
     out.append(f"\n_Se degrada con <{REVIEW_MIN_WR}% de acierto Y promedio "
-               f"negativo, tras {REVIEW_MIN_SIGNALS}+ señales medidas._")
+               f"negativo, tras {REVIEW_MIN_SIGNALS}+ señales medidas. "
+               f"Los horizontes de 1 h y 24 h ya NO se mezclan: se usa el "
+               f"de 24 h si hay muestra, y si no el de 1 h._")
     return "\n".join(out)

@@ -41,6 +41,7 @@ APRENDIZAJES ACUMULADOS (patrones de tokens que el usuario marcó buenos/malos; 
 {aprendizajes}
 
 Cómo pensar el riesgo:
+- IMPORTANTE: si `rug_ok` es false, el chequeo de seguridad NO se pudo hacer. En ese caso mint_auth/freeze_auth/lp_locked_pct/top10_pct valen null porque NO SE SABEN, no porque estén bien. NUNCA los interpretes como "limpio": trátalo como "riesgo medio" o "riesgo alto" por falta de información, y dilo en la razón. Solo cuando `rug_ok` es true un null en mint_auth/freeze_auth significa "autoridad revocada" (lo mejor posible).
 - Autoridad de mint activa (mint_auth no nula) = el dev puede imprimir más = MUY arriesgado.
 - Autoridad de freeze activa = puede congelar ventas = arriesgado.
 - LP bloqueado bajo (lp_locked_pct < 50) o nulo = riesgo de rug.

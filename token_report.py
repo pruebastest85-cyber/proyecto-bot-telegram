@@ -40,8 +40,17 @@ def _mc(x) -> str:
     return f"${x:.0f}"
 
 
-def risk_score(t: dict) -> int:
-    """Risk Score heurístico 0-100 (misma lógica que token_dna)."""
+def risk_score(t: dict):
+    """Risk Score heurístico 0-100, o None si RugCheck no respondió.
+
+    (Ola 17-A) mint_auth/freeze_auth/top10/lp valen None tanto cuando la
+    autoridad está REVOCADA (lo mejor posible) como cuando no se pudo
+    comprobar nada. Sin distinguirlo, un token sin verificar salía como
+    "Riesgo 0/100 (bajo)" y además se guardaba ese 0 en token_learning
+    como si fuera una medición. `rug_ok` lo declara la propia fuente.
+    """
+    if not t.get("rug_ok"):
+        return None
     r = 0
     if t.get("mint_auth"):
         r += 35
@@ -123,7 +132,8 @@ def token_report(mint: str) -> dict:
     elite = [r for r in rows if r["grade"] == "Elite"]
 
     risk = risk_score(t)
-    nivel = "alto" if risk >= 60 else "medio" if risk >= 30 else "bajo"
+    nivel = (None if risk is None else
+             "alto" if risk >= 60 else "medio" if risk >= 30 else "bajo")
 
     sym = (t.get("symbol") or "?").strip() or "?"
     if not sym.startswith("$"):
@@ -151,16 +161,21 @@ def token_report(mint: str) -> dict:
     except Exception:
         pass
 
-    seg = ["mint " + ("⚠️" if t.get("mint_auth") else "✅"),
-           "freeze " + ("⚠️" if t.get("freeze_auth") else "✅")]
-    if t.get("lp_locked_pct") is not None:
-        ic = "🔒" if t["lp_locked_pct"] >= 80 else "⚠️"
-        seg.append(f"LP {ic} {t['lp_locked_pct']:.0f}%")
-    if t.get("top10_pct") is not None:
-        ic = "⚠️" if t["top10_pct"] >= 40 else "✅"
-        seg.append(f"top10 {ic} {t['top10_pct']:.0f}%")
-    lines.append(f"⚠️ Riesgo {risk}/100 ({nivel})")
-    lines.append("🔐 " + " · ".join(seg))
+    if risk is None:
+        lines.append("⚠️ Riesgo: sin datos (RugCheck no respondió)")
+        lines.append("🔐 ⚪ *Seguridad sin comprobar* — mint/freeze/LP/holders "
+                     "no se pudieron leer. No es lo mismo que estar limpio.")
+    else:
+        seg = ["mint " + ("⚠️" if t.get("mint_auth") else "✅"),
+               "freeze " + ("⚠️" if t.get("freeze_auth") else "✅")]
+        if t.get("lp_locked_pct") is not None:
+            ic = "🔒" if t["lp_locked_pct"] >= 80 else "⚠️"
+            seg.append(f"LP {ic} {t['lp_locked_pct']:.0f}%")
+        if t.get("top10_pct") is not None:
+            ic = "⚠️" if t["top10_pct"] >= 40 else "✅"
+            seg.append(f"top10 {ic} {t['top10_pct']:.0f}%")
+        lines.append(f"⚠️ Riesgo {risk}/100 ({nivel})")
+        lines.append("🔐 " + " · ".join(seg))
     if t.get("risks"):
         lines.append("🚩 " + ", ".join(_esc(x) for x in t["risks"][:4]))
 

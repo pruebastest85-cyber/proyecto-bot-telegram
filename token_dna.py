@@ -24,6 +24,17 @@ def _score_liquidez(liq):
 
 
 def _score_riesgo(t):
+    """Riesgo 0-100, o None si RugCheck no respondio.
+
+    (Ola 17-A) Antes esto devolvia 0 ("riesgo bajo") cuando la fuente
+    fallaba, porque mint_auth/freeze_auth/top10/lp valen None tanto si
+    la autoridad esta REVOCADA como si no se pudo comprobar nada. La
+    ficha acababa diciendo "Risk Score 0/100 (bajo)" sobre un token del
+    que no sabiamos absolutamente nada: es el mismo fallo que la Ola 16
+    cerro en el radar, aqui. `rug_ok` lo declara la propia fuente.
+    """
+    if not t.get("rug_ok"):
+        return None
     r = 0
     if t.get("mint_auth"):
         r += 35
@@ -70,7 +81,9 @@ def token_dna_text(mint: str) -> str:
 
     liq_s = _score_liquidez(t.get("liq"))
     risk_s = _score_riesgo(t)
-    survival = max(0, min(100, round(0.5 * liq_s + 0.5 * (100 - risk_s))))
+    # Sin riesgo medido no hay indice: la mitad de la formula no existe.
+    survival = (None if risk_s is None
+                else max(0, min(100, round(0.5 * liq_s + 0.5 * (100 - risk_s)))))
 
     sym = t.get("symbol", "?")
     lines = [f"🧬 *TOKEN DNA — {sym}*", f"`{mint}`", ""]
@@ -88,18 +101,29 @@ def token_dna_text(mint: str) -> str:
         if rangos:
             lines.append(f"⚡ Convicción temprana: mejor comprador de calidad "
                          f"fue el #{min(rangos)}")
-    lines.append(f"⚠️ Risk Score: {risk_s}/100 "
-                 + ("(alto)" if risk_s >= 60 else "(medio)" if risk_s >= 30 else "(bajo)"))
-    seg = ["mint: " + ("⚠️ activa" if t.get("mint_auth") else "✅ revocada"),
-           "freeze: " + ("⚠️ activa" if t.get("freeze_auth") else "✅ no")]
-    if t.get("lp_locked_pct") is not None:
-        seg.append(f"LP lock {t['lp_locked_pct']:.0f}%")
-    if t.get("top10_pct") is not None:
-        seg.append(f"top10 {t['top10_pct']:.0f}%")
-    lines.append("🔐 " + " · ".join(seg))
+    if risk_s is None:
+        lines.append("⚠️ Risk Score: sin datos (RugCheck no respondió)")
+        lines.append("🔐 Seguridad: ⚪ *sin comprobar* — no se pudo leer "
+                     "mint/freeze/LP/holders. No es lo mismo que estar limpio.")
+    else:
+        lines.append(f"⚠️ Risk Score: {risk_s}/100 "
+                     + ("(alto)" if risk_s >= 60
+                        else "(medio)" if risk_s >= 30 else "(bajo)"))
+        seg = ["mint: " + ("⚠️ activa" if t.get("mint_auth") else "✅ revocada"),
+               "freeze: " + ("⚠️ activa" if t.get("freeze_auth") else "✅ no")]
+        if t.get("lp_locked_pct") is not None:
+            seg.append(f"LP lock {t['lp_locked_pct']:.0f}%")
+        if t.get("top10_pct") is not None:
+            seg.append(f"top10 {t['top10_pct']:.0f}%")
+        lines.append("🔐 " + " · ".join(seg))
     # (Ola 8, 21/8) Es una formula fija de liquidez y riesgo, no una
     # probabilidad calibrada con historicos: se llama indice.
-    lines.append(f"\n🛡 *Índice de supervivencia (fórmula fija): {survival}/100*")
+    if survival is None:
+        lines.append(f"\n🛡 *Índice de supervivencia: sin datos* "
+                     f"(solo hay liquidez: {liq_s}/100)")
+    else:
+        lines.append(f"\n🛡 *Índice de supervivencia (fórmula fija): "
+                     f"{survival}/100*")
     if smart:
         quienes = ", ".join((r["alias"] or r["wallet"][:6]) for r in smart[:6])
         lines.append(f"\n_Comprado por billeteras de calidad: {quienes}._")

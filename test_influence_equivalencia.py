@@ -58,11 +58,15 @@ def _build_viejo():
     lag_gaps = defaultdict(list)
     delay_leader = defaultdict(list)
 
+    compart = defaultdict(int)
     for entries in by_token.values():
         for w, ts, rk in entries:
             appear[w] += 1
         if len(entries) < 2:
             continue
+        # (Ola 17-A) Denominador de pct_first: solo tokens COMPARTIDOS.
+        for w, ts, rk in entries:
+            compart[w] += 1
         ordered = sorted(entries,
                          key=lambda e: (e[1] if e[1] is not None
                                         else 10**12 + (e[2] or 0)))
@@ -100,7 +104,9 @@ def _build_viejo():
             "ai_class": (meta.get(w, {}) or {}).get("ai_class"),
             "appearances": appear[w],
             "first_count": first[w],
-            "pct_first": round(100 * first[w] / appear[w]) if appear[w] else 0,
+            "shared_tokens": compart[w],
+            "pct_first": (round(100 * first[w] / compart[w])
+                          if compart[w] else None),
             "leader_score": round(100 * lo / tot) if tot else None,
             "follower_score": round(100 * la / tot) if tot else None,
             "avg_lead_s": round(median(lead_gaps[w])) if lead_gaps[w] else None,
@@ -187,7 +193,8 @@ def _comparar(viejo, nuevo):
             f"{set(nuevo['wallets']) - set(viejo['wallets'])}")
     for w in sorted(set(viejo["wallets"]) & set(nuevo["wallets"])):
         for campo in ("alias", "wallet_score", "ai_class", "appearances",
-                      "first_count", "pct_first", "leader_score",
+                      "first_count", "shared_tokens", "pct_first",
+                      "leader_score",
                       "follower_score", "avg_lead_s", "avg_lag_s",
                       "avg_delay_s"):
             a, b = viejo["wallets"][w][campo], nuevo["wallets"][w][campo]
@@ -285,7 +292,7 @@ def main():
 
     print(f"Billeteras comparadas : {len(nuevo['wallets'])}")
     print(f"Aristas utiles        : {n_utiles}")
-    print(f"Aristas que la vieja   ")
+    print("Aristas que la vieja   ")
     print(f"  guardaba en memoria : {len(viejo['edges'])}"
           f"  ({len(viejo['edges']) - n_utiles} nunca se usaban)")
 
