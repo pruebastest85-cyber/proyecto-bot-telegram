@@ -177,6 +177,9 @@ def escanear() -> int:
 
     conn = get_conn()
     alertas = 0
+    # (Ola 17-I) Tokens cuya seguridad NO se pudo comprobar (la fuente no
+    # respondio). No se queman: vuelven a la cola y se cuentan aqui.
+    _sin_chequear = 0
     try:
         # Poda de registros viejos (14 días): la tabla no crece sin tope.
         conn.execute("DELETE FROM radar_tokens WHERE ts < ?",
@@ -214,11 +217,26 @@ def escanear() -> int:
                 (_p0, c["mint"]))
             conn.commit()
             if not aprueba:
-                _res = ("sin_seguridad" if "sin datos" in linea_seg
-                        else "descartado_seguridad")
+                if "sin datos" in linea_seg:
+                    # (Ola 17-I, auditoria 6) El chequeo NO SE HIZO (la
+                    # fuente no respondio). Antes esto escribia
+                    # `sin_seguridad` y el token quedaba QUEMADO: la fila
+                    # ya existe, asi que el INSERT OR IGNORE de arriba
+                    # impide volver a entrar, y el seguimiento excluye
+                    # `sin_seguridad`. Un rato de RugCheck caido podia
+                    # tirar cientos de tokens sanos sin que /radar lo
+                    # contara siquiera. Ahora se BORRA la reserva: el
+                    # token vuelve a la cola y se examina en otra pasada
+                    # mientras siga siendo fresco.
+                    conn.execute("DELETE FROM radar_tokens WHERE mint=?",
+                                 (c["mint"],))
+                    conn.commit()
+                    examinados -= 1      # no gastó turno: no se examinó
+                    _sin_chequear += 1
+                    continue
                 conn.execute(
                     "UPDATE radar_tokens SET resultado=? WHERE mint=?",
-                    (_res, c["mint"]))
+                    ("descartado_seguridad", c["mint"]))
                 conn.commit()
                 continue
 
@@ -268,6 +286,12 @@ def escanear() -> int:
         conn.close()
     if alertas:
         print(f"📡 Radar: {alertas} alertas de smart money temprana")
+    if _sin_chequear:
+        # (Ola 17-I) Se DICE. Antes esto no aparecia en ningun sitio: ni
+        # en el log ni en /radar, asi que un rato de RugCheck caido era
+        # completamente invisible.
+        print(f"📡 Radar: {_sin_chequear} token(s) sin poder comprobar la "
+              f"seguridad; vuelven a la cola")
     return alertas
 
 
@@ -369,6 +393,12 @@ def radar_text() -> str:
         seg = conn.execute(
             "SELECT COUNT(*) c FROM radar_tokens WHERE ts >= ? "
             "AND resultado='descartado_seguridad'", (corte,)).fetchone()["c"]
+        # (Ola 17-I) El informe solo contaba los descartados por
+        # seguridad: con 229 filas decia "examinados 229 · descartados 89"
+        # y las otras 140 desaparecian. Ahora se desglosa todo.
+        otros = conn.execute(
+            "SELECT resultado, COUNT(*) c FROM radar_tokens WHERE ts >= ? "
+            "GROUP BY resultado", (corte,)).fetchall()
         alertados = conn.execute(
             "SELECT mint, symbol, resultado, ts FROM radar_tokens "
             "WHERE ts >= ? AND resultado LIKE 'alertado%' "
@@ -385,8 +415,20 @@ def radar_text() -> str:
             (int(time.time()) - 7 * 86400,)).fetchone()["c"]
     finally:
         conn2.close()
+    _res = {r["resultado"]: r["c"] for r in otros}
+    _murio = _res.get("murio", 0)
+    _sinc = sum(v for k, v in _res.items() if str(k).startswith("sin_conocidas"))
+    _alert = sum(v for k, v in _res.items() if str(k).startswith("alertado"))
+    _exam = _res.get("examinando", 0)
+    _resto = tot - seg - _murio - _sinc - _alert - _exam
     out = ["📡 *Radar de pares recién nacidos* (24 h)\n",
-           f"Tokens examinados: {tot} · descartados por seguridad: {seg}",
+           f"Tokens examinados: {tot}",
+           f"  ⛔ descartados por seguridad: {seg}",
+           f"  💀 murieron: {_murio}",
+           f"  👤 sin billeteras conocidas: {_sinc}",
+           f"  🎯 alertados: {_alert}"
+           + (f"  ·  ⏳ en curso: {_exam}" if _exam else "")
+           + (f"  ·  otros: {_resto}" if _resto > 0 else ""),
            f"🏆 Promovidos a ganadores (7 días): {prom} — sus compradores "
            f"tempranos entran al embudo"]
     if alertados:

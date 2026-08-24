@@ -35,6 +35,9 @@ def resolver_dev(mint: str) -> str | None:
         txs, _completo = primeras_txs(mint, max_txs=1)
         if txs and txs[0].get("feePayer"):
             return txs[0]["feePayer"]
+        # (Ola 17-I) Lista vacia = Helius no contesto (su error ya se
+        # capturo una capa mas abajo) o el historial es raro. En ambos
+        # casos NO hay dev, y quien llama debe enterarse.
     except Exception as e:
         print(f"· dev_watch: no pude resolver el dev de {mint[:8]}: {e}")
     return None
@@ -43,9 +46,26 @@ def resolver_dev(mint: str) -> str | None:
 def guardar_dev(trade_id: int, mint: str) -> None:
     """Resuelve y guarda el dev de una posición recién abierta.
     Pensado para correr en hilo de fondo: nunca bloquea el camino
-    caliente y abre su propia conexión."""
+    caliente y abre su propia conexión.
+
+    (Ola 17-I, auditoria 6) Antes, si no se resolvia el dev, esto hacia
+    `return` MUDO — y el `print` de `resolver_dev` tampoco salia, porque
+    `helius_rpc._rpc` ya captura los errores de red por dentro y devuelve
+    lista vacia. Resultado: esa posicion se quedaba SIN vigilancia
+    dev-sell (`revisar_devs` filtra `dev_wallet IS NOT NULL`) y en
+    /paper se veia igual que las demas. El propio modulo llama a esto
+    "la señal de rug mas fiable que existe".
+    """
     dev = resolver_dev(mint)
     if not dev:
+        print(f"· dev_watch: NO pude identificar al dev de {mint[:8]}… — "
+              f"esta posición queda SIN vigilancia de venta del dev")
+        try:
+            from errores import record as _rec
+            _rec("dev_watch.sin_dev",
+                 RuntimeError(f"posición {trade_id}, mint {mint[:12]}…"))
+        except Exception:
+            pass
         return
     try:
         conn = get_conn()
@@ -122,7 +142,15 @@ def _dev_vendio(dev: str, mint: str, desde_ts: int) -> bool:
                         and (tt.get("tokenAmount") or 0) > 0):
                     return True
     except Exception as e:
+        # (Ola 17-I) "No vendio" y "no pude comprobarlo" devolvian lo
+        # mismo. Se deja rastro para que un fallo sostenido de Helius no
+        # parezca calma.
         print(f"· dev_watch: fallo mirando al dev {dev[:8]}: {e}")
+        try:
+            from errores import record as _rec
+            _rec("dev_watch.consulta", e)
+        except Exception:
+            pass
     return False
 
 

@@ -484,6 +484,38 @@ def track_outcomes() -> int:
            ORDER BY s.ts ASC LIMIT 100""",
         (int(now - HOUR), int(now - 3 * HOUR),
          int(now - DAY), int(now - 30 * HOUR))).fetchall()
+    # (Ola 17-I, auditoria 6) La ventana se CIERRA: la medicion de "1h"
+    # solo se acepta entre 1h y 3h. Si DexScreener esta caido mas de dos
+    # horas seguidas, esas señales salen de la ventana y NO VUELVEN A
+    # ENTRAR JAMAS. No se puede arreglar midiendo tarde (el precio de
+    # hace 5 h no es el de 1 h, y etiquetarlo como "1h" contaminaria el
+    # track record), pero SI se puede dejar de perderlo en silencio.
+    _perdidas = conn.execute(
+        """SELECT COUNT(*) c FROM signals s
+           JOIN wallets w ON w.address = s.wallet
+                AND COALESCE(w.is_bot, 0) = 0
+                AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2)
+           WHERE s.side='compra' AND s.price_usd IS NOT NULL
+             AND s.price_usd > 0 AND s.price_1h IS NULL
+             AND s.ts < ? AND s.ts >= ?""",
+        (int(now - 3 * HOUR), int(now - 9 * HOUR))).fetchone()["c"]
+    if _perdidas:
+        print(f"· Medición: {_perdidas} señal(es) de las últimas 9 h se "
+              f"quedaron sin medir a 1 h y ya están fuera de ventana")
+        try:
+            from errores import record as _rec
+            _rec("medicion.fuera_de_ventana",
+                 RuntimeError(f"{_perdidas} señales sin chg_1h, "
+                              f"ventana cerrada"))
+        except Exception:
+            pass
+    if len(pend) >= 100:
+        # Tope alcanzado: el excedente envejece y puede caer fuera de la
+        # ventana. Ya paso una vez con LIMIT 30 (ver comentario arriba) y
+        # nada avisaba; ahora si.
+        print("· Medición: cupo de 100 señales por pasada AGOTADO; hay "
+              "más esperando y podrían caducar. Si se repite, sube el "
+              "cupo o baja el intervalo del job.")
     # 1b) VENTAS de billeteras ⭐, mismas ventanas de medicion. Se miden
     #     para conocer la "deriva post-venta" de cada billetera: si el token
     #     sigue subiendo despues de que ella vende (vende demasiado pronto)

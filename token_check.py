@@ -70,13 +70,37 @@ RUG_SUMMARY = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 RUG_FULL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
 
+_ULTIMO_AVISO = [0.0]
+
+
 def _get(url: str, timeout: int = 15):
+    """GET que devuelve el JSON o None.
+
+    (Ola 17-I, auditoria 6) Antes esto era un `except: pass` sin una sola
+    linea de rastro, y es el envoltorio del que dependen las señales, el
+    radar, las predicciones y el paper. Un 429 sostenido de DexScreener o
+    de RugCheck era indistinguible de "ese token no existe" y no dejaba
+    huella en ningun sitio. Ahora se avisa (como mucho uno cada 5 min,
+    para no inundar el log) y se registra.
+    """
+    _fuente = ("DexScreener" if "dexscreener" in url
+               else "RugCheck" if "rugcheck" in url else "API")
     try:
         r = requests.get(url, timeout=timeout)
         if r.status_code == 200:
             return r.json()
-    except requests.RequestException:
-        pass
+        _motivo = f"HTTP {r.status_code}"
+    except requests.RequestException as e:
+        _motivo = f"{type(e).__name__}: {str(e)[:70]}"
+    if time.time() - _ULTIMO_AVISO[0] > 300:
+        _ULTIMO_AVISO[0] = time.time()
+        print(f"· {_fuente} no responde ({_motivo}); los datos que "
+              f"dependan de ella se quedan sin rellenar")
+        try:
+            from errores import record as _rec
+            _rec(f"api.{_fuente.lower()}", RuntimeError(_motivo))
+        except Exception:
+            pass
     return None
 
 

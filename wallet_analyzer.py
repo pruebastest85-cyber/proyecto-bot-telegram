@@ -26,6 +26,21 @@ LAMPORTS = 1_000_000_000  # 1 SOL
 _AVISO_FRENO = [0.0]
 
 
+# (Ola 17-I, auditoria 6) Motivo del ultimo fallo de descarga, o None.
+# Existe porque `[]` significaba TRES cosas a la vez: "el token no tiene
+# transacciones", "Helius no contesto" y "el freno de presupuesto esta
+# activo". Con las tres indistinguibles, `analyze_token` marcaba el token
+# como ANALIZADO y no se volvia a mirar jamas — perdiendo hasta 600
+# apariciones de billeteras, que segun CLAUDE.md son lo unico
+# verdaderamente irrecuperable del sistema.
+_FALLO_DESCARGA = [None]
+
+
+def motivo_fallo_descarga():
+    """Motivo del ultimo fallo, o None si no lo hubo."""
+    return _FALLO_DESCARGA[0]
+
+
 def fetch_parsed_txs(address: str, before: str | None = None,
                      limit: int = 100) -> list[dict]:
     """Descarga transacciones parseadas de una dirección desde Helius.
@@ -41,6 +56,7 @@ def fetch_parsed_txs(address: str, before: str | None = None,
                 _AVISO_FRENO[0] = time.time()
                 print("  ⛔ Presupuesto de Helius casi agotado: se pausan "
                       "las descargas de historial hasta el próximo ciclo")
+            _FALLO_DESCARGA[0] = "presupuesto de Helius agotado"
             return []
     except Exception:
         pass
@@ -67,6 +83,7 @@ def fetch_parsed_txs(address: str, before: str | None = None,
         return data if isinstance(data, list) else []
     except requests.RequestException as e:
         print(f"  · Error Helius: {e}")
+        _FALLO_DESCARGA[0] = f"Helius no respondio ({str(e)[:80]})"
         return []
 
 
@@ -75,6 +92,7 @@ def fetch_earliest_txs(mint: str, max_pages: int | None = None,
     """Ruta preferente: getTransactionsForAddress con sortOrder=asc, que
     devuelve las PRIMERAS transacciones del token de verdad (y cuesta 10x
     menos). Si falla, cae al método antiguo de paginar hacia atrás."""
+    _FALLO_DESCARGA[0] = None          # se reinicia en cada intento
     if getattr(config, "USE_RPC_HISTORY", True):
         try:
             from helius_rpc import primeras_txs
@@ -84,6 +102,7 @@ def fetch_earliest_txs(mint: str, max_pages: int | None = None,
                 return (txs, ok) if con_estado else txs
         except Exception as e:
             print(f"  · RPC no disponible ({e}); uso el método antiguo")
+            _FALLO_DESCARGA[0] = f"RPC no disponible ({str(e)[:80]})"
     return _fetch_earliest_txs_legacy(mint, max_pages, con_estado)
 
 
@@ -212,7 +231,24 @@ def analyze_token(conn, token) -> int:
         print("  · Historial incompleto: no se alcanzó el inicio del token; "
               "los puestos de compra NO son fiables y no se registrarán")
     if not txs:
-        print("  · Sin transacciones recuperadas")
+        # (Ola 17-I) Solo se da por analizado si de verdad NO HAY nada que
+        # analizar. Si la descarga fallo, el token se deja PENDIENTE para
+        # el proximo ciclo: marcarlo lo sacaba de `pending_tokens` para
+        # siempre (db.pending_tokens filtra `analyzed = 0`) y con el se
+        # perdian sus compradores tempranos.
+        _motivo = motivo_fallo_descarga()
+        if _motivo:
+            print(f"  ⚠️ NO se marca como analizado: {_motivo}. "
+                  f"Se reintentará en el próximo ciclo.")
+            try:
+                from errores import record as _rec
+                _rec("wallet_analyzer.descarga",
+                     RuntimeError(f"{mint[:12]}…: {_motivo}"))
+            except Exception:
+                pass
+            return 0
+        print("  · Sin transacciones recuperadas (el token no tiene "
+              "historial): se marca como analizado")
         mark_analyzed(conn, mint)
         return 0
 
