@@ -589,9 +589,12 @@ def metrics_text() -> str:
             if _alertadas == 0 and (_mc < _u["conf"] or _mm < _u["alpha"]):
                 _diag.append(
                     "   ⚠️ *Con estos umbrales el motor NO puede alertar*: "
-                    "nunca ha llegado. Ajústalos con `pred_alpha_meta` y "
-                    "`pred_min_confidence` (o pon `pred_send_watchlist=1` "
-                    "para recibir también las 🟡).")
+                    "nunca ha llegado.\n"
+                    "   Se ajustan con estas variables de entorno (en "
+                    "`bot_local.env`, reiniciando el bot):\n"
+                    f"   `PRED_ALPHA_META` (ahora {_u['alpha']}) · "
+                    f"`PRED_MIN_CONF` (ahora {_u['conf']}) · "
+                    f"`PRED_WATCH_META` (ahora {_u['watch']})")
             elif _alertadas == 0:
                 _diag.append("   Aún sin alertas emitidas, pero los "
                              "umbrales son alcanzables.")

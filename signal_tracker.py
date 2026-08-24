@@ -116,26 +116,33 @@ def _price_mc_ex(mint: str):
 RESCATE_MAX_S = _f_env("RESCATE_PRECIO_MAX_S", 180.0)
 
 
-def rescatar_precios(conn=None, ventana_min: int = 30) -> int:
+def rescatar_precios(conn=None, ventana_min: int | None = None) -> int:
     """Rellena el precio de entrada de señales recientes que se quedaron
     sin el. Devuelve cuantas se recuperaron."""
     propia = conn is None
     conn = conn or get_conn()
     try:
         ahora = time.time()
+        # (Ola 17-K) La ventana era de 30 min y luego se descartaba todo
+        # lo que pasara de RESCATE_MAX_S (180 s): los otros 27 minutos se
+        # releian y se re-imprimian en CADA pasada, 720 veces al dia,
+        # siempre las mismas filas. Se pide justo lo rescatable.
+        _vent = (ventana_min * 60 if ventana_min
+                 else RESCATE_MAX_S)
         filas = conn.execute(
             """SELECT signature, mint, ts FROM signals
                WHERE (price_usd IS NULL OR price_usd <= 0)
                  AND ts >= ? AND ts <= ?
                ORDER BY ts DESC LIMIT 200""",
-            (int(ahora - ventana_min * 60),
-             int(ahora - 5))).fetchall()
+            (int(ahora - _vent), int(ahora - 5))).fetchall()
         if not filas:
             return 0
         # Solo las que siguen dentro del tope de retraso aceptable.
         vivas = [f for f in filas if (ahora - float(f["ts"])) <= RESCATE_MAX_S]
         caducadas = len(filas) - len(vivas)
-        if caducadas:
+        if caducadas and ventana_min:
+            # Solo se dice cuando se pide una ventana ancha a proposito
+            # (uso manual); en la pasada normal ya no hay caducadas.
             print(f"· Rescate de precios: {caducadas} señal(es) ya pasaron "
                   f"de {RESCATE_MAX_S:.0f}s; no se les inventa un precio")
         if not vivas:

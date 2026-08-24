@@ -231,7 +231,15 @@ def escanear() -> int:
                     conn.execute("DELETE FROM radar_tokens WHERE mint=?",
                                  (c["mint"],))
                     conn.commit()
-                    examinados -= 1      # no gastó turno: no se examinó
+                    # (Ola 17-K) NO se resta a `examinados`. En la 17-I
+                    # puse `examinados -= 1` para que "no gastara turno",
+                    # y con RugCheck devolviendo 404 —lo normal en un
+                    # token de minutos— el contador no crecia nunca: la
+                    # pasada procesaba TODOS los candidatos en vez de
+                    # TOKENS_PASADA, con 3 peticiones cada uno, y podia
+                    # solaparse con la pasada siguiente (radar_job no
+                    # tiene candado). El intento SI cuenta; lo que no se
+                    # pierde es el token, que vuelve a la cola.
                     _sin_chequear += 1
                     continue
                 conn.execute(
@@ -292,6 +300,16 @@ def escanear() -> int:
         # completamente invisible.
         print(f"📡 Radar: {_sin_chequear} token(s) sin poder comprobar la "
               f"seguridad; vuelven a la cola")
+        try:                    # (Ola 17-K) para que /radar lo enseñe
+            _c2 = get_conn()
+            try:
+                from db import set_setting
+                set_setting(_c2, "radar_sin_chequear", _sin_chequear)
+                set_setting(_c2, "radar_sin_chequear_ts", int(time.time()))
+            finally:
+                _c2.close()
+        except Exception:
+            pass
     return alertas
 
 
@@ -415,6 +433,10 @@ def radar_text() -> str:
             (int(time.time()) - 7 * 86400,)).fetchone()["c"]
     finally:
         conn2.close()
+    # (Ola 17-K) Los que no se pudieron comprobar se BORRAN de la tabla
+    # (para poder reintentarlos), asi que no salen en `tot`. Se guarda el
+    # contador de la ultima pasada para poder decirlo: si no, el commit
+    # que decia "ningun token desaparece" habria creado justo eso.
     _res = {r["resultado"]: r["c"] for r in otros}
     _murio = _res.get("murio", 0)
     _sinc = sum(v for k, v in _res.items() if str(k).startswith("sin_conocidas"))
@@ -431,6 +453,21 @@ def radar_text() -> str:
            + (f"  ·  otros: {_resto}" if _resto > 0 else ""),
            f"🏆 Promovidos a ganadores (7 días): {prom} — sus compradores "
            f"tempranos entran al embudo"]
+    # (Ola 17-K) Los que no se pudieron comprobar no estan en la tabla
+    # (se borran para reintentarlos), asi que hay que decirlo aparte.
+    try:
+        _c3 = get_conn()
+        try:
+            from db import get_setting as _gs
+            _sc = int(float(_gs(_c3, "radar_sin_chequear", 0) or 0))
+            _sc_ts = float(_gs(_c3, "radar_sin_chequear_ts", 0) or 0)
+        finally:
+            _c3.close()
+        if _sc and time.time() - _sc_ts < 3600:
+            out.append(f"  ⚪ sin poder comprobar la seguridad en la última "
+                       f"pasada: {_sc} (vuelven a la cola, no se pierden)")
+    except Exception:
+        pass
     if alertados:
         out.append("\n🎯 Con smart money de tu base:")
         for r in alertados:

@@ -874,6 +874,12 @@ def update_open_trades() -> int:
     for row in rows:
         # (Ola 16) UNA sola petición por posición: precio, muerte y
         # liquidez del mismo sondeo.
+        # (Ola 17-K) Se inicializa ANTES del try. En la 17-J la asigne
+        # solo en la rama del exito: si el `except` saltaba en la primera
+        # posicion daba UnboundLocalError (se perdia la pasada entera y
+        # se filtraba la conexion), y en las siguientes arrastraba la
+        # liquidez del token ANTERIOR al mensaje de cierre de este.
+        _liq_salida = None
         try:
             from signal_tracker import _price_mc_ex as _pmx
             price, _mcx, _muerto, _liqx = _pmx(row["mint"])
@@ -886,8 +892,11 @@ def update_open_trades() -> int:
             # sobre las mismas 130 operaciones, y el 85% de esa brecha
             # esta en la pata de salida. Ahora viaja hasta el mensaje.
             _liq_salida = _liqx
-        except Exception:
+        except Exception as _e_px:
             price, _muerto = _price(row["mint"]), False
+            _liq_salida = None
+            print(f"· Paper: sondeo de {row['symbol']} falló ({_e_px}); "
+                  f"sin liquidez de salida para esta posición")
         time.sleep(config.DEXSCREENER_DELAY)
         if not price:
             # (Ola 15, corregido en Ola 16) Aquí NO se vuelve a llamar a

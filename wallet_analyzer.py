@@ -12,6 +12,7 @@ directamente (cubre pump.fun, Raydium, Jupiter, Meteora, etc.):
   - la billetera ENVIÓ SOL en esa misma tx   → nativeTransfers
 """
 
+import threading
 import time
 import requests
 
@@ -33,12 +34,25 @@ _AVISO_FRENO = [0.0]
 # como ANALIZADO y no se volvia a mirar jamas — perdiendo hasta 600
 # apariciones de billeteras, que segun CLAUDE.md son lo unico
 # verdaderamente irrecuperable del sistema.
-_FALLO_DESCARGA = [None]
+# (Ola 17-K) POR HILO, no global. En la 17-I la puse como una lista
+# global y el bot corre con varios hilos que llaman a estas funciones:
+# el ciclo (`run_analysis`), la extraccion cuando el dueño pega un mint
+# (`token_extract`) y `dev_check` (que importa las dos funciones). La
+# ventana entre descargar y leer la bandera dura MINUTOS —el historial
+# pagina hasta 40 veces con timeout de 60 s—, asi que un segundo hilo
+# podia limpiarla y hacer que un token cuya descarga FALLO se marcara
+# como analizado: exactamente la perdida irreversible que la 17-I venia
+# a impedir. Con `threading.local` cada hilo tiene la suya.
+_local = threading.local()
+
+
+def _set_fallo(motivo):
+    _local.fallo = motivo
 
 
 def motivo_fallo_descarga():
-    """Motivo del ultimo fallo, o None si no lo hubo."""
-    return _FALLO_DESCARGA[0]
+    """Motivo del ultimo fallo EN ESTE HILO, o None si no lo hubo."""
+    return getattr(_local, "fallo", None)
 
 
 def fetch_parsed_txs(address: str, before: str | None = None,
@@ -56,7 +70,7 @@ def fetch_parsed_txs(address: str, before: str | None = None,
                 _AVISO_FRENO[0] = time.time()
                 print("  ⛔ Presupuesto de Helius casi agotado: se pausan "
                       "las descargas de historial hasta el próximo ciclo")
-            _FALLO_DESCARGA[0] = "presupuesto de Helius agotado"
+            _set_fallo("presupuesto de Helius agotado")
             return []
     except Exception:
         pass
@@ -80,10 +94,15 @@ def fetch_parsed_txs(address: str, before: str | None = None,
         _api_rec("helius")
         _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
         data = r.json()
+        # (Ola 17-K) Una descarga que SI funciona limpia la bandera. Sin
+        # esto, un fallo del RPC seguido de una respuesta legitima vacia
+        # de la ruta antigua dejaba el token pendiente PARA SIEMPRE,
+        # reintentandose en cada ciclo y quemando creditos.
+        _set_fallo(None)
         return data if isinstance(data, list) else []
     except requests.RequestException as e:
         print(f"  · Error Helius: {e}")
-        _FALLO_DESCARGA[0] = f"Helius no respondio ({str(e)[:80]})"
+        _set_fallo(f"Helius no respondio ({str(e)[:80]})")
         return []
 
 
@@ -92,7 +111,7 @@ def fetch_earliest_txs(mint: str, max_pages: int | None = None,
     """Ruta preferente: getTransactionsForAddress con sortOrder=asc, que
     devuelve las PRIMERAS transacciones del token de verdad (y cuesta 10x
     menos). Si falla, cae al método antiguo de paginar hacia atrás."""
-    _FALLO_DESCARGA[0] = None          # se reinicia en cada intento
+    _set_fallo(None)                   # se reinicia en cada intento
     if getattr(config, "USE_RPC_HISTORY", True):
         try:
             from helius_rpc import primeras_txs
@@ -102,7 +121,7 @@ def fetch_earliest_txs(mint: str, max_pages: int | None = None,
                 return (txs, ok) if con_estado else txs
         except Exception as e:
             print(f"  · RPC no disponible ({e}); uso el método antiguo")
-            _FALLO_DESCARGA[0] = f"RPC no disponible ({str(e)[:80]})"
+            _set_fallo(f"RPC no disponible ({str(e)[:80]})")
     return _fetch_earliest_txs_legacy(mint, max_pages, con_estado)
 
 
