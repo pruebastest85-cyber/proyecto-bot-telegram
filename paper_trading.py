@@ -444,7 +444,8 @@ def _fill_resultado(conn, trade_id: int, firma, tipo: str, motivo: str,
         print(f"· fill no registrado ({e})")
 
 
-def _close(conn, row, price: float, reason: str, icon: str, firma=None):
+def _close(conn, row, price: float, reason: str, icon: str, firma=None,
+           liq_salida=None):
     pct = (price / row["entry_price"] - 1) * 100
 
     # PnL en dólares sobre el importe que se guardó al entrar. Si la fila
@@ -558,10 +559,28 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None):
     # SUPUESTO (par muerto, -99%), no una cotizacion: se dice.
     nota_precio = ("\n_(precio de salida asumido: el par ya no cotiza)_"
                    if reason == "sin liquidez" else "")
+    # (Ola 17-J) Si el pool de salida es fino, el precio medio NO es lo
+    # que te pagarian: vender una bolsa de ~$80 contra $1.000 de pool
+    # mueve el precio. El propio repositorio ya usa este umbral en
+    # signal_tracker ("$500 de volumen mueven el precio x1000"); el paper
+    # lo pedia y lo tiraba.
+    nota_liq = ""
+    try:
+        from signal_tracker import LIQ_FIABLE_USD as _LIQF
+    except Exception:
+        _LIQF = 1000.0
+    if liq_salida is not None and 0 < liq_salida < _LIQF * 10:
+        _rel = (stake_usd / liq_salida * 100) if (stake_usd and liq_salida) else None
+        nota_liq = (f"\n⚠️ _Pool de salida fino: {_usd(liq_salida)} de "
+                    f"liquidez"
+                    + (f" y tu posición era el {_rel:.0f}% de él"
+                       if _rel and _rel >= 1 else "")
+                    + ". El PnL de papel usa el precio medio; el "
+                      "**neto** es la cifra realista._")
     _tg(f"{icon} *Paper cerrada* ({reason}): *{row['symbol']}*\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
         f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}{nota_parciales}\n"
-        f"{linea_pnl}{linea_neto}\n"
+        f"{linea_pnl}{linea_neto}{nota_liq}\n"
         f"Resumen: /paper")
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: "
           f"{_usd_firmado(pnl_usd) if pnl_usd is not None else f'{pnl:+.3f} SOL'}")
@@ -858,6 +877,15 @@ def update_open_trades() -> int:
         try:
             from signal_tracker import _price_mc_ex as _pmx
             price, _mcx, _muerto, _liqx = _pmx(row["mint"])
+            # (Ola 17-J, auditoria 6) `_liqx` es la liquidez del pool en
+            # el que habria que VENDER. Estaba aqui, se pedia, llegaba…
+            # y no se usaba en ninguna otra linea del archivo. Sin ella,
+            # el PnL de papel valora la bolsa al precio medio de
+            # DexScreener aunque el pool sea de $150 — mientras el neto
+            # la vende de verdad. Medido: papel +$2.060 / neto -$529
+            # sobre las mismas 130 operaciones, y el 85% de esa brecha
+            # esta en la pata de salida. Ahora viaja hasta el mensaje.
+            _liq_salida = _liqx
         except Exception:
             price, _muerto = _price(row["mint"]), False
         time.sleep(config.DEXSCREENER_DELAY)
@@ -897,10 +925,12 @@ def update_open_trades() -> int:
             conn.commit()
         pct = (price / row["entry_price"] - 1) * 100
         if pct >= tp:
-            _close(conn, row, price, "take-profit", "🎯")
+            _close(conn, row, price, "take-profit", "🎯",
+                   liq_salida=_liq_salida)
             cerradas += 1
         elif pct <= sl:
-            _close(conn, row, price, "stop-loss", "🛑")
+            _close(conn, row, price, "stop-loss", "🛑",
+                   liq_salida=_liq_salida)
             cerradas += 1
         elif _campo(row, "politica") == "holdear":
             # Posicion en hold extra: la ⭐ ya vendio pero su perfil dice
@@ -915,13 +945,16 @@ def update_open_trades() -> int:
                 conn.commit()
             caida = (price / pico - 1) * 100
             if caida <= -trail:
-                _close(conn, row, price, "trailing del hold", "🪂")
+                _close(conn, row, price, "trailing del hold", "🪂",
+                       liq_salida=_liq_salida)
                 cerradas += 1
             elif now >= (_campo(row, "hold_hasta") or 0):
-                _close(conn, row, price, "fin del hold extra", "🕐")
+                _close(conn, row, price, "fin del hold extra", "🕐",
+                       liq_salida=_liq_salida)
                 cerradas += 1
         elif now - row["entry_ts"] > timeout:
-            _close(conn, row, price, "tiempo", "⏰")
+            _close(conn, row, price, "tiempo", "⏰",
+                   liq_salida=_liq_salida)
             cerradas += 1
     conn.close()
     # (Ola 12, afinado Ola 15) Vigilancia dev-sell de respaldo EN HILO
@@ -984,6 +1017,16 @@ def resumen_text() -> str:
         "AVG(slippage_entrada_pct) slip "
         "FROM paper_trades WHERE status='cerrada' "
         "AND pnl_usd_neto IS NOT NULL AND pnl_usd IS NOT NULL").fetchone()
+    # (Ola 17-J) Cuantas cerradas se quedan FUERA de esa comparacion.
+    # La consulta de arriba ya era correcta (exige las dos cifras), pero
+    # no decia sobre cuantas de las cerradas se calcula: con 241 cerradas
+    # y 130 comparables, leer "papel X → neto Y" invita a pensar que
+    # cubre todo. Medido: las excluidas tienen media +24,5% frente a
+    # +19,2% las incluidas, o sea que la comparacion es LIGERAMENTE
+    # pesimista respecto al total; conviene decirlo.
+    fuera = conn.execute(
+        "SELECT COUNT(*) n FROM paper_trades WHERE status='cerrada' "
+        "AND (pnl_usd_neto IS NULL OR pnl_usd IS NULL)").fetchone()["n"]
     demora = conn.execute(
         "SELECT AVG(demora_s) d, COUNT(demora_s) n FROM paper_trades "
         "WHERE demora_s IS NOT NULL").fetchone()
@@ -1064,7 +1107,10 @@ def resumen_text() -> str:
                 f"(costo de ejecutar: {_usd(brecha)})"
                 + (f"\n   slippage medio de entrada "
                    f"{real['slip']:.1f}%" if real["slip"] is not None
-                   else ""))
+                   else "")
+                + (f"\n   _{fuera} cerrada(s) más quedan fuera de esta "
+                   f"comparación: no se pudo cotizar su salida._"
+                   if fuera else ""))
         if demora and (demora["n"] or 0) > 0:
             out.append(f"⚡ Demora señal→copia: {demora['d']:.1f}s de media "
                        f"({demora['n']} medidas)")

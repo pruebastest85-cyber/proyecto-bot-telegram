@@ -620,7 +620,10 @@ def _preparar_pg(pg):
             # posicion se cierra solo si sigue muerto en el siguiente.
             ("paper_trades", "muerto_desde", "BIGINT"),
             # Radar 14b: precio al examinar, para promover ganadores
-            ("radar_tokens", "price0", "DOUBLE PRECISION")]:
+            ("radar_tokens", "price0", "DOUBLE PRECISION"),
+            # (Ola 17-J) Retraso en segundos con que se consiguio el
+            # precio de entrada de la señal. Ver el bloque de SQLite.
+            ("signals", "price_lag_s", "INTEGER")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -657,7 +660,13 @@ def _preparar_sqlite(conn):
                      ("chg_24h", "REAL"), ("alerted_pct", "REAL DEFAULT 0"),
                      ("symbol", "TEXT"), ("mc", "REAL"), ("liq", "REAL"),
                      ("signal_score", "REAL"), ("verdict", "TEXT"),
-                     ("alerted", "INTEGER DEFAULT 0")]:
+                     ("alerted", "INTEGER DEFAULT 0"),
+                     # (Ola 17-J) Segundos entre la señal y el momento en
+                     # que se consiguio su precio de entrada. 0/NULL =
+                     # precio del instante. Existe para que un precio
+                     # recuperado TARDE quede marcado y no se confunda
+                     # con uno del momento exacto.
+                     ("price_lag_s", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

@@ -25,27 +25,69 @@ import time
 from db import get_conn, get_setting
 from influence import influence, graph
 
+import os as _os
+
 WINDOW_MIN = 20          # ventana para que lleguen los seguidores
 EVAL_AFTER_MIN = 30      # a partir de aquí la predicción se evalúa sola
-DEFAULT_MIN_CONF = 85    # umbral de confianza para alertar
-ALPHA_META = 90          # Meta Score mínimo para 🟢 Alpha
-WATCH_META = 70          # Meta Score mínimo para 🟡 Watchlist
 
 
-MIN_LIQ_USD = 20000      # liquidez mínima; por debajo = 🔴 Ignorada
-MAX_RISK = 70            # riesgo (concentración/mint) máximo antes de Ignorar
+def _u(nombre, defecto):
+    try:
+        return int(_os.getenv(nombre, defecto))
+    except (TypeError, ValueError):
+        return int(defecto)
+
+
+# ── (Ola 17-J, auditoria 6) UMBRALES CONFIGURABLES ────────────────────
+# Estaban escritos a fuego, y medido sobre las 20.785 predicciones de la
+# base del dueño: `confidence` maximo historico **75** contra un umbral
+# de 85, y `meta_score` maximo **73** contra ALPHA_META=90. En 28 dias no
+# ha habido UNA sola alerta, y no podia haberla: con el cluster frio el
+# techo aritmetico de meta es 82 (dos componentes clavados, f_token=0.6 y
+# f_cluster=0.3), o sea que `alpha` era matematicamente inalcanzable.
+#
+# Los defectos NO se tocan a proposito: bajarlos por mi cuenta llenaria
+# el Telegram del dueño de alertas que nunca pidio. Lo que cambia es que
+# ahora se pueden ajustar sin tocar codigo (variable de entorno o
+# `settings`), y que `/metricas` DICE si el motor puede alertar o no.
+DEFAULT_MIN_CONF = _u("PRED_MIN_CONF", 85)   # confianza para alertar
+ALPHA_META = _u("PRED_ALPHA_META", 90)       # Meta Score para 🟢 Alpha
+WATCH_META = _u("PRED_WATCH_META", 70)       # Meta Score para 🟡 Watchlist
+MIN_LIQ_USD = _u("PRED_MIN_LIQ_USD", 20000)  # liquidez minima
+MAX_RISK = _u("PRED_MAX_RISK", 70)           # riesgo maximo
+
+
+def _umbrales(conn=None) -> dict:
+    """Umbrales efectivos: `settings` manda sobre el entorno."""
+    u = {"conf": DEFAULT_MIN_CONF, "alpha": ALPHA_META,
+         "watch": WATCH_META, "liq": MIN_LIQ_USD, "risk": MAX_RISK}
+    if conn is None:
+        return u
+    for clave, ajuste in (("conf", "pred_min_confidence"),
+                          ("alpha", "pred_alpha_meta"),
+                          ("watch", "pred_watch_meta"),
+                          ("liq", "pred_min_liq_usd"),
+                          ("risk", "pred_max_risk")):
+        try:
+            v = get_setting(conn, ajuste, None)
+            if v is not None and str(v).strip() != "":
+                u[clave] = int(float(v))
+        except (TypeError, ValueError):
+            pass
+    return u
 
 
 def _tier(conf: int, meta: int, umbral: int,
-          liq=None, risk=None) -> str:
+          liq=None, risk=None, u: dict | None = None) -> str:
     """🟢 alpha / 🟡 watchlist / 🔴 ignored. Filtros duros primero."""
-    if liq is not None and (liq or 0) < MIN_LIQ_USD:
+    u = u or _umbrales()
+    if liq is not None and (liq or 0) < u["liq"]:
         return "ignored"          # baja liquidez
-    if risk is not None and (risk or 0) >= MAX_RISK:
+    if risk is not None and (risk or 0) >= u["risk"]:
         return "ignored"          # riesgo elevado (rug/concentración)
-    if meta >= ALPHA_META and conf >= umbral:
+    if meta >= u["alpha"] and conf >= umbral:
         return "alpha"
-    if meta >= WATCH_META and conf >= 60:
+    if meta >= u["watch"] and conf >= 60:
         return "watchlist"
     return "ignored"
 
@@ -241,12 +283,10 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     except Exception as e:
         print(f"· Predicción eval: {e}")
 
-    umbral = DEFAULT_MIN_CONF
-    try:
-        umbral = int(float(get_setting(conn, "pred_min_confidence",
-                                       str(DEFAULT_MIN_CONF)) or DEFAULT_MIN_CONF))
-    except (TypeError, ValueError):
-        pass
+    # (Ola 17-J) Umbrales efectivos: `settings` manda sobre el entorno,
+    # y el entorno sobre el defecto. Antes estaban a fuego en el modulo.
+    _u_ef = _umbrales(conn)
+    umbral = _u_ef["conf"]
 
     # ¿Hay ya una predicción abierta para este token?
     row = conn.execute(
@@ -270,7 +310,8 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                                         health, arrived=len(arrived))
                 stage = 1 + len(arrived)
                 tier = _tier(conf, row["meta_score"] or 0, umbral,
-                             token_ctx.get("liq"), _risk_pct(token_ctx))
+                             token_ctx.get("liq"), _risk_pct(token_ctx),
+                             u=_u_ef)
                 conn.execute(
                     "UPDATE predictions SET arrived=?, stage=?, confidence=?, "
                     "tier=?, first_confirm_s=COALESCE(first_confirm_s,?) "
@@ -330,7 +371,8 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     token_ctx = dict(token_ctx)
     token_ctx["_cluster_sabido"] = cluster_sabido
 
-    tier = _tier(conf, meta, umbral, token_ctx.get("liq"), _risk_pct(token_ctx))
+    tier = _tier(conf, meta, umbral, token_ctx.get("liq"),
+                 _risk_pct(token_ctx), u=_u_ef)
     cur = conn.execute(
         """INSERT OR IGNORE INTO predictions
            (leader, mint, created_ts, stage, confidence, meta_score,
@@ -519,6 +561,43 @@ def metrics_text() -> str:
     def pct(a, b):
         return f"{round(100*a/b)}%" if b else "—"
 
+    # (Ola 17-J, auditoria 6) AUTODIAGNOSTICO. El motor llevaba 28 dias y
+    # 20.785 filas sin emitir una sola alerta, y no habia forma de saberlo
+    # mirando el panel. Ahora se compara lo que el sistema PRODUCE de
+    # verdad con los umbrales que hacen falta para alertar.
+    _diag = []
+    try:
+        _c2 = get_conn()
+        try:
+            _u = _umbrales(_c2)
+            _mx = _c2.execute(
+                "SELECT MAX(confidence) c, MAX(meta_score) m, "
+                "COUNT(*) n, SUM(CASE WHEN alerted_stage>0 THEN 1 ELSE 0 END) a "
+                "FROM predictions").fetchone()
+        finally:
+            _c2.close()
+        _mc, _mm = _mx["c"] or 0, _mx["m"] or 0
+        _alertadas = _mx["a"] or 0
+        if _mx["n"]:
+            _diag.append(
+                f"\n🔎 *Calibración* — máximos alcanzados en "
+                f"{_mx['n']:,} predicciones: confianza *{_mc}* · "
+                f"Meta *{_mm}*")
+            _diag.append(
+                f"   Umbrales para alertar: confianza ≥{_u['conf']} "
+                f"Y Meta ≥{_u['alpha']}")
+            if _alertadas == 0 and (_mc < _u["conf"] or _mm < _u["alpha"]):
+                _diag.append(
+                    "   ⚠️ *Con estos umbrales el motor NO puede alertar*: "
+                    "nunca ha llegado. Ajústalos con `pred_alpha_meta` y "
+                    "`pred_min_confidence` (o pon `pred_send_watchlist=1` "
+                    "para recibir también las 🟡).")
+            elif _alertadas == 0:
+                _diag.append("   Aún sin alertas emitidas, pero los "
+                             "umbrales son alcanzables.")
+    except Exception as _e:
+        _diag = [f"\n🔎 Calibración: no se pudo comprobar ({_e})"]
+
     out = ["📊 *Panel del motor predictivo*\n",
            f"Creadas: {emit_1d} en 24h · {emit_7d} en 7d · {total} total "
            f"(incluye las que no llegaron a alertarse)",
@@ -543,6 +622,7 @@ def metrics_text() -> str:
         for l in leaders:
             alias = gmap.get(l["leader"], {}).get("alias", l["leader"][:6])
             out.append(f"• {alias}: {round(l['acc'] or 0)}% ({l['n']} pred.)")
+    out += _diag
     out.append("\n_Usa estos datos para recalibrar umbrales y pesos con "
                "evidencia, no con intuición._")
     return "\n".join(out)

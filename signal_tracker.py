@@ -104,6 +104,68 @@ def _price_mc_ex(mint: str):
         return (None, None, False, 0.0)
 
 
+# (Ola 17-J, auditoria 6) Hasta cuantos segundos DESPUES de la señal se
+# acepta recuperar su precio de entrada. Medido en la base del dueño: de
+# 5.881 compras sin precio, 2.001 tenian precio del mismo token poco
+# despues — 724 en el mismo minuto y 412 al siguiente. Recuperarlas
+# devuelve un tercio de la medicion perdida.
+# El tope existe porque el precio de un memecoin 10 min despues YA NO ES
+# el de la compra: por encima de RESCATE_MAX_S se prefiere no tener dato
+# a tener uno que parece exacto y no lo es. Y el retraso real se guarda
+# en `price_lag_s`, asi que siempre se sabe cual es de que.
+RESCATE_MAX_S = _f_env("RESCATE_PRECIO_MAX_S", 180.0)
+
+
+def rescatar_precios(conn=None, ventana_min: int = 30) -> int:
+    """Rellena el precio de entrada de señales recientes que se quedaron
+    sin el. Devuelve cuantas se recuperaron."""
+    propia = conn is None
+    conn = conn or get_conn()
+    try:
+        ahora = time.time()
+        filas = conn.execute(
+            """SELECT signature, mint, ts FROM signals
+               WHERE (price_usd IS NULL OR price_usd <= 0)
+                 AND ts >= ? AND ts <= ?
+               ORDER BY ts DESC LIMIT 200""",
+            (int(ahora - ventana_min * 60),
+             int(ahora - 5))).fetchall()
+        if not filas:
+            return 0
+        # Solo las que siguen dentro del tope de retraso aceptable.
+        vivas = [f for f in filas if (ahora - float(f["ts"])) <= RESCATE_MAX_S]
+        caducadas = len(filas) - len(vivas)
+        if caducadas:
+            print(f"· Rescate de precios: {caducadas} señal(es) ya pasaron "
+                  f"de {RESCATE_MAX_S:.0f}s; no se les inventa un precio")
+        if not vivas:
+            return 0
+        precios = _prices_mc_lote(sorted({f["mint"] for f in vivas}))
+        n = 0
+        for f in vivas:
+            v = precios.get(f["mint"])
+            if not v or not v[0]:
+                continue
+            lag = int(ahora - float(f["ts"]))
+            conn.execute(
+                "UPDATE signals SET price_usd=?, mc=COALESCE(mc,?), "
+                "liq=COALESCE(liq,?), price_lag_s=? WHERE signature=? "
+                "AND (price_usd IS NULL OR price_usd <= 0)",
+                (v[0], v[1], v[3], lag, f["signature"]))
+            n += 1
+        if n:
+            conn.commit()
+            print(f"· Rescate de precios: {n} señal(es) recuperadas "
+                  f"(quedan marcadas con su retraso en price_lag_s)")
+        return n
+    except Exception as e:
+        print(f"· Rescate de precios falló: {e}")
+        return 0
+    finally:
+        if propia:
+            conn.close()
+
+
 def _prices_mc_lote(mints: list) -> dict:
     """{mint: (px, mc, muerto, liq)} para VARIOS mints en una sola
     peticion (DexScreener acepta hasta 30 direcciones separadas por coma).

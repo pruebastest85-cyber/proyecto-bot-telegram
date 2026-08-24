@@ -593,6 +593,20 @@ async def learning_job(ctx: ContextTypes.DEFAULT_TYPE):
         raise _fallo
 
 
+async def rescate_precios_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Ola 17-J) Cada 2 min: recupera el precio de entrada de las señales
+    que se quedaron sin él porque DexScreener aún no tenía el par.
+
+    Corre a menudo y con ventana corta a propósito: el precio solo sirve
+    si se consigue en los primeros minutos (`RESCATE_MAX_S`). Lo que se
+    recupera queda marcado con su retraso real en `price_lag_s`."""
+    try:
+        from signal_tracker import rescatar_precios
+        await asyncio.to_thread(rescatar_precios)
+    except Exception as e:
+        print(f"· rescate_precios_job falló: {e}")
+
+
 async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Job periódico: mide el resultado (1h/24h) de las señales."""
     try:
@@ -2260,6 +2274,13 @@ def main():
         interval=min(_iv, _SONDEO_MAX),
         first=min(_reloj_first("auto_cycle", _iv, 60), _SONDEO_MAX),
         name="auto_cycle",
+    )
+    # (Ola 17-J) Rescate del precio de entrada: cada 2 min, ventana corta
+    app.job_queue.run_repeating(
+        rescate_precios_job,
+        interval=120,
+        first=90,
+        name="rescate_precios",
     )
     # Track record: mide el resultado de las señales cada 15 min
     app.job_queue.run_repeating(
