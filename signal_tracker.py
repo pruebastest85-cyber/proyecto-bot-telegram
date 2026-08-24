@@ -104,6 +104,67 @@ def _price_mc_ex(mint: str):
         return (None, None, False, 0.0)
 
 
+def _prices_mc_lote(mints: list) -> dict:
+    """{mint: (px, mc, muerto, liq)} para VARIOS mints en una sola
+    peticion (DexScreener acepta hasta 30 direcciones separadas por coma).
+
+    (Ola 17-G) Antes esto era un bucle de una peticion por token con
+    pausa entre cada una. Solo devuelve los mints que aparecieron en la
+    respuesta: un mint AUSENTE **no** se marca como muerto aqui — podria
+    faltar por un recorte de la respuesta, y marcar muerto por error
+    anota un -99% en el historico medido, que es lo unico irreversible
+    del sistema (CLAUDE.md). El llamador consulta esos uno a uno.
+    Si la peticion falla entera, devuelve {} y no se concluye nada.
+    """
+    out = {}
+    if not mints:
+        return out
+    for i in range(0, len(mints), 30):
+        trozo = list(mints)[i:i + 30]
+        try:
+            r = requests.get(
+                config.DEXSCREENER_TOKEN.format(address=",".join(trozo)),
+                timeout=20)
+            _api_rec("dexscreener")
+            r.raise_for_status()
+            pairs = (r.json() or {}).get("pairs") or []
+        except (requests.RequestException, ValueError, TypeError):
+            continue                  # ni un dato: el llamador reintenta
+        mejor = {}
+        for p in pairs:
+            m = (p.get("baseToken") or {}).get("address")
+            if not m:
+                continue
+            try:
+                px = float(p.get("priceUsd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0:
+                continue
+            try:
+                liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
+            except (TypeError, ValueError):
+                liq = 0.0
+            if m not in mejor or liq > mejor[m][1]:
+                mejor[m] = (p, liq)
+        for m, (p, liq) in mejor.items():
+            px = float(p.get("priceUsd") or 0) or None
+            mc = p.get("marketCap") or p.get("fdv")
+            try:
+                mc = float(mc) if mc else None
+            except (TypeError, ValueError):
+                mc = None
+            # Misma regla que `_price_mc_ex`: liquidez de polvo cuenta
+            # como muerte para la medicion.
+            if liq < LIQ_MUERTO_USD:
+                out[m] = (None, None, True, liq)
+            else:
+                out[m] = (px, mc, False, liq)
+        if i + 30 < len(mints):
+            time.sleep(config.DEXSCREENER_DELAY)
+    return out
+
+
 def _price_mc(mint: str):
     """(precio_usd, market_cap) — compatibilidad con los llamadores que no
     necesitan saber si el token murió."""
@@ -485,9 +546,22 @@ def track_outcomes() -> int:
     # con "database is locked" en el SQLite local. Ahora se llena la cache
     # de precios sin ninguna transaccion abierta, y la fase de escritura
     # dura milisegundos. En Postgres no cambia nada.
-    for _m in {s["mint"] for s in
-               list(pend) + list(pend_ventas) + list(recent)}:
-        _px_mc(_m)
+    # (Ola 17-G) Primero de golpe, en lotes de 30, y solo despues uno a
+    # uno los que NO aparecieron: un mint ausente puede estar muerto o
+    # puede faltar por un recorte de la respuesta, y esa diferencia vale
+    # un -99% falso en el historico. El lote ahorra las llamadas de los
+    # que sí estan, que son la inmensa mayoria.
+    _todos = {s["mint"] for s in
+              list(pend) + list(pend_ventas) + list(recent)}
+    if _todos:
+        _lote = _prices_mc_lote(sorted(_todos))
+        prices.update(_lote)
+        _faltan = [m for m in _todos if m not in _lote]
+        if _faltan:
+            print(f"· Medición: {len(_lote)} precios en lote, "
+                  f"{len(_faltan)} a confirmar uno a uno")
+        for _m in _faltan:
+            _px_mc(_m)
 
     # ── Fase B: escritura rapida desde la cache ─────────────────────────
     updated = 0

@@ -5,11 +5,60 @@ DexScreener (precio, liquidez, MC, edad, volumen, flujo 5min, redes)
 Todo con APIs gratuitas.
 """
 
+import os
+import threading
 import time
 
 import requests
 
 import config
+
+# ── (Ola 17-G) Cache partida por VOLATILIDAD ──────────────────────────
+# Medido en la base del dueño: de 4.135 señales en 24 h, el 47% llega a
+# menos de 45 s de otra señal DEL MISMO TOKEN, y el 66% a menos de 30
+# min. Cada una relanzaba `analyze_token` entera: 1 petición a
+# DexScreener + 2 a RugCheck, desde cero.
+#
+# No se cachea todo con el mismo reloj, porque las dos mitades no
+# envejecen igual:
+#   · PRECIO (DexScreener): en un memecoin cambia en segundos. Cache
+#     corta — si no, la tarjeta daría un MC que ya no existe.
+#   · SEGURIDAD (RugCheck): mint/freeze/LP/holders son casi estáticos;
+#     revocar una autoridad es un evento raro. Cache larga.
+# Además la parte de seguridad es la CARA (2 llamadas) y la que más
+# falla: cada acierto de cache es un `sin_seguridad` menos.
+DEX_TTL_S = int(os.getenv("TOKEN_DEX_TTL_S", "45"))
+RUG_TTL_S = int(os.getenv("TOKEN_RUG_TTL_S", "1800"))
+_CACHE_MAX = 500
+
+_dex_cache: dict = {}
+_rug_cache: dict = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_get(cache, mint, ttl):
+    with _cache_lock:
+        v = cache.get(mint)
+        if v and time.time() - v[0] < ttl:
+            return v[1]
+    return None
+
+
+def _cache_put(cache, mint, valor):
+    with _cache_lock:
+        if len(cache) >= _CACHE_MAX:
+            # Purga simple: fuera la mitad más vieja. Sin esto, un bot
+            # que ve miles de mints al día se come la memoria.
+            for k in sorted(cache, key=lambda k: cache[k][0])[:_CACHE_MAX // 2]:
+                cache.pop(k, None)
+        cache[mint] = (time.time(), valor)
+
+
+def limpiar_cache():
+    """Para pruebas y para forzar datos frescos."""
+    with _cache_lock:
+        _dex_cache.clear()
+        _rug_cache.clear()
 
 try:
     from api_usage import record as _api_rec
@@ -40,9 +89,13 @@ def analyze_token(mint: str) -> dict:
          "rug_score": None, "risks": [], "rug_ok": False, "mint_auth": None,
          "freeze_auth": None, "top10_pct": None, "lp_locked_pct": None}
 
-    d = _get(config.DEXSCREENER_TOKEN.format(address=mint))
-    _api_rec("dexscreener")
-    pairs = (d or {}).get("pairs") or []
+    _dex = _cache_get(_dex_cache, mint, DEX_TTL_S)
+    if _dex is None:
+        _dex = _get(config.DEXSCREENER_TOKEN.format(address=mint))
+        _api_rec("dexscreener")
+        if _dex is not None:          # solo se cachea lo que SI respondio
+            _cache_put(_dex_cache, mint, _dex)
+    pairs = (_dex or {}).get("pairs") or []
     if pairs:
         # Par de MAYOR liquidez: precio mas fiable que pairs[0]
         def _liq(x):
@@ -81,13 +134,25 @@ def analyze_token(mint: str) -> dict:
             f"{(s.get('type') or 'link').capitalize()}: {s.get('url')}"
             for s in (info.get("socials") or []) if s.get("url")][:4]
 
-    s = _get(RUG_SUMMARY.format(mint=mint))
+    # (Ola 17-G) Las dos llamadas de RugCheck viajan juntas en la cache:
+    # o se guardan las dos o ninguna, para que `rug_ok` nunca quede
+    # descolgado de los datos que lo justifican.
+    _rug = _cache_get(_rug_cache, mint, RUG_TTL_S)
+    if _rug is None:
+        s = _get(RUG_SUMMARY.format(mint=mint))
+        _api_rec("rugcheck")
+        f = _get(RUG_FULL.format(mint=mint), timeout=25)
+        _api_rec("rugcheck")
+        if f:                         # solo se cachea un chequeo COMPLETO
+            _cache_put(_rug_cache, mint, {"s": s, "f": f})
+    else:
+        s, f = _rug.get("s"), _rug.get("f")
+
     if s:
         t["rug_score"] = s.get("score")
         t["risks"] = [x.get("name", "") for x in (s.get("risks") or [])
                       if x.get("level") in ("danger", "warn")][:5]
 
-    f = _get(RUG_FULL.format(mint=mint), timeout=25)
     if f:
         # (Ola 16) La fuente RESPONDIO. Es el unico dato fiable para saber
         # si el chequeo se hizo: mintAuthority/freezeAuthority en null
