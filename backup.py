@@ -21,9 +21,20 @@ import time
 import db as _db
 from config import DB_PATH
 
+# (Ola 17-C, auditoria 4) Faltaban SIETE tablas, y el restaurador
+# (restaurar_backup.ORDEN) SI las esperaba: el que respalda no escribia
+# lo que el que restaura pide. Entre ellas `trades` — que migrate_to_pg
+# describe literalmente como "lo mas valioso" —, `paper_fills` (el libro
+# inmutable de salidas del paper: sin el se pierden los cierres
+# parciales) y `wallet_identity`/`wallet_funding`, que son investigacion
+# pagada con creditos de Helius.
+# Solo afecta al volcado de Postgres: en SQLite se copia el archivo
+# entero y siempre estuvieron dentro.
 TABLES = ["wallets", "winning_tokens", "appearances", "signals",
           "settings", "predictions", "positions", "paper_trades",
-          "chat_history"]
+          "paper_fills", "trades", "chat_history", "radar_tokens",
+          "wallet_identity", "wallet_funding", "submitted_tokens",
+          "errors"]
 
 BATCH = 1000      # filas por lote al volcar; acota la memoria del backup
 
@@ -86,6 +97,14 @@ def make_backup() -> tuple[str, str, str]:
         return path, f"wallets_backup_{stamp}.json.gz", cap
 
     # ── SQLite: copia consistente con la API de backup ──
+    # (Ola 17-C) sqlite3.connect CREA el archivo si no existe: con una
+    # DB_PATH mal puesta se generaba una base vacia, la copia pasaba el
+    # PRAGMA integrity_check y todo salia verde. Un backup vacio
+    # "verificado" es peor que ninguno, porque da falsa tranquilidad.
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(
+            f"La base no existe en {DB_PATH!r}: no hay nada que respaldar. "
+            f"Revisa DB_PATH o el directorio desde el que arranca el bot.")
     path = os.path.join(tmp, f"backup_{stamp}.db")
     src = sqlite3.connect(DB_PATH)
     try:
@@ -97,7 +116,29 @@ def make_backup() -> tuple[str, str, str]:
     finally:
         src.close()
     mb = os.path.getsize(path) / 1024 / 1024
-    cap = (f"💾 Backup SQLite · {mb:.1f} MB · {stamp}\n"
+    # (Ola 17-C) Y una copia con 0 filas en las tablas del historico
+    # tampoco cuenta como copia, aunque el archivo exista y sea valido.
+    filas = 0
+    try:
+        chk = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            for t in ("wallets", "appearances", "signals"):
+                try:
+                    filas += chk.execute(
+                        f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                except sqlite3.Error:
+                    pass
+        finally:
+            chk.close()
+    except sqlite3.Error:
+        pass
+    if filas == 0:
+        raise ValueError(
+            "El backup salio VACIO (0 filas en wallets/appearances/"
+            "signals). No se guarda: seria un respaldo inutil que ademas "
+            "desplazaria a uno bueno en la rotacion.")
+    cap = (f"💾 Backup SQLite · {mb:.1f} MB · {filas:,} filas del "
+           f"histórico · {stamp}\n"
            "Ábrelo con cualquier visor de SQLite (o DB Browser). "
-           "Para restaurar, súbelo como wallets.db a /data.")
+           "Para restaurar:  python restaurar_backup.py <archivo>")
     return path, f"wallets_backup_{stamp}.db", cap

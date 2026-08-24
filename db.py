@@ -441,6 +441,28 @@ class _PgConn:
             cur.execute(q)
         return _PgCursor(cur)
 
+    def executemany(self, sql, seq):
+        """(Ola 17-C) Faltaba: `restaurar_backup.py` la llama para meter
+        los datos por lotes de 2000 y en Postgres lanzaba AttributeError
+        en TODOS los lotes. Lo salvaba su `except`, que reintentaba fila
+        a fila abriendo un cursor por fila: restaurar cientos de miles de
+        filas habría tardado horas justo el día que hiciera falta."""
+        import psycopg2.extras
+        cur = self._conn.cursor(
+            cursor_factory=psycopg2.extras.RealDictCursor)
+        psycopg2.extras.execute_batch(cur, _translate(sql),
+                                      [tuple(p) for p in seq],
+                                      page_size=500)
+        return _PgCursor(cur)
+
+    def rollback(self):
+        # Autocommit: no hay transacción abierta que deshacer. Existe
+        # para que quien haga `hasattr(conn, "rollback")` no se confunda.
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+
     def executescript(self, script: str):
         cur = self._conn.cursor()
         cur.execute(script)

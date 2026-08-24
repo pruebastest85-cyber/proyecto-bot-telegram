@@ -1779,12 +1779,37 @@ def _elite_text() -> str:
 @solo_admin
 async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💾 Preparando copia de la base de datos…")
+    path = None
     try:
         from backup import make_backup
         path, fname, caption = await asyncio.to_thread(make_backup)
-        with open(path, "rb") as fh:
-            await update.message.reply_document(document=fh, filename=fname,
-                                                caption=caption)
+
+        # (Ola 17-C, auditoría 4) El manual NO copiaba a `backups/`: con
+        # la base en 262 MB el envío por Telegram (límite 50 MB) muere y
+        # el usuario se queda sin nada, igual que antes del arreglo del
+        # automático. Primero se guarda en disco; el envío es lo opcional.
+        def _guardar_en_disco():
+            from maintenance import guardar_copia_en_disco
+            return guardar_copia_en_disco(path, fname)
+
+        destino = None
+        try:
+            destino = await asyncio.to_thread(_guardar_en_disco)
+        except Exception as e:
+            print(f"· /backup: no pude guardar en disco: {e}")
+        if destino:
+            await update.message.reply_text(
+                f"✅ Copia guardada en el equipo:\n`{destino}`",
+                parse_mode="Markdown")
+        _mb = os.path.getsize(path) / 1e6
+        if _mb > 49:
+            await update.message.reply_text(
+                f"({_mb:.0f} MB — demasiado grande para enviarla por "
+                f"Telegram, que admite 50 MB. Está en el equipo.)")
+        else:
+            with open(path, "rb") as fh:
+                await update.message.reply_document(
+                    document=fh, filename=fname, caption=caption)
         # (Ola 15 - B6, corregido en Ola 16) El backup manual se anota en
         # SU PROPIA clave: marcar `last_backup_ts` (la del automático)
         # escondía justo el fallo que /salud existe para detectar — el job
@@ -1798,12 +1823,16 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             finally:
                 _c.close()
         await asyncio.to_thread(_marcar)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
     except Exception as e:
         await update.message.reply_text(f"No pude generar el backup: {e}")
+    finally:
+        # (Ola 17-C) El borrado estaba dentro del try: si el envío fallaba
+        # (base grande), el temporal se quedaba ahí para siempre.
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
 
 @solo_admin

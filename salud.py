@@ -366,10 +366,21 @@ def _c_backup(conn):
         extra = ""
         if tsm:
             extra = f" · manual hace {_horas(tsm):.0f} h"
+        # (Ola 17-C, auditoría 4) Antes esto NUNCA pasaba de WARN, y
+        # `revisar_y_avisar` solo manda aviso ante CRIT: por eso el dueño
+        # estuvo 70 h sin ningún respaldo y solo se enteró al escribir
+        # /salud a mano. Un backup roto es exactamente el fallo que hay
+        # que contar antes de necesitarlo, no después.
         if not ts:
             return _chk("Backup", WARN,
-                        "sin backup automático todavía" + extra)
+                        "sin backup automático todavía" + extra,
+                        "si sigue así mañana, algo va mal en el job")
         h = _horas(ts)
+        if h > 72:
+            return _chk("Backup", CRIT,
+                        f"SIN RESPALDO desde hace {h:.0f} h" + extra,
+                        "mira el log por '· Backup falló:' y /errores; "
+                        "el histórico es lo único irrecuperable")
         if h > 48:
             return _chk("Backup", WARN,
                         f"automático hace {h:.0f} h" + extra,

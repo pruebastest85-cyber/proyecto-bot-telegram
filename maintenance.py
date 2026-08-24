@@ -21,6 +21,33 @@ ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
+def guardar_copia_en_disco(path: str, nombre: str) -> str:
+    """Copia el backup junto a la base (carpeta `backups/`) y rota a 5.
+
+    Devuelve la ruta final. (Ola 17-C) Extraida de send_db_backup para
+    que el /backup MANUAL la use tambien: hasta ahora el manual solo
+    intentaba enviar por Telegram y, con la base en 262 MB, moria sin
+    dejar copia en ninguna parte.
+    """
+    import shutil
+    destino_dir = os.path.join(
+        os.path.dirname(os.path.abspath(DB_PATH)) or ".", "backups")
+    os.makedirs(destino_dir, exist_ok=True)
+    destino = os.path.join(destino_dir, nombre)
+    shutil.copyfile(path, destino)
+    try:                       # rotacion: conservar los 5 más nuevos
+        viejos = sorted(
+            (os.path.join(destino_dir, f)
+             for f in os.listdir(destino_dir)
+             if "backup_" in f),
+            key=os.path.getmtime, reverse=True)[5:]
+        for v in viejos:
+            os.remove(v)
+    except Exception as e:
+        print(f"· Backup: rotación falló (no crítico): {e}")
+    return destino
+
+
 def send_db_backup():
     """Envía un backup VERIFICADO de la base por Telegram.
 
@@ -32,17 +59,29 @@ def send_db_backup():
     API de backup de sqlite3, consistente en caliente; en Postgres, el
     volcado JSON por lotes) y ademas VERIFICA la copia con
     PRAGMA integrity_check antes de enviarla: un backup no comprobado no
-    cuenta como backup."""
-    if not (BOT_TOKEN and ADMIN_ID):
-        return
+    cuenta como backup.
+
+    (Ola 17-C, auditoria 4) La guardia de Telegram estaba AQUI, delante de
+    todo: sin TELEGRAM_ADMIN_ID no habia copia en disco, ni marca de
+    reloj, ni linea en el log, ni error registrado — el respaldo del
+    historico dependia de que estuviera bien puesta una variable de
+    mensajeria. El respaldo se hace SIEMPRE; lo unico opcional es el
+    envio."""
+    _puede_telegram = bool(BOT_TOKEN and ADMIN_ID)
+    if not _puede_telegram:
+        print("· Backup: sin TELEGRAM_BOT_TOKEN/ADMIN_ID; se guarda en "
+              "disco igualmente y no se envia por Telegram")
 
     def _tg_texto(msg: str):
+        if not _puede_telegram:
+            return
         try:
             from realtime import tg_send
             tg_send(msg)
         except Exception as e2:
             print(f"· Aviso de backup no enviado: {e2}")
 
+    path = None
     try:
         import gzip
         import shutil
@@ -77,21 +116,7 @@ def send_db_backup():
         # verificada se guarda SIEMPRE junto a la base (carpeta backups/,
         # rotacion de 5) y el reloj de /salud se marca ahi. El envio a
         # Telegram solo se intenta si cabe, y su fallo ya no borra nada.
-        destino_dir = os.path.join(
-            os.path.dirname(os.path.abspath(DB_PATH)) or ".", "backups")
-        os.makedirs(destino_dir, exist_ok=True)
-        destino = os.path.join(destino_dir, nombre)
-        shutil.copyfile(path, destino)
-        try:                       # rotacion: conservar los 5 más nuevos
-            viejos = sorted(
-                (os.path.join(destino_dir, f)
-                 for f in os.listdir(destino_dir)
-                 if "backup_" in f),
-                key=os.path.getmtime, reverse=True)[5:]
-            for v in viejos:
-                os.remove(v)
-        except Exception as e:
-            print(f"· Backup: rotación falló (no crítico): {e}")
+        destino = guardar_copia_en_disco(path, nombre)
         conn = get_conn()
         try:
             set_setting(conn, "last_backup_ts", time.time())
@@ -100,7 +125,9 @@ def send_db_backup():
         mb = os.path.getsize(path) / 1e6
         print(f"📦 Backup verificado guardado en {destino} ({mb:.1f} MB)")
 
-        if mb > 49:
+        if not _puede_telegram:
+            pass                       # ya esta a salvo en disco
+        elif mb > 49:
             _tg_texto(f"📦 Backup diario ✅ Verificado y guardado en el "
                       f"equipo:\n`{destino}`\n({mb:.1f} MB — demasiado "
                       f"grande para enviarlo por Telegram, que admite "
@@ -122,10 +149,6 @@ def send_db_backup():
                 _tg_texto(f"📦 Backup diario ✅ guardado en el equipo:\n"
                           f"`{destino}`\n(el envío por Telegram falló: "
                           f"{str(e)[:120]})")
-        try:
-            os.remove(path)
-        except Exception:
-            pass
     except Exception as e:
         print(f"· Backup falló: {e}")
         try:
@@ -133,6 +156,18 @@ def send_db_backup():
             record("backup", e)
         except Exception:
             pass
+    finally:
+        # (Ola 17-C) El borrado del temporal estaba DENTRO del try, al
+        # final: cualquier fallo intermedio dejaba un .db/.gz de decenas
+        # o cientos de MB huerfano en el temporal. Con un reintento cada
+        # media hora eso llena el disco, y entonces falla hasta el
+        # shutil.copyfile — el fallo se vuelve permanente y se
+        # autoalimenta. Ahora se borra pase lo que pase.
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except Exception as e2:
+            print(f"· Backup: no pude borrar el temporal {path}: {e2}")
 
 
 def watchdog_check():
