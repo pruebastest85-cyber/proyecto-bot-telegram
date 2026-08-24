@@ -94,33 +94,58 @@ def _c_medicion(conn):
         # funcionara al 94%. Ahora: misma poblacion que el medidor,
         # ventana movil de 7 dias, y solo señales cuya ventana ya vencio.
         ahora = int(time.time())
+        # (Ola 17-H, auditoria 6) El `price_usd IS NOT NULL` estaba en el
+        # WHERE, o sea que las señales que PERDIERON su precio de entrada
+        # salian del numerador Y del denominador: /salud podia decir
+        # "100% medidas" mientras un tercio de las señales se perdia sin
+        # medir. Medido en la base del dueño: 34% de las compras sin
+        # precio, de forma estable durante 10 dias, y /salud en verde.
+        # Ahora se cuentan las tres cosas por separado.
         r = conn.execute(
             "SELECT COUNT(*) v, "
+            "COALESCE(SUM(CASE WHEN s.price_usd IS NOT NULL "
+            "AND s.price_usd > 0 THEN 1 ELSE 0 END), 0) con_px, "
             "COALESCE(SUM(CASE WHEN s.chg_24h IS NOT NULL "
             "OR s.chg_1h IS NOT NULL THEN 1 ELSE 0 END), 0) m "
             "FROM signals s JOIN wallets w ON w.address = s.wallet "
             "AND COALESCE(w.is_bot, 0) = 0 "
             "AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2) "
-            "WHERE s.side='compra' AND s.price_usd IS NOT NULL "
+            "WHERE s.side='compra' "
             "AND s.ts BETWEEN ? AND ?",
             (ahora - 7 * 86400, ahora - 30 * 3600)).fetchone()
-        viejas, medidas = r["v"], r["m"]
+        viejas, con_px, medidas = r["v"], r["con_px"], r["m"]
+        sin_px = viejas - con_px
+        if viejas and sin_px * 100.0 / viejas >= 15:
+            return _chk("Medición", CRIT,
+                        f"{sin_px} de {viejas} señales ({sin_px*100.0/viejas:.0f}%) "
+                        f"se quedaron SIN precio de entrada: no se pueden "
+                        f"medir nunca",
+                        "revisa si DexScreener está fallando o limitando; "
+                        "sin precio base no hay win rate real")
         if viejas == 0:
             return _chk("Medición", OK,
                         "sin señales medibles vencidas en 7 días")
-        pct = 100.0 * medidas / viejas
+        # El % de medición se calcula sobre las que SI tenian precio
+        # (las medibles de verdad); las que lo perdieron ya se avisaron
+        # arriba con su propio numero.
+        if con_px == 0:
+            return _chk("Medición", CRIT,
+                        f"ninguna de las {viejas} señales tenía precio de "
+                        f"entrada", "la medición está parada del todo")
+        pct = 100.0 * medidas / con_px
         if pct < 30:
             return _chk("Medición", CRIT,
                         f"solo {pct:.0f}% de las señales medibles de 7 días "
-                        f"medidas ({medidas}/{viejas})",
+                        f"medidas ({medidas}/{con_px})",
                         "sin medición no hay aprendizaje ni backtest fiable")
         if pct < 70:
             return _chk("Medición", WARN,
-                        f"{pct:.0f}% medidas ({medidas}/{viejas} "
-                        f"medibles, 7 días)")
+                        f"{pct:.0f}% medidas ({medidas}/{con_px} "
+                        f"con precio, de {viejas} señales · 7 días)")
         return _chk("Medición", OK,
-                    f"{pct:.0f}% medidas ({medidas}/{viejas} "
-                    f"medibles, 7 días)")
+                    f"{pct:.0f}% medidas ({medidas}/{con_px} con precio"
+                    + (f", {sin_px} sin precio de entrada" if sin_px else "")
+                    + " · 7 días)")
     except Exception as e:
         return _chk("Medición", WARN, f"no se pudo comprobar ({e})")
 

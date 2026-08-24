@@ -93,7 +93,14 @@ def analyze_token(mint: str) -> dict:
     if _dex is None:
         _dex = _get(config.DEXSCREENER_TOKEN.format(address=mint))
         _api_rec("dexscreener")
-        if _dex is not None:          # solo se cachea lo que SI respondio
+        # (Ola 17-H) La guarda era `_dex is not None`, y eso CACHEABA las
+        # respuestas vacias: un token de pump.fun con minutos de vida
+        # devuelve HTTP 200 con {"pairs": null} — es un dict, no es None,
+        # y se quedaba 45 s en cache. Durante esos 45 s TODAS las señales
+        # de ese mint se guardaban sin precio, y una señal sin precio de
+        # entrada queda fuera de la medicion PARA SIEMPRE. Solo se cachea
+        # una respuesta con pares de verdad; el resto se vuelve a pedir.
+        if _dex is not None and (_dex.get("pairs") or []):
             _cache_put(_dex_cache, mint, _dex)
     pairs = (_dex or {}).get("pairs") or []
     if pairs:

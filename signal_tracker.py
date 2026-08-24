@@ -141,19 +141,32 @@ def _prices_mc_lote(mints: list) -> dict:
                 continue
             if px <= 0:
                 continue
+            # (Ola 17-H) Antes, una liquidez malformada caia a `liq=0.0`
+            # y mas abajo `0 < LIQ_MUERTO_USD` marcaba el token MUERTO:
+            # se escribia -100% en el historico medido por un problema de
+            # FORMATO. La ruta individual no hace eso (su except devuelve
+            # muerto=False y reintenta). Ahora se distingue: `liq=None`
+            # significa "no se pudo leer", y sin ese dato NO se declara
+            # ninguna muerte.
             try:
-                liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
+                _lq = ((p.get("liquidity") or {}).get("usd"))
+                liq = float(_lq) if _lq is not None else 0.0
             except (TypeError, ValueError):
-                liq = 0.0
-            if m not in mejor or liq > mejor[m][1]:
-                mejor[m] = (p, liq)
-        for m, (p, liq) in mejor.items():
+                liq = None
+            _orden = -1.0 if liq is None else liq
+            if m not in mejor or _orden > mejor[m][1]:
+                mejor[m] = (p, liq, _orden)
+        for m, (p, liq, _o) in mejor.items():
             px = float(p.get("priceUsd") or 0) or None
             mc = p.get("marketCap") or p.get("fdv")
             try:
                 mc = float(mc) if mc else None
             except (TypeError, ValueError):
                 mc = None
+            if liq is None:
+                # Liquidez ilegible: sin dato, NO se concluye muerte.
+                # El llamador lo confirmara uno a uno.
+                continue
             # Misma regla que `_price_mc_ex`: liquidez de polvo cuenta
             # como muerte para la medicion.
             if liq < LIQ_MUERTO_USD:

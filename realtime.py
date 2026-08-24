@@ -658,6 +658,7 @@ def _proc(txs: list[dict], conn):
             continue  # ya procesada, no re-alertar
 
         es_compra = trade["side"] == "compra"
+        _px_caliente = None          # (Ola 17-H) ver mas abajo
 
         # Posición de la billetera en este token (acumulación / profit)
         # — bajo el candado del mint (M4): sin el, dos hilos del mismo
@@ -760,6 +761,14 @@ def _proc(txs: list[dict], conn):
                         # entero en el camino caliente — justo al revés de
                         # lo que decía su comentario.
                         _p0, _mc0, _muerto0, _liq0 = _pmx(trade["mint"])
+                        # (Ola 17-H) Este precio es FRESCO y sin cache.
+                        # Se guarda para no perderlo: veinte lineas mas
+                        # abajo se escribia en `signals` el precio de
+                        # `analyze_token`, que puede venir vacio, y la
+                        # señal se quedaba sin medir para siempre
+                        # teniendo el dato bueno en esta misma variable.
+                        if _p0 and _p0 > 0:
+                            _px_caliente = (_p0, _mc0, _liq0)
                         if _p0 and _p0 > 0:
                             _t0 = {"price": _p0, "symbol": trade["mint"][:6],
                                    "mc": _mc0, "liq": _liq0}
@@ -789,12 +798,33 @@ def _proc(txs: list[dict], conn):
             "FROM wallets WHERE address=?",
             (trade["wallet"],)).fetchone()
 
-        # Guardar precio, símbolo, MC y liquidez del momento
-        conn.execute(
-            "UPDATE signals SET price_usd=?, symbol=?, mc=?, liq=? "
-            "WHERE signature=?",
-            (t.get("price"), t.get("symbol"), t.get("mc"), t.get("liq"),
-             trade["signature"]))
+        # Guardar precio, símbolo, MC y liquidez del momento.
+        # (Ola 17-H, auditoria 6) Medido en la base del dueño: el 34% de
+        # las compras se quedaba SIN precio de entrada, y sin el la señal
+        # nunca se mide (signal_tracker filtra `price_usd IS NOT NULL`).
+        # Dos arreglos:
+        #   a) si `analyze_token` no trajo precio pero el camino caliente
+        #      SI lo consiguio, se usa ese en vez de escribir NULL;
+        #   b) nunca se pisa con NULL un valor que ya estaba puesto.
+        _px = t.get("price")
+        _mcv, _liqv = t.get("mc"), t.get("liq")
+        if not _px and _px_caliente:
+            _px, _mcv, _liqv = (_px_caliente[0],
+                                _mcv or _px_caliente[1],
+                                _liqv or _px_caliente[2])
+        if _px:
+            conn.execute(
+                "UPDATE signals SET price_usd=?, symbol=?, mc=?, liq=? "
+                "WHERE signature=?",
+                (_px, t.get("symbol"), _mcv, _liqv, trade["signature"]))
+        else:
+            # Sin precio: se guarda lo demas y se deja constancia para
+            # que el re-enriquecimiento periodico lo reintente.
+            conn.execute(
+                "UPDATE signals SET symbol=COALESCE(?, symbol), "
+                "mc=COALESCE(?, mc), liq=COALESCE(?, liq) "
+                "WHERE signature=?",
+                (t.get("symbol"), _mcv, _liqv, trade["signature"]))
         conn.commit()
 
         # ── Motor predictivo: decide si emitir una señal PREDICTIVA ──
