@@ -36,13 +36,61 @@ STABLES = {
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 
-_SOL_CACHE = {"px": None, "ts": 0.0}
+_SOL_CACHE = {"px": None, "ts": 0.0, "aviso": 0.0}
+
+# (Ola 17-F) Cuanto se acepta un precio de SOL guardado cuando la fuente
+# no responde. SOL no se mueve tanto en unas horas como para que un
+# importe en dolares deje de ser util, y la alternativa era NO DAR LA
+# CIFRA: sin precio de SOL, `stake_usd` quedaba NULL al abrir la
+# posicion y la alerta de cierre caia al texto en SOL — el dueño dejaba
+# de ver "cuanto habria ganado o perdido de verdad".
+SOL_PX_MAX_H = 12
+
+
+def _sol_px_guardado():
+    """(precio, horas de antiguedad) del ultimo SOL/USD que sí se leyó."""
+    try:
+        from db import get_conn, get_setting
+        conn = get_conn()
+        try:
+            px = get_setting(conn, "sol_usd_ultimo", None)
+            ts = get_setting(conn, "sol_usd_ultimo_ts", None)
+        finally:
+            conn.close()
+        if px is None or ts is None:
+            return (None, None)
+        return (float(px), (time.time() - float(ts)) / 3600.0)
+    except Exception:
+        return (None, None)
+
+
+def _guardar_sol_px(px: float):
+    try:
+        from db import get_conn, set_setting
+        conn = get_conn()
+        try:
+            set_setting(conn, "sol_usd_ultimo", float(px))
+            set_setting(conn, "sol_usd_ultimo_ts", time.time())
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def _sol_usd() -> float | None:
-    """Precio SOL/USD (mediana de pares WSOL en DexScreener), cache 5 min."""
+    """Precio SOL/USD (mediana de pares WSOL en DexScreener), cache 5 min.
+
+    (Ola 17-F) Antes, si DexScreener fallaba UNA vez pasados los 5 min de
+    cache, esto devolvia None y toda la cadena en dolares se venia abajo
+    en silencio: `stake_usd` NULL al abrir, y al cerrar la alerta decia
+    "PnL: -0.031 SOL sobre 1.00 SOL" en vez de los dolares. Medido en la
+    base del dueño: 67 de 238 operaciones cerradas sin `stake_usd`.
+    Ahora el ultimo precio bueno se guarda en la base (sobrevive a los
+    reinicios) y se usa como respaldo hasta SOL_PX_MAX_H horas.
+    """
     if _SOL_CACHE["px"] and time.time() - _SOL_CACHE["ts"] < 300:
         return _SOL_CACHE["px"]
+    fallo = None
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=WSOL),
                          timeout=15)
@@ -52,9 +100,41 @@ def _sol_usd() -> float | None:
         if usd:
             _SOL_CACHE["px"] = usd[len(usd) // 2]   # mediana
             _SOL_CACHE["ts"] = time.time()
-    except (requests.RequestException, ValueError, KeyError, TypeError):
-        pass
-    return _SOL_CACHE["px"]
+            _guardar_sol_px(_SOL_CACHE["px"])
+            return _SOL_CACHE["px"]
+        fallo = f"DexScreener no devolvio ningun par con precio (HTTP {r.status_code})"
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        fallo = f"{type(e).__name__}: {str(e)[:120]}"
+
+    # No se pudo leer: respaldo con el ultimo precio conocido.
+    if _SOL_CACHE["px"]:
+        edad_h = (time.time() - _SOL_CACHE["ts"]) / 3600.0
+        if edad_h <= SOL_PX_MAX_H:
+            _avisar_px(fallo, edad_h)
+            return _SOL_CACHE["px"]
+    px, edad_h = _sol_px_guardado()
+    if px and edad_h is not None and edad_h <= SOL_PX_MAX_H:
+        _SOL_CACHE["px"], _SOL_CACHE["ts"] = px, time.time() - edad_h * 3600
+        _avisar_px(fallo, edad_h)
+        return px
+    # Sin respaldo utilizable: se dice, no se calla.
+    _avisar_px(fallo, edad_h, sin_respaldo=True)
+    return None
+
+
+def _avisar_px(fallo, edad_h, sin_respaldo: bool = False):
+    """Un aviso cada 30 min como mucho: antes esto fallaba en absoluto
+    silencio (`except: pass`) y el dueño veia el sintoma —importes en SOL
+    en vez de en dolares— sin ninguna pista de la causa."""
+    if time.time() - _SOL_CACHE.get("aviso", 0) < 1800:
+        return
+    _SOL_CACHE["aviso"] = time.time()
+    if sin_respaldo:
+        print(f"· Precio de SOL NO disponible ({fallo}) y sin respaldo "
+              f"reciente: los importes se daran en SOL, no en dolares")
+    else:
+        print(f"· Precio de SOL: la fuente no responde ({fallo}); se usa "
+              f"el ultimo conocido de hace {edad_h:.1f} h")
 
 
 def get_token_balances(address: str) -> dict[str, float]:

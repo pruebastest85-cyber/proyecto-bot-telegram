@@ -451,9 +451,14 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None):
     # es vieja y no lo tiene, se reconstruye al cambio de ahora; es una
     # aproximación, pero mejor que no dar la cifra.
     stake_usd = _campo(row, "stake_usd")
+    # (Ola 17-F) `aprox` = el importe en dolares NO es el del momento de
+    # entrar: se reconstruye al cambio de ahora porque al abrir no habia
+    # precio de SOL. Se dice en la alerta en vez de darlo por exacto.
+    stake_aprox = False
     if stake_usd is None:
         su = _sol_a_usd()
         stake_usd = (row["stake_sol"] or 0) * su if su and su > 0 else None
+        stake_aprox = stake_usd is not None
     # Ventas parciales espejo: el cierre liquida solo la FRACCION que
     # queda viva, y al total se le suma lo ya realizado por los trozos.
     # En filas sin parciales frac=1 y realizado=0: identico a siempre.
@@ -535,9 +540,16 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None):
     if pnl_usd is not None:
         linea_pnl = (f"{res} PnL: *{_usd_firmado(pnl_usd)}*  "
                      f"sobre {_usd(stake_usd)} invertidos")
+        if stake_aprox:
+            linea_pnl += ("\n_(en dólares al cambio de AHORA: al abrir la "
+                          "posición no había precio de SOL)_")
     else:
+        # (Ola 17-F) Antes esto caia al texto en SOL sin decir por que, y
+        # parecia que el bot habia dejado de dar el resultado en dinero.
         linea_pnl = (f"{res} PnL: *{pnl:+.3f} SOL*  "
-                     f"sobre {row['stake_sol']:.2f} SOL")
+                     f"sobre {row['stake_sol']:.2f} SOL"
+                     f"\n_(sin importe en dólares: no se pudo leer el "
+                     f"precio de SOL ni ahora ni al abrir)_")
     linea_neto = ""
     if pnl_neto is not None:
         linea_neto = (f"\n⚖️ Neto real (Jupiter, con slippage y fees): "
