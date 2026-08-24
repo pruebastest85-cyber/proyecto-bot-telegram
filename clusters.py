@@ -121,7 +121,11 @@ def _leadership(members, shared_tokens, ranks):
         lead_pct = (round(100 * leads[m] / comps[m])
                     if comps[m] >= MIN_COMPS_LIDER else None)
         avg_rank = round(rank_sum[m] / appears[m], 1) if appears[m] else None
-        follows_w = (max(precede[m].items(), key=lambda kv: kv[1])[0]
+        # (Ola 17-E) Desempate por direccion, no por orden de insercion
+        # del dict: ese orden depende de como se recorrio un `set`, o sea
+        # del PYTHONHASHSEED, y un reinicio podia cambiar "sigue a X" por
+        # "sigue a Y" sin que hubiera cambiado ningun dato.
+        follows_w = (max(sorted(precede[m].items()), key=lambda kv: kv[1])[0]
                      if precede[m] else None)
         order.append({"wallet": m, "lead_pct": lead_pct, "comps": comps[m],
                       "avg_rank": avg_rank, "appears": appears[m],
@@ -234,7 +238,9 @@ def _build_clusters(min_shared: int) -> list[dict]:
             # (las que mas evidencia tienen), y se dice cuando se recorta:
             # un tope callado se lee como "lo mire todo".
             miembros_calc = members
+            recorte = 0
             if len(members) > MAX_MIEMBROS_LIDERAZGO:
+                recorte = len(members) - MAX_MIEMBROS_LIDERAZGO
                 miembros_calc = set(sorted(
                     members,
                     key=lambda m: len(tokens_de.get(m, ())),
@@ -251,6 +257,12 @@ def _build_clusters(min_shared: int) -> list[dict]:
                 "shared_tokens": len(toks),
                 "strength": len(members) * len(toks),
                 "order": order,
+                # (Ola 17-E) Cuantas quedaron FUERA del calculo de
+                # liderazgo. Antes esto solo salia por el log del
+                # servidor: el mensaje de Telegram decia "Cluster de 400
+                # billeteras · 👑 Líder: X" sin poder mencionar que el
+                # orden se calculo sobre 40 de esas 400.
+                "orden_recortado": recorte,
                 # (Ola 17-A) Solo hay 👑 si el primero tiene muestra
                 # suficiente; si no, el cluster existe pero SIN líder
                 # declarado, que es la verdad.
@@ -260,7 +272,9 @@ def _build_clusters(min_shared: int) -> list[dict]:
                                   and order[0]["lead_pct"] is not None
                                   else None),
             })
-        clusters.sort(key=lambda c: c["strength"], reverse=True)
+        # Desempate estable por el primer miembro (ver nota de `follows`).
+        clusters.sort(key=lambda c: (-c["strength"],
+                                     c["members"][0] if c["members"] else ""))
         if recortados:
             print(f"· Clusters: en {recortados} cluster(s) el orden de "
                   f"liderazgo se calculo sobre las "
@@ -269,6 +283,18 @@ def _build_clusters(min_shared: int) -> list[dict]:
         return clusters
     finally:
         conn.close()
+
+
+def _copia(cs):
+    """(Ola 17-E) La cache entregaba el objeto VIVO: cualquier `.sort()`,
+    `.pop()` o asignacion de un llamador corrompia la cache global
+    durante los 30 min del TTL, en silencio. Hoy ningun consumidor la
+    muta, pero es una mina esperando a que alguien lo haga."""
+    if not cs:
+        return [] if cs is not None else None
+    return [dict(c, order=[dict(o) for o in c.get("order", ())],
+                 members=list(c.get("members", ())),
+                 aliases=list(c.get("aliases", ()))) for c in cs]
 
 
 def find_clusters(min_shared: int = MIN_SHARED, construir: bool = True):
@@ -282,31 +308,46 @@ def find_clusters(min_shared: int = MIN_SHARED, construir: bool = True):
               and time.time() - _CACHE["ts"] < _TTL
               and _CACHE.get("min_shared") == min_shared)
     if fresco:
-        return _CACHE["c"]
+        return _copia(_CACHE["c"])
     if not construir:
-        return _CACHE["c"] if _CACHE.get("min_shared") == min_shared else None
+        return (_copia(_CACHE["c"])
+                if _CACHE.get("min_shared") == min_shared else None)
     # Candado: sin el, dos hilos con la cache caducada construyen a la vez
     # y las consultas pesadas corren duplicadas (le paso a influence.py).
     with _BUILD_LOCK:
         if (_CACHE["c"] is not None
                 and time.time() - _CACHE["ts"] < _TTL
                 and _CACHE.get("min_shared") == min_shared):
-            return _CACHE["c"]
+            return _copia(_CACHE["c"])
         # Enfriamiento tras fallo: no reintentar una construccion cara
         # cada vez que llega una señal.
         if time.time() - _CACHE.get("fallo", 0) < 600:
-            return _CACHE["c"] or []
-        _CACHE["c"] = None          # soltar el viejo ANTES de construir
+            # (Ola 17-E) Devolver la cache VIEJA si existe y es del mismo
+            # umbral. Antes se devolvia [] y, como `_CACHE["c"]` ya se
+            # habia puesto a None, durante 10 min el camino caliente veia
+            # "sin cluster" en cada señal y meta_score caia al neutro.
+            if (_CACHE["c"] is not None
+                    and _CACHE.get("min_shared") == min_shared):
+                return _copia(_CACHE["c"])
+            return []
+        # Soltar el viejo ANTES de construir mantiene el pico de memoria
+        # en un solo grafo (CLAUDE.md §5), pero se guarda una referencia
+        # para poder devolverlo si la construccion falla.
+        _previo = _CACHE["c"] if _CACHE.get("min_shared") == min_shared else None
+        _CACHE["c"] = None
         try:
             c = _build_clusters(min_shared)
         except Exception as e:
             _CACHE["fallo"] = time.time()
-            print(f"· Clusters: construcción falló ({e}); reintento en 10 min")
-            return []
+            _CACHE["c"] = _previo          # no quedarse ciego por un fallo
+            print(f"· Clusters: construcción falló ({e}); se sigue con la "
+                  f"copia anterior y se reintenta en 10 min")
+            return _copia(_previo) or []
         _CACHE["c"] = c
         _CACHE["ts"] = time.time()
         _CACHE["min_shared"] = min_shared
-        return c
+        _CACHE["fallo"] = 0.0
+        return _copia(c)
 
 
 def clusters_text(limit: int = 6) -> str:
@@ -319,6 +360,10 @@ def clusters_text(limit: int = 6) -> str:
     for i, c in enumerate(clusters[:limit], 1):
         out.append(f"*{i}. Cluster de {c['size']} billeteras* · "
                    f"{c['shared_tokens']} tokens en común")
+        if c.get("orden_recortado"):
+            out.append(f"   _(el orden se calculó sobre las "
+                       f"{MAX_MIEMBROS_LIDERAZGO} con más apariciones; "
+                       f"{c['orden_recortado']} quedaron fuera del cálculo)_")
         if c.get("leader"):
             _o0 = c["order"][0]
             out.append(f"   👑 Líder: *{c['leader']}* (compra primero — "
@@ -350,6 +395,19 @@ def cluster_for(address: str, construir: bool = True) -> dict | None:
         if address in c["members"]:
             return c
     return None
+
+
+def cache_lista(min_shared: int = MIN_SHARED) -> bool:
+    """¿Hay clusters ya calculados en cache para este umbral?
+
+    (Ola 17-E) El camino caliente pide `construir=False` y recibe None
+    tanto cuando la billetera NO tiene cluster como cuando la cache aun
+    no se ha construido. Sin distinguirlo, `meta_score` aplicaba el
+    neutro 0.3 (6 de 20 puntos) y lo presentaba como medido — justo el
+    fallo que la Ola 17-A cerro, entrando por otra puerta.
+    """
+    return (_CACHE["c"] is not None
+            and _CACHE.get("min_shared") == min_shared)
 
 
 def precalentar():

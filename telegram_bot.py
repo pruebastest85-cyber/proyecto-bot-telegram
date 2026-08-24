@@ -563,7 +563,9 @@ async def performance_review_job(ctx: ContextTypes.DEFAULT_TYPE):
     Degrada a las billeteras cuyas señales resultaron perdedoras."""
     try:
         from performance_review import review_tracked
-        await asyncio.to_thread(review_tracked)
+        _res = await asyncio.to_thread(review_tracked)
+        if isinstance(_res, dict) and _res.get("error"):
+            raise RuntimeError(_res["error"])
     except Exception as e:
         print(f"· performance_review_job falló: {e}")
         raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
@@ -939,11 +941,19 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mint = data.split(":", 2)[2]
         try:
             from token_learning import set_feedback
-            await asyncio.to_thread(set_feedback, mint, good)
+            _guardado = await asyncio.to_thread(set_feedback, mint, good)
         except Exception:
-            pass
-        await q.answer("👍 ¡Gracias! Lo tendré en cuenta."
-                       if good else "👎 Anotado, aprenderé de esto.")
+            _guardado = False
+        # (Ola 17-E) Solo dar las gracias si de verdad se guardo. Antes
+        # se contestaba "lo tendre en cuenta" aunque la ficha no
+        # existiera y el voto se perdiera.
+        if _guardado:
+            await q.answer("👍 ¡Gracias! Lo tendré en cuenta."
+                           if good else "👎 Anotado, aprenderé de esto.")
+        else:
+            await q.answer("No pude guardar tu voto: no tengo la ficha de "
+                           "ese token. Vuelve a pedirlo con /token y "
+                           "márcalo otra vez.")
         return
 
     # Botones bajo las alertas de señal
@@ -985,8 +995,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # (Ola 17-B) Doble toque en el MISMO botón: la primera
             # pulsación ya se llevó la acción. No decir "expiró" ni
             # invitar a repetirla — se ejecutaría dos veces.
-            await q.answer("Ya la estoy ejecutando" if _ya[0] == "curso"
-                           else "Ya se ejecutó")
+            await q.answer({"curso": "Ya la estoy ejecutando",
+                            "cancelada": "Ya la cancelaste"}.get(
+                                _ya[0], "Ya se ejecutó"))
             return
         if accion is None and data.startswith("agc:y"):
             # (Ola 16) El bot se reinició con la propuesta pendiente (vive
@@ -1001,7 +1012,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             return
         if data.startswith("agc:n") or not accion:
-            _marcar_consumida(q.from_user.id, _tok_msg, "hecha")
+            _marcar_consumida(q.from_user.id, _tok_msg, "cancelada")
             await q.answer("Cancelado")
             try:
                 await q.edit_message_text("❌ Acción cancelada.")
@@ -1017,8 +1028,13 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
             return
-        await q.answer("Ejecutando…")
+        # (Ola 17-E) Marcar ANTES del `await`: entre el `pop` y esta
+        # linea habia una llamada de red a Telegram, y con
+        # concurrent_updates(8) el segundo toque entraba justo en ese
+        # hueco y volvia a ver "propuesta expirada". La marca es lo
+        # primero que se hace tras quedarse con la accion.
         _marcar_consumida(q.from_user.id, _tok_msg, "curso")
+        await q.answer("Ejecutando…")
         from ai_agent import execute_action
         try:
             resultado = await asyncio.to_thread(execute_action, accion)
@@ -2160,18 +2176,25 @@ def main():
         # Ahora el job se registra con un sondeo corto y es este envoltorio
         # el que decide si toca. Un reinicio ya no reinicia nada: el
         # tiempo lo lleva la base, no el proceso.
+        def _leer_reloj(nom):
+            from db import get_setting
+            _c0 = get_conn()
+            try:
+                return max(
+                    float(get_setting(_c0, f"job_ts:{nom}", 0) or 0),
+                    float(get_setting(_c0, f"job_intento:{nom}", 0) or 0))
+            finally:
+                _c0.close()
+
         async def _w(ctx):
             if intervalo:
                 try:
-                    from db import get_setting
-                    _c0 = get_conn()
-                    try:
-                        _last = max(
-                            float(get_setting(_c0, f"job_ts:{nombre}", 0) or 0),
-                            float(get_setting(_c0, f"job_intento:{nombre}", 0)
-                                  or 0))
-                    finally:
-                        _c0.close()
+                    # (Ola 17-E) En un HILO, igual que el marcado de tres
+                    # lineas mas abajo: `get_conn()` en el bucle asincrono
+                    # congela el bot mientras dura, y esto corre en cada
+                    # tick de sondeo de los 7 jobs (con Postgres remoto,
+                    # cada conexion son decenas de ms).
+                    _last = await asyncio.to_thread(_leer_reloj, nombre)
                     if _last and (_t.time() - _last) < intervalo:
                         return                     # aún no toca
                 except Exception:

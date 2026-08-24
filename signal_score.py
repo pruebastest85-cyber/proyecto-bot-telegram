@@ -72,7 +72,9 @@ def compute_signal_score(t: dict, wallet_score, track: dict | None,
     # Momentum (0-10)
     p_mom = 0.0
     age = t.get("age_days")
-    if age is not None and age <= 30:
+    # (Ola 17-E) `0 <= age`: una edad negativa (dato malo de DexScreener)
+    # premiaba el momentum como si fuera un token recién nacido.
+    if age is not None and 0 <= age <= 30:
         p_mom += 4
     if (t.get("vol24") or 0) >= 100_000:
         p_mom += 3

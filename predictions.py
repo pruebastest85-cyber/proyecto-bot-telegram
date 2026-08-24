@@ -89,6 +89,17 @@ def _leader_health(conn, leader: str) -> dict:
     return {"n": n, "accuracy": round(acc), "estado": estado, "factor": factor}
 
 
+def _num(v, defecto=0.0) -> float:
+    """(Ola 17-E) Numero o el defecto. Los factores venian de dicts que
+    hoy siempre traen numeros, pero un None colado (una rama nueva, un
+    dato de la base) reventaba el calculo entero de la alerta."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return float(defecto)
+    return x if x == x and x not in (float("inf"), float("-inf")) else float(defecto)
+
+
 # (Ola 17-A) Valor neutro de la etapa 1 y cuántos puntos de los 100 de
 # "Confianza" representa. Se nombra para poder decirlo en la alerta.
 CONF_STAGE_NEUTRO = 0.5
@@ -105,13 +116,13 @@ def confidence_score(inf: dict, followers: list, liq, health: dict,
     """
     if not followers:
         return 0
-    shared = [f.get("shared", 0) for f in followers]
-    probs = [f.get("prob", 0) / 100 for f in followers]
+    shared = [_num(f.get("shared"), 0) for f in followers]
+    probs = [_num(f.get("prob"), 0) / 100 for f in followers]
     f_hist = min(1.0, (sum(shared) / len(shared)) / 8.0)      # ≥8 coincid. = tope
     f_stab = sum(probs) / len(probs)                           # prob media edges
     f_lead = (inf.get("leader_score") or 0) / 100
     f_liq = 1.0 if (liq or 0) >= 20000 else max(0.0, (liq or 0) / 20000)
-    f_health = health.get("factor", 0.6)
+    f_health = _num(health.get("factor"), 0.6)
     if arrived > 0:
         f_stage = min(1.0, arrived / max(1, len(followers)))   # etapas
     else:
@@ -146,8 +157,8 @@ def meta_score(inf: dict, cluster: dict | None, health: dict,
         f_cluster = min(1.0, f_cluster)
     else:
         f_cluster = 0.3
-    f_hist = health.get("factor", 0.6)
-    probs = [f.get("prob", 0) / 100 for f in followers] or [0]
+    f_hist = _num(health.get("factor"), 0.6)
+    probs = [_num(f.get("prob"), 0) / 100 for f in followers] or [0]
     f_prop = sum(probs) / len(probs)
     f_liq = 1.0 if (liq or 0) >= 20000 else max(0.0, (liq or 0) / 20000)
     # (Ola 17-A) Este componente NUNCA se ha calculado: no existe rama que
@@ -200,6 +211,9 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
     # (Ola 17-A) Decir qué parte de esos números NO está medida.
     _neutros = [f"{META_PTS_NEUTROS} pts del Meta Score (sin histórico "
                 f"propio del token: nunca se calcula)"]
+    if token_ctx.get("_cluster_sabido") is False:
+        _neutros.append("6 pts de Cluster (aún sin calcular: el grafo de "
+                        "co-compra no estaba listo)")
     if stage <= 1:
         _neutros.append(f"{CONF_PTS_NEUTROS} pts de Confianza (etapa 1: "
                         f"aún no ha confirmado ningún seguidor)")
@@ -287,6 +301,7 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     health = _leader_health(conn, wallet)
     from clusters import cluster_for
     cluster = None
+    cluster_sabido = False
     try:
         # (Ola 17-D) `construir=False`: esto corre en el hilo del
         # webhook, con una señal esperando. Si la cache esta fria se
@@ -294,6 +309,11 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
         # linea reconstruia el grafo de co-compra ENTERO en cada compra
         # de una ⭐.
         cluster = cluster_for(wallet, construir=False)
+        # (Ola 17-E) None puede significar "no tiene cluster" o "aun no lo
+        # se" (cache fria tras un reinicio, o enfriamiento tras fallo).
+        # Hay que distinguirlo para no dar por medido un neutro.
+        from clusters import cache_lista as _cl
+        cluster_sabido = _cl()
     except Exception as e:
         # (Ola 17-A) Antes era `pass`: si esto fallaba, f_cluster caia al
         # neutro 0.3 (6 de 20 puntos) y se presentaba como medido, sin
@@ -307,6 +327,8 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     conf = confidence_score(inf, followers, token_ctx.get("liq"), health)
     meta = meta_score(inf, cluster, health, followers,
                       token_ctx.get("liq"), _risk_pct(token_ctx))
+    token_ctx = dict(token_ctx)
+    token_ctx["_cluster_sabido"] = cluster_sabido
 
     tier = _tier(conf, meta, umbral, token_ctx.get("liq"), _risk_pct(token_ctx))
     cur = conn.execute(

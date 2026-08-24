@@ -132,8 +132,12 @@ def review_tracked(notify: bool = True) -> dict:
         if degradadas:
             conn.commit()
     except Exception as e:
+        # (Ola 17-E) Se informa del fallo para que el job pueda
+        # propagarlo: antes devolvia un dict normal y el reloj de exito
+        # se marcaba igual, escondiendo una revision que no ocurrio.
         print(f"· review_tracked falló: {e}")
-        return {"revisadas": revisadas, "degradadas": 0, "detalle": []}
+        return {"revisadas": revisadas, "degradadas": 0, "detalle": [],
+                "error": str(e)}
     finally:
         conn.close()
 
@@ -182,9 +186,13 @@ def review_text() -> str:
     out = ["📊 *Rendimiento medido de las ⭐*\n"]
     for alias, st in filas[:15]:
         ico = "🟢" if st["media"] > 0 else "🔴"
+        # (Ola 17-E) Marcar las que aún no tienen muestra suficiente:
+        # antes salían mezcladas con las demás y un "0% acierto sobre 7"
+        # se leía igual que uno sobre 30.
+        _corta = "" if st["n"] >= REVIEW_MIN_SIGNALS else " ⏳ (muestra corta)"
         out.append(f"{ico} *{alias}* — {st['wr']}% acierto · "
                    f"{st['media']:+.1f}% medio · {st['n']} señales "
-                   f"medidas a {st['horizonte']}")
+                   f"medidas a {st['horizonte']}{_corta}")
     out.append(f"\n_Se degrada con <{REVIEW_MIN_WR}% de acierto Y promedio "
                f"negativo, tras {REVIEW_MIN_SIGNALS}+ señales medidas. "
                f"Los horizontes de 1 h y 24 h ya NO se mezclan: se usa el "

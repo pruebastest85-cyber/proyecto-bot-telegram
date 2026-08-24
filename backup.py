@@ -133,6 +133,10 @@ def make_backup() -> tuple[str, str, str]:
     except sqlite3.Error:
         pass
     if filas == 0:
+        try:                       # (Ola 17-E) sin dejar el temporal
+            os.remove(path)
+        except OSError:
+            pass
         raise ValueError(
             "El backup salio VACIO (0 filas en wallets/appearances/"
             "signals). No se guarda: seria un respaldo inutil que ademas "

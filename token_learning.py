@@ -37,9 +37,17 @@ def _ensure(conn):
     conn.commit()
 
 
-def record_submission(mint: str, t: dict, risk: int,
+def record_submission(mint: str, t: dict, risk,
                       smart_count: int, elite_count: int):
-    """Guarda/actualiza la foto del token enviado. Preserva el feedback previo."""
+    """Guarda/actualiza la foto del token enviado. Preserva el feedback previo.
+
+    (Ola 17-E) `risk` puede ser None desde la Ola 17-A: `risk_score`
+    devuelve None cuando RugCheck no respondio. `int(None)` lanzaba
+    TypeError, lo tragaba el except de abajo y la fila NUNCA se
+    insertaba — asi que el 👍/👎 del usuario despues no encontraba fila
+    que actualizar y el bot contestaba "lo tendre en cuenta" sin
+    tenerlo en cuenta. La columna admite NULL en los dos motores.
+    """
     try:
         conn = get_conn()
         try:
@@ -49,7 +57,8 @@ def record_submission(mint: str, t: dict, risk: int,
                 t.get("top10_pct"), t.get("lp_locked_pct"),
                 1 if t.get("mint_auth") else 0,
                 1 if t.get("freeze_auth") else 0,
-                int(risk), int(smart_count), int(elite_count),
+                (None if risk is None else int(risk)),
+                int(smart_count), int(elite_count),
                 t.get("price_change_h24"), time.time())
             # UPSERT atomico (Ola 6 - M26): el UPDATE-luego-INSERT en dos
             # sentencias no era atomico — dos hilos con el mismo mint
@@ -87,9 +96,17 @@ def set_feedback(mint: str, good: bool) -> bool:
         conn = get_conn()
         try:
             _ensure(conn)
-            conn.execute("UPDATE submitted_tokens SET feedback=? WHERE mint=?",
-                         (1 if good else 0, mint))
+            # (Ola 17-E) Antes devolvia True aunque no existiera la fila:
+            # el bot contestaba "👍 ¡Gracias! Lo tendré en cuenta" sobre un
+            # token que nunca se habia guardado, y el aprendizaje se
+            # quedaba sesgado sin que nadie se enterara.
+            cur = conn.execute(
+                "UPDATE submitted_tokens SET feedback=? WHERE mint=?",
+                (1 if good else 0, mint))
             conn.commit()
+            if getattr(cur, "rowcount", 1) == 0:
+                print(f"· set_feedback: no hay ficha guardada de {mint[:8]}…")
+                return False
         finally:
             conn.close()
         return True

@@ -156,6 +156,14 @@ def send_db_backup():
             record("backup", e)
         except Exception:
             pass
+        # (Ola 17-E) Se PROPAGA. Antes se tragaba aqui, asi que el `raise`
+        # que la Ola 17-B puso en `backup_job` era letra muerta y
+        # `_con_reloj` marcaba `job_ts:db_backup` como EXITO aunque no
+        # existiera ninguna copia. De los 7 jobs con reloj, este es el
+        # que protege lo unico irrecuperable.
+        _fallo_backup = e
+    else:
+        _fallo_backup = None
     finally:
         # (Ola 17-C) El borrado del temporal estaba DENTRO del try, al
         # final: cualquier fallo intermedio dejaba un .db/.gz de decenas
@@ -168,6 +176,8 @@ def send_db_backup():
                 os.remove(path)
         except Exception as e2:
             print(f"· Backup: no pude borrar el temporal {path}: {e2}")
+    if _fallo_backup is not None:
+        raise _fallo_backup
 
 
 def watchdog_check():

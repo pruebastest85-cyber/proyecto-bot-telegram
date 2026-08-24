@@ -94,7 +94,14 @@ def _leer_sqlite(ruta: str) -> dict:
                 datos[t] = [dict(r) for r in src.execute(
                     f"SELECT * FROM {t}").fetchall()]
             except Exception as e:
-                print(f"  · {t}: no se pudo leer del backup ({e})")
+                # (Ola 17-E) Antes esto era una linea "·" entre las
+                # verdes y la restauracion terminaba con "✅ Restauradas"
+                # y codigo de salida 0 — habiendo perdido el historico
+                # entero. Un backup ilegible tiene que FALLAR, no
+                # felicitarte: el escenario real de esta herramienta es
+                # el dia que ya no queda otra copia.
+                print(f"  ⛔ {t}: NO SE PUDO LEER del backup ({e})")
+                datos.setdefault("_ilegibles", []).append(t)
     finally:
         src.close()
         if tmp_descomprimido:
@@ -155,9 +162,12 @@ def _insertar(conn, tabla: str, filas: list, simular: bool) -> tuple:
     for i in range(0, len(filas), LOTE):
         lote = [tuple(f.get(c) for c in cols) for f in filas[i:i + LOTE]]
         try:
-            cur = conn.executemany(sql, lote)
-            puestas += (cur.rowcount if cur.rowcount and cur.rowcount > 0
-                        else len(lote))
+            conn.executemany(sql, lote)
+            # (Ola 17-E) NO se lee `rowcount`: con execute_batch (Postgres)
+            # se refiere al ultimo grupo, no al lote, asi que el resumen
+            # decia cosas como "375.000 filas omitidas" sobre una
+            # restauracion perfecta. Se cuenta lo PROCESADO y se dice.
+            puestas += len(lote)
             conn.commit()
         except Exception as e:
             # Un lote malo no debe tumbar la restauración entera: se
@@ -172,6 +182,46 @@ def _insertar(conn, tabla: str, filas: list, simular: bool) -> tuple:
                     pass
             conn.commit()
     return (puestas, len(filas) - puestas)
+
+
+# (Ola 17-E) Estas tablas NO las crea `get_conn()`: las crea cada modulo
+# la primera vez que se usa. Al restaurar sobre una base recien creada no
+# existian todavia, asi que `_columnas_reales` devolvia vacio y las filas
+# se descartaban con un discreto "no existe en esta base, omitida" — y son
+# justo las cinco que la Ola 17-C anadio al backup por valiosas: `trades`
+# ("lo mas valioso" segun migrate_to_pg), la investigacion de identidad y
+# fondeo pagada con creditos de Helius, y el aprendizaje de tokens.
+_MODULOS_TABLA = {
+    "trades": "trades_store",
+    "wallet_identity": "wallet_identity",
+    "wallet_funding": "wallet_funding",
+    "submitted_tokens": "token_learning",
+    "errors": "errores",
+}
+# `paper_fills` y `radar_tokens` NO van aqui: las crea get_conn() con el
+# resto del esquema, asi que siempre existen.
+
+
+def _crear_tablas_perezosas(conn, tablas):
+    """Asegura el esquema de las tablas que crea cada modulo al usarse."""
+    creadas = []
+    for t in tablas:
+        mod = _MODULOS_TABLA.get(t)
+        if not mod:
+            continue
+        if _columnas_reales(conn, t):
+            continue                       # ya existe
+        try:
+            m = __import__(mod)
+            ens = getattr(m, "_ensure", None)
+            if callable(ens):
+                ens(conn)
+                creadas.append(t)
+        except Exception as e:
+            print(f"  · {t}: no pude preparar su esquema ({e})")
+    if creadas:
+        print(f"  🔧 Tablas preparadas antes de restaurar: "
+              f"{', '.join(creadas)}")
 
 
 # Tablas con `id` autonumerico en Postgres. Ver _resetear_secuencias.
@@ -216,14 +266,35 @@ def restaurar(ruta: str, solo=None, simular=False) -> dict:
         return {}
     print(f"📥 Leyendo {ruta}"
           + ("  (SIMULACRO, no se escribe nada)" if simular else ""))
-    if _es_sqlite(ruta):
-        print("   formato: SQLite (.db)")
-        datos = _leer_sqlite(ruta)
-    else:
-        print("   formato: JSON" + (" comprimido" if ruta.endswith(".gz")
-                                    else ""))
-        with _abrir(ruta) as fh:
-            datos = json.load(fh)
+    # (Ola 17-E) Los fallos de lectura salen con un mensaje en cristiano
+    # y codigo de salida distinto de 0, NO con un traceback en crudo ni,
+    # peor, con un "✅ Restauradas" enganoso.
+    try:
+        if _es_sqlite(ruta):
+            print("   formato: SQLite (.db)")
+            datos = _leer_sqlite(ruta)
+        else:
+            print("   formato: JSON" + (" comprimido" if ruta.endswith(".gz")
+                                        else ""))
+            with _abrir(ruta) as fh:
+                datos = json.load(fh)
+    except (EOFError, gzip.BadGzipFile, OSError) as e:
+        print(f"\n⛔ El archivo esta INCOMPLETO o DANADO y no se puede "
+              f"abrir: {e}")
+        print("   No se ha tocado la base. Prueba con otra copia de la "
+              "carpeta backups/.")
+        raise SystemExit(2)
+    except json.JSONDecodeError as e:
+        print(f"\n⛔ El backup JSON esta DANADO: {e}")
+        print("   No se ha tocado la base. Prueba con otra copia.")
+        raise SystemExit(2)
+    except Exception as e:
+        # sqlite3.DatabaseError ("database disk image is malformed") y
+        # cualquier otra sorpresa de lectura.
+        print(f"\n⛔ No se pudo leer el backup: {type(e).__name__}: {e}")
+        print("   No se ha tocado la base. Prueba con otra copia de la "
+              "carpeta backups/.")
+        raise SystemExit(2)
 
     if not isinstance(datos, dict):
         print("El backup no tiene el formato esperado.")
@@ -236,9 +307,20 @@ def restaurar(ruta: str, solo=None, simular=False) -> dict:
         pedidas = {x.strip() for x in solo.split(",") if x.strip()}
         tablas = [t for t in tablas if t in pedidas]
 
+    ilegibles = datos.pop("_ilegibles", [])
+    if ilegibles:
+        print(f"\n⛔ El backup esta DAÑADO: no se pudieron leer "
+              f"{len(ilegibles)} tabla(s): {', '.join(ilegibles)}")
+        if not simular:
+            print("   NO se restaura nada. Prueba con otra copia de "
+                  "backups/ antes de tocar la base.")
+            raise SystemExit(2)
+        print("   (simulacro: se sigue solo para que veas el resto)")
+
     conn = get_conn()
     resumen = {}
     try:
+        _crear_tablas_perezosas(conn, tablas)
         for t in tablas:
             filas = datos.get(t)
             if isinstance(filas, dict) and "_error" in filas:
@@ -248,7 +330,7 @@ def restaurar(ruta: str, solo=None, simular=False) -> dict:
                 continue
             puestas, fuera = _insertar(conn, t, filas, simular)
             resumen[t] = puestas
-            print(f"  {t:<18} {puestas:>8} filas"
+            print(f"  {t:<18} {puestas:>8} filas procesadas"
                   + (f"  ({fuera} omitidas)" if fuera else ""))
         if not simular:
             _resetear_secuencias(conn)
@@ -258,6 +340,8 @@ def restaurar(ruta: str, solo=None, simular=False) -> dict:
     total = sum(resumen.values())
     print(f"\n{'Simulacro:' if simular else '✅ Restauradas'} "
           f"{total} filas en {len(resumen)} tablas")
+    print("_(filas PROCESADAS: las que ya existian se ignoran por "
+          "ON CONFLICT, asi que las de la base pueden ser menos)_")
     return resumen
 
 

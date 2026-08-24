@@ -155,6 +155,14 @@ def wallet_dna_text(address: str) -> str | None:
             # ¿lidera o sigue dentro del cluster?
             me = next((o for o in c.get("order", [])
                        if o["wallet"] == address), None)
+            if me is None and c.get("orden_recortado"):
+                # (Ola 17-E) Esta billetera quedo fuera del calculo de
+                # liderazgo por el tope de miembros. Antes esta ficha
+                # simplemente NO decia nada de su rol, sin explicar por
+                # que: parecia que el bot no tenia el dato.
+                lines.append("   ⚪ Su posición en el cluster no está "
+                             "calculada (el grupo es grande y el orden se "
+                             "calcula sobre las de más apariciones)")
             if me is not None:
                 if c.get("leader_wallet") == address:
                     # (Ola 17-A) Se dice sobre cuántas comparaciones va,

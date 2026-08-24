@@ -40,15 +40,24 @@ def _score_riesgo(t):
         r += 35
     if t.get("freeze_auth"):
         r += 25
-    top10 = t.get("top10_pct")
+    # (Ola 17-E) Los valores que llegan de una API externa pueden ser
+    # basura (texto, negativos). Antes un top10_pct de "-50" daba un
+    # "Riesgo -25/100", imposible de interpretar, y un texto reventaba.
+    try:
+        top10 = float(t["top10_pct"]) if t.get("top10_pct") is not None else None
+    except (TypeError, ValueError):
+        top10 = None
     if top10 is not None:
-        r += min(40, top10 * 0.5)
-    lp = t.get("lp_locked_pct")
+        r += min(40, max(0.0, top10) * 0.5)
+    try:
+        lp = float(t["lp_locked_pct"]) if t.get("lp_locked_pct") is not None else None
+    except (TypeError, ValueError):
+        lp = None
     if lp is not None and lp < 50:
         r += 20
     if t.get("risks"):
         r += 10 * len(t["risks"])
-    return min(100, round(r))
+    return max(0, min(100, round(r)))
 
 
 def token_dna_text(mint: str) -> str:
