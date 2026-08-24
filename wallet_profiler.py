@@ -79,7 +79,11 @@ def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
                 time.sleep(15)
                 r = requests.get(url, params=params, timeout=30)
             r.raise_for_status()
+            # (Ola 17-B) 100 creditos por llamada, igual que en
+            # wallet_analyzer: el perfilado es el mayor consumidor y era
+            # invisible para el freno de presupuesto.
             _api_rec("helius")
+            _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
             batch = r.json()
         except requests.RequestException as e:
             print(f"  · Error Helius en perfil: {e}")

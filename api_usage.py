@@ -111,13 +111,33 @@ def flush() -> None:
                     "DataError", "ProgrammingError", "NumericValueOutOfRange",
                     "InvalidTextRepresentation")
                 if _perm or "invalid input syntax" in str(e).lower():
-                    print(f"· api_usage: clave {api} con valor inválido; "
-                          f"la saneo y sigo ({e})")
+                    # (Ola 17-B) Antes esto hacía set_setting(clave, n), o
+                    # sea REEMPLAZABA el acumulado del día por el
+                    # incremento pendiente (25 o menos). Como de aquí sale
+                    # `api_helius_credits_*`, que alimenta el freno del
+                    # 85%, un solo ProgrammingError (que en psycopg2 cubre
+                    # también "tabla inexistente" o "sin permisos") podía
+                    # borrar el consumo del día y desarmar el freno.
+                    # Ahora se RESCATA lo que se pueda del valor roto y se
+                    # guarda copia del original antes de tocarlo.
                     try:
-                        from db import set_setting
-                        set_setting(conn, _key(api), str(n))
-                    except Exception:
-                        pass
+                        from db import get_setting, set_setting
+                        _viejo = get_setting(conn, _key(api), None)
+                        _num = 0.0
+                        try:
+                            _num = float(str(_viejo).strip())
+                        except (TypeError, ValueError):
+                            _num = 0.0
+                        if _viejo is not None and _num == 0.0:
+                            # No era un número: se conserva por si acaso.
+                            set_setting(conn, _key(api) + "_roto",
+                                        str(_viejo)[:200])
+                        set_setting(conn, _key(api), str(int(_num) + int(n)))
+                        print(f"· api_usage: clave {api} con valor inválido "
+                              f"({_viejo!r}); rescatados {int(_num)} y "
+                              f"sumados {int(n)} ({e})")
+                    except Exception as e2:
+                        print(f"· api_usage: no pude sanear {api}: {e2}")
                 else:
                     pendientes[api] = n
                     print(f"· api_usage: no pude sumar {api} ({e})")

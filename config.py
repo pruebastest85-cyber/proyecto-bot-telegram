@@ -142,6 +142,10 @@ GECKO_DELAY = 2.5                 # segundos entre requests a GeckoTerminal
 USE_RPC_HISTORY = os.getenv("USE_RPC_HISTORY", "1") == "1"
 
 HELIUS_CREDITS_PER_CALL = _int("HELIUS_CREDITS_PER_CALL", 100)
+# (Ola 17-B) Coste de una llamada RPC estandar (getTokenAccountsByOwner,
+# getAsset...). Helius cobra ~10 creditos por estas; se nombra aqui para
+# que el contador de creditos deje de ignorarlas.
+HELIUS_CREDITS_RPC = _int("HELIUS_CREDITS_RPC", 10)
 HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 10_000_000)
 HELIUS_STOP_AT_PCT = _int("HELIUS_STOP_AT_PCT", 85)   # pausar al 85%
 

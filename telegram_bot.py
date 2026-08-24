@@ -57,6 +57,25 @@ cycle_lock = threading.Lock()
 
 # Acciones del agente pendientes de confirmación (una por usuario)
 PENDING_ACTIONS: dict[int, dict] = {}
+# (Ola 17-B) Propuestas YA consumidas: {(user_id, tok): (estado, ts)}.
+# `PENDING_ACTIONS.pop` vacia el hueco en la PRIMERA pulsacion; con
+# concurrent_updates(8) el segundo toque del mismo boton (habitual en
+# movil, y Telegram reintenta callbacks) encontraba None y editaba el
+# mensaje con "⌛ Propuesta expirada (el bot se reinicio). Vuelve a
+# pedirla" — encima de una accion que SI se estaba ejecutando, e
+# invitando a repetirla. Con esto se distingue "nunca existio" de "ya
+# la consumi yo mismo hace un momento".
+ACCIONES_CONSUMIDAS: dict[tuple, tuple] = {}
+_CONSUMIDAS_TTL = 900
+
+
+def _marcar_consumida(uid: int, tok: str, estado: str):
+    import time as _tt
+    ahora = _tt.time()
+    for k, v in list(ACCIONES_CONSUMIDAS.items()):
+        if ahora - v[1] > _CONSUMIDAS_TTL:
+            ACCIONES_CONSUMIDAS.pop(k, None)
+    ACCIONES_CONSUMIDAS[(uid, tok)] = (estado, ahora)
 
 # Usuarios a los que el hub les pidió un dato (address o pregunta).
 # user_id -> nombre del comando ("perfil", "ficha", "preguntar"…)
@@ -511,6 +530,7 @@ async def backup_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(send_db_backup)
     except Exception as e:
         print(f"· backup_job falló: {e}")
+        raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
 
 async def watchdog_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -535,6 +555,7 @@ async def salud_job(ctx: ContextTypes.DEFAULT_TYPE):
             await asyncio.to_thread(record, "salud_job", e)
         except Exception:
             pass
+        raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
 
 async def performance_review_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -545,20 +566,29 @@ async def performance_review_job(ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(review_tracked)
     except Exception as e:
         print(f"· performance_review_job falló: {e}")
+        raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
 
 async def learning_job(ctx: ContextTypes.DEFAULT_TYPE):
+    # (Ola 17-B) Los dos aprendizajes son independientes: si uno falla,
+    # el otro se intenta igual, pero al final se propaga el fallo para
+    # que `_con_reloj` NO marque el reloj de éxito.
+    _fallo = None
     try:
         from maintenance import weekly_learning
         await asyncio.to_thread(weekly_learning)
     except Exception as e:
         print(f"· learning_job falló: {e}")
+        _fallo = e
     # Aprendizaje de qué tokens valen la pena (independiente del de señales)
     try:
         from token_learning import analyze_submitted
         await asyncio.to_thread(analyze_submitted)
     except Exception as e:
         print(f"· aprendizaje de tokens falló: {e}")
+        _fallo = _fallo or e
+    if _fallo is not None:
+        raise _fallo
 
 
 async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -602,6 +632,7 @@ async def hypotheses_job(ctx: ContextTypes.DEFAULT_TYPE):
             await asyncio.to_thread(record, "hypotheses_job", e)
         except Exception:
             pass
+        raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
 
 async def paper_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -671,6 +702,7 @@ async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt)
     except Exception as e:
         print(f"· post-mortem semanal falló: {e}")
+        raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
 
 async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -939,6 +971,14 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         _pend = PENDING_ACTIONS.pop(q.from_user.id, None)
         accion = _pend.get("accion") if _pend else None
+        _ya = ACCIONES_CONSUMIDAS.get((q.from_user.id, _tok_msg))
+        if accion is None and _ya and data.startswith("agc:y"):
+            # (Ola 17-B) Doble toque en el MISMO botón: la primera
+            # pulsación ya se llevó la acción. No decir "expiró" ni
+            # invitar a repetirla — se ejecutaría dos veces.
+            await q.answer("Ya la estoy ejecutando" if _ya[0] == "curso"
+                           else "Ya se ejecutó")
+            return
         if accion is None and data.startswith("agc:y"):
             # (Ola 16) El bot se reinició con la propuesta pendiente (vive
             # en memoria): antes decía "❌ Acción cancelada", como si el
@@ -952,6 +992,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             return
         if data.startswith("agc:n") or not accion:
+            _marcar_consumida(q.from_user.id, _tok_msg, "hecha")
             await q.answer("Cancelado")
             try:
                 await q.edit_message_text("❌ Acción cancelada.")
@@ -968,8 +1009,12 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     pass
             return
         await q.answer("Ejecutando…")
+        _marcar_consumida(q.from_user.id, _tok_msg, "curso")
         from ai_agent import execute_action
-        resultado = await asyncio.to_thread(execute_action, accion)
+        try:
+            resultado = await asyncio.to_thread(execute_action, accion)
+        finally:
+            _marcar_consumida(q.from_user.id, _tok_msg, "hecha")
         try:
             await q.edit_message_text(f"✅ {resultado}")
         except Exception:
@@ -2062,8 +2107,37 @@ def main():
             return min(max(defecto, 60), 600)
         return int(min(falta, intervalo))
 
-    def _con_reloj(nombre: str, fn):
+    # (Ola 17-B) Cada cuánto se COMPRUEBA si un job toca. Ver _con_reloj.
+    _SONDEO_MAX = 1800
+
+    def _con_reloj(nombre: str, fn, intervalo: int | None = None):
+        # (Ola 17-B, auditoría 4) El reloj persistente calculaba bien
+        # cuánto FALTABA, pero lo metía en un único `first` de horas o
+        # días. El supervisor reinicia el bot con cada commit, y cada
+        # reinicio volvía a programar ese `first` desde cero: un job
+        # cuyo `first` es más largo que el tiempo entre reinicios NO
+        # CORRE JAMÁS. Medido en la base del dueño: `post_mortem` con
+        # `job_ts` de 140,8 h y SIN `job_intento` — o sea, ni un intento
+        # en 6 días, cuando debía correr cada 7.
+        # Ahora el job se registra con un sondeo corto y es este envoltorio
+        # el que decide si toca. Un reinicio ya no reinicia nada: el
+        # tiempo lo lleva la base, no el proceso.
         async def _w(ctx):
+            if intervalo:
+                try:
+                    from db import get_setting
+                    _c0 = get_conn()
+                    try:
+                        _last = max(
+                            float(get_setting(_c0, f"job_ts:{nombre}", 0) or 0),
+                            float(get_setting(_c0, f"job_intento:{nombre}", 0)
+                                  or 0))
+                    finally:
+                        _c0.close()
+                    if _last and (_t.time() - _last) < intervalo:
+                        return                     # aún no toca
+                except Exception:
+                    pass       # si no se puede leer el reloj, se ejecuta
             # (Ola 15 - B3, corregido en Ola 16) DOS relojes:
             #   job_intento:<n>  → SIEMPRE, haya ido bien o mal.
             #   job_ts:<n>       → solo cuando el job terminó BIEN.
@@ -2074,32 +2148,56 @@ def main():
             # `_reloj_first` usa el más reciente de los dos, así que un
             # fallo ya no adelanta nada, y el éxito sigue siendo lo que
             # marca el ritmo real.
-            _ok = False
+            # (Ola 17-B) Antes, 6 de los 7 jobs envueltos se tragaban su
+            # propia excepción, así que `_ok` era SIEMPRE True y `job_ts`
+            # se marcaba "terminó bien" aunque el backup o el aprendizaje
+            # hubieran reventado por dentro. Ahora esos jobs propagan el
+            # fallo (`raise`) y aquí se captura: el reloj de éxito no se
+            # marca, y la excepción no sale al job_queue.
+            _ok, _err = False, None
             try:
                 await fn(ctx)
                 _ok = True
+            except Exception as e:
+                _err = e
             finally:
-                try:
-                    from db import set_setting
-                    _c = get_conn()
+                # El marcado va a un HILO: `get_conn()` en el bucle
+                # asíncrono congela el bot entero mientras dura, y esto
+                # corre en cada tick de los 7 jobs, falle o no.
+                def _marcar(ok):
                     try:
-                        set_setting(_c, f"job_intento:{nombre}", _t.time())
-                        if _ok:
-                            set_setting(_c, f"job_ts:{nombre}", _t.time())
-                    finally:
-                        _c.close()
+                        from db import set_setting
+                        _c = get_conn()
+                        try:
+                            set_setting(_c, f"job_intento:{nombre}",
+                                        _t.time())
+                            if ok:
+                                set_setting(_c, f"job_ts:{nombre}",
+                                            _t.time())
+                        finally:
+                            _c.close()
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.to_thread(_marcar, _ok)
                 except Exception:
                     pass
                 if not _ok:
-                    print(f"· {nombre}: falló (el reloj de éxito no se "
-                          f"marca; el ritmo lo fija el intento)")
+                    print(f"· {nombre}: falló ({_err}) — el reloj de éxito "
+                          f"no se marca; el ritmo lo fija el intento")
+                    try:
+                        from errores import record as _rec
+                        await asyncio.to_thread(_rec, f"job:{nombre}", _err)
+                    except Exception:
+                        pass
         return _w
 
     # Ciclo automático: cada N horas DE VERDAD (reloj persistente)
+    _iv = int(AUTO_CYCLE_HOURS * 3600)
     app.job_queue.run_repeating(
-        _con_reloj("auto_cycle", auto_cycle_job),
-        interval=AUTO_CYCLE_HOURS * 3600,
-        first=_reloj_first("auto_cycle", AUTO_CYCLE_HOURS * 3600, 60),
+        _con_reloj("auto_cycle", auto_cycle_job, _iv),
+        interval=min(_iv, _SONDEO_MAX),
+        first=min(_reloj_first("auto_cycle", _iv, 60), _SONDEO_MAX),
         name="auto_cycle",
     )
     # Track record: mide el resultado de las señales cada 15 min
@@ -2125,43 +2223,48 @@ def main():
     )
     # Motor de hipótesis: descubrimiento autónomo cada 12 h
     app.job_queue.run_repeating(
-        _con_reloj("hypotheses", hypotheses_job),
-        interval=12 * 3600,
-        first=_reloj_first("hypotheses", 12 * 3600, 1800),
+        _con_reloj("hypotheses", hypotheses_job, 12 * 3600),
+        interval=min(12 * 3600, _SONDEO_MAX),
+        first=min(_reloj_first("hypotheses", 12 * 3600, 1800), _SONDEO_MAX),
         name="hypotheses",
     )
     # Backup diario de la base + watchdog del webhook + aprendizaje semanal
-    app.job_queue.run_repeating(_con_reloj("db_backup", backup_job),
-                                interval=86400,
-                                first=_reloj_first("db_backup", 86400, 7200),
-                                name="db_backup")
+    app.job_queue.run_repeating(
+        _con_reloj("db_backup", backup_job, 86400),
+        interval=min(86400, _SONDEO_MAX),
+        first=min(_reloj_first("db_backup", 86400, 7200), _SONDEO_MAX),
+        name="db_backup")
     app.job_queue.run_repeating(watchdog_job, interval=3600, first=1800,
                                 name="watchdog")
     app.job_queue.run_repeating(
-        _con_reloj("weekly_learning", learning_job),
-        interval=7 * 86400,
-        first=_reloj_first("weekly_learning", 7 * 86400, 3 * 86400),
+        _con_reloj("weekly_learning", learning_job, 7 * 86400),
+        interval=min(7 * 86400, _SONDEO_MAX),
+        first=min(_reloj_first("weekly_learning", 7 * 86400, 3 * 86400),
+                  _SONDEO_MAX),
         name="weekly_learning")
     # Radar de pares recién nacidos (Ola 14): cada 15 min
     app.job_queue.run_repeating(radar_job, interval=900, first=600,
                                 name="radar")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
-        _con_reloj("post_mortem", post_mortem_job),
-        interval=7 * 86400,
-        first=_reloj_first("post_mortem", 7 * 86400, 4 * 86400),
+        _con_reloj("post_mortem", post_mortem_job, 7 * 86400),
+        interval=min(7 * 86400, _SONDEO_MAX),
+        first=min(_reloj_first("post_mortem", 7 * 86400, 4 * 86400),
+                  _SONDEO_MAX),
         name="post_mortem")
     # Cierre del ciclo: el rendimiento medido degrada ⭐ cada 24 h
     app.job_queue.run_repeating(
-        _con_reloj("performance_review", performance_review_job),
-        interval=86400,
-        first=_reloj_first("performance_review", 86400, 3600),
+        _con_reloj("performance_review", performance_review_job, 86400),
+        interval=min(86400, _SONDEO_MAX),
+        first=min(_reloj_first("performance_review", 86400, 3600),
+                  _SONDEO_MAX),
         name="performance_review")
     # Autodiagnóstico cada 6 h (solo avisa ante problemas críticos)
-    app.job_queue.run_repeating(_con_reloj("salud", salud_job),
-                                interval=6 * 3600,
-                                first=_reloj_first("salud", 6 * 3600, 900),
-                                name="salud")
+    app.job_queue.run_repeating(
+        _con_reloj("salud", salud_job, 6 * 3600),
+        interval=min(6 * 3600, _SONDEO_MAX),
+        first=min(_reloj_first("salud", 6 * 3600, 900), _SONDEO_MAX),
+        name="salud")
     # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
     app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
                                 name="sync_webhook")

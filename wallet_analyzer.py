@@ -56,7 +56,13 @@ def fetch_parsed_txs(address: str, before: str | None = None,
             time.sleep(15)
             r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()
+        # (Ola 17-B) La Enhanced Transactions API cuesta 100 CREDITOS por
+        # llamada (config.HELIUS_CREDITS_PER_CALL). Antes solo se apuntaba
+        # en el contador de LLAMADAS, asi que el freno del 85% no veia el
+        # gasto mas caro del sistema: la base del dueno tenia 535.930
+        # creditos contados frente a ~809.100 invisibles.
         _api_rec("helius")
+        _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
         data = r.json()
         return data if isinstance(data, list) else []
     except requests.RequestException as e:

@@ -69,7 +69,10 @@ def get_token_balances(address: str) -> dict[str, float]:
                       "params": [address, {"programId": program},
                                  {"encoding": "jsonParsed"}]})
             time.sleep(config.HELIUS_DELAY)
+            # (Ola 17-B) Llamada RPC estandar: ~10 creditos. Tampoco se
+            # contaba, y son 2 por billetera (SPL + Token-2022).
             _api_rec("helius")
+            _api_rec("helius_credits", config.HELIUS_CREDITS_RPC)
             accts = (r.json().get("result") or {}).get("value") or []
         except (requests.RequestException, ValueError, KeyError, TypeError):
             accts = []

@@ -738,8 +738,29 @@ def describe_action(action: dict) -> str:
     return tool
 
 
+# (Ola 17-B) Acciones que tardan MINUTOS U HORAS (descubrimiento +
+# análisis con Helius). No pueden ir bajo _AGENTE_LOCK: ese candado
+# existe para serializar la IA local y proteger la bitácora, y mientras
+# lo retenía un ciclo completo, TODO mensaje al chat contestaba
+# "⏳ Estoy contestando tu pregunta anterior" — una respuesta falsa (no
+# había ninguna pregunta en curso) durante todo el ciclo. Van con su
+# propio candado, que sí dice la verdad si ya hay uno corriendo.
+_ACCIONES_LARGAS = {"correr_ciclo"}
+_LARGA_LOCK = threading.Lock()
+
+
 def execute_action(action: dict) -> str:
     """Ejecuta una acción de modificación ya confirmada por el usuario."""
+    tool = action.get("tool")
+    if tool in _ACCIONES_LARGAS:
+        if not _LARGA_LOCK.acquire(blocking=False):
+            return ("⏳ Ya hay un ciclo completo en marcha (tarda varios "
+                    "minutos). Cuando termine te aviso; mientras tanto el "
+                    "chat sigue funcionando normal.")
+        try:
+            return _execute_action_serializado(action)
+        finally:
+            _LARGA_LOCK.release()
     # (Ola 16) Mismo candado: ajustes_log es leer-modificar-escribir y dos
     # confirmaciones simultáneas perdían una entrada de la bitácora.
     with _AGENTE_LOCK:
