@@ -288,7 +288,12 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
     from clusters import cluster_for
     cluster = None
     try:
-        cluster = cluster_for(wallet)
+        # (Ola 17-D) `construir=False`: esto corre en el hilo del
+        # webhook, con una señal esperando. Si la cache esta fria se
+        # devuelve None y la proxima señal ya la tendra; antes esta
+        # linea reconstruia el grafo de co-compra ENTERO en cada compra
+        # de una ⭐.
+        cluster = cluster_for(wallet, construir=False)
     except Exception as e:
         # (Ola 17-A) Antes era `pass`: si esto fallaba, f_cluster caia al
         # neutro 0.3 (6 de 20 puntos) y se presentaba como medido, sin

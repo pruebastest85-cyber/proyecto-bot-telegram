@@ -608,6 +608,15 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
 async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
     """Evalúa predicciones vencidas y rellena rendimiento del token.
     Fuera del webhook: aquí sí puede hacer llamadas de red sin bloquear."""
+    # (Ola 17-D) Precalentar la caché de clusters AQUÍ, en un hilo y cada
+    # 10 min (la caché dura 30), para que el camino caliente del webhook
+    # —que ahora pide `construir=False`— siempre la encuentre lista y no
+    # tenga que construir el grafo de co-compra con una señal esperando.
+    try:
+        from clusters import precalentar
+        await asyncio.to_thread(precalentar)
+    except Exception as e:
+        print(f"· No pude precalentar los clusters: {e}")
     try:
         from predictions import run_maintenance
         await asyncio.to_thread(run_maintenance)
