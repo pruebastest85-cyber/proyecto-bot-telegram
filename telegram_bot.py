@@ -1243,6 +1243,112 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(texto, parse_mode="Markdown")
 
 
+# (Ola 18-B) Modo COPIA PURA del paper.
+#
+# La simulación arrastraba once reglas propias con valor por defecto que
+# el dueño nunca configuró: take-profit, stop-loss, reloj, enfriamiento,
+# tope de posiciones, hold extra con trailing, y un A/B que dejaba la
+# salida en manos de la IA en la mitad de las posiciones. Eso NO es
+# copiar: es otra estrategia montada encima. Y su objetivo declarado es
+# medir la suya — comprar cuando la ⭐ compra, vender cuando vende.
+#
+# Estos ajustes se escriben en `settings` y NO había forma de cambiarlos
+# desde el bot. Escribirlos desde fuera significaría abrir la base que el
+# proceso tiene viva, y el histórico es lo único irreversible del
+# sistema: se hace desde dentro, con la conexión de siempre.
+#
+# `on` guarda los valores anteriores y aplica los nuevos; `off` restaura
+# EXACTAMENTE lo que había. Reversible de verdad, no "vuelve al defecto".
+_COPIA_PURA = {
+    "paper_tp_pct": "999999",         # no cortar las ganadoras
+    "paper_sl_pct": "999999",         # no vender en el suelo
+    "paper_timeout_h": "999999",      # no cerrar por reloj
+    "paper_reentrada_h": "0",         # si la ⭐ recompra, tú también
+    "paper_max_abiertas": "50",       # no descartar señales en los picos
+    "paper_parcial_min_pct": "0",     # copiar también las ventas pequeñas
+    "paper_total_pct": "100",         # cerrar solo cuando ella cierra
+    "paper_hold_extra": "0",          # no quedarse dentro tras su venta
+    "ia_local_activa": "0",           # que la IA no decida las salidas
+}
+
+
+@solo_admin
+async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enciende o apaga el modo copia pura del paper trading.
+
+    /copiapura on   → el paper copia y nada más
+    /copiapura off  → restaura los valores que había antes
+    /copiapura      → dice en qué modo está
+    """
+    import json as _json
+    from db import get_setting, set_setting
+
+    def _trabajo(accion: str) -> str:
+        conn = get_conn()
+        try:
+            previo_raw = get_setting(conn, "copia_pura_previo", None)
+            activo = bool(previo_raw)
+            if not accion:
+                if activo:
+                    return ("🧬 *Copia pura: ENCENDIDA*\nEl paper compra "
+                            "cuando la ⭐ compra y vende cuando ella vende. "
+                            "Sin TP, sin SL, sin reloj, sin hold extra.\n"
+                            "Apagar: `/copiapura off`")
+                return ("🧬 *Copia pura: apagada*\nEl paper aplica sus "
+                        "reglas propias (TP +100%, SL −50%, reloj de 48 h, "
+                        "hold extra, y la IA decide la mitad de las "
+                        "salidas).\nEncender: `/copiapura on`")
+            if accion == "on":
+                if activo:
+                    return "🧬 Ya estaba encendida. `/copiapura off` la quita."
+                previo = {k: get_setting(conn, k, None)
+                          for k in _COPIA_PURA}
+                set_setting(conn, "copia_pura_previo",
+                            _json.dumps(previo, ensure_ascii=False))
+                for k, v in _COPIA_PURA.items():
+                    set_setting(conn, k, v)
+                conn.commit()
+                return ("🧬 *Copia pura ENCENDIDA.*\n\nEl paper ya solo hace "
+                        "una cosa: entra cuando la ⭐ entra y sale cuando "
+                        "ella sale.\n\n"
+                        "• take-profit, stop-loss y reloj: apagados\n"
+                        "• hold extra y trailing: apagados\n"
+                        "• enfriamiento por token: quitado\n"
+                        "• tope de posiciones: 50\n"
+                        "• la IA ya no decide salidas\n\n"
+                        "_Los rugs siguen cerrándose: esa vía no depende "
+                        "del reloj._\n\n"
+                        "⚠️ Lo cerrado ANTES se midió con las reglas "
+                        "viejas. Para comparar, separa los dos periodos.")
+            if accion == "off":
+                if not activo:
+                    return "🧬 Ya estaba apagada."
+                try:
+                    previo = _json.loads(previo_raw)
+                except (TypeError, ValueError):
+                    return ("⚠️ No pude leer los valores anteriores; no "
+                            "toco nada para no dejarlo a medias.")
+                for k, v in previo.items():
+                    if k in _COPIA_PURA:
+                        set_setting(conn, k, v if v is not None else "")
+                set_setting(conn, "copia_pura_previo", "")
+                conn.commit()
+                return ("🧬 *Copia pura apagada.* Restaurados los valores "
+                        "que había antes de encenderla.")
+            return "Uso: `/copiapura on` · `/copiapura off` · `/copiapura`"
+        finally:
+            conn.close()
+
+    accion = (ctx.args[0].strip().lower() if ctx.args else "")
+    if accion and accion not in ("on", "off"):
+        await update.message.reply_text(
+            "Uso: `/copiapura on` · `/copiapura off` · `/copiapura`",
+            parse_mode="Markdown")
+        return
+    txt = await asyncio.to_thread(_trabajo, accion)
+    await _send_md(update.message.chat, txt)
+
+
 @solo_admin
 async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Cuántas billeteras del ranking pueden alertar. /topalertas [n]
@@ -2114,6 +2220,7 @@ def main():
     app.add_handler(CommandHandler("saldos", cmd_saldos))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("topalertas", cmd_top_alertas))
+    app.add_handler(CommandHandler("copiapura", cmd_copia_pura))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente
