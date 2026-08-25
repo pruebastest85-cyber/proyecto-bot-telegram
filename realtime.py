@@ -81,11 +81,18 @@ MIN_SIGNAL_SOL_VENTA = 0.05
 CONSENSUS_WINDOW_MIN = 45
 
 
-def tg_send(text: str, buttons: list | None = None):
+def tg_send(text: str, buttons: list | None = None) -> bool:
     """Envía mensaje al admin vía HTTP API (seguro desde cualquier hilo).
-    buttons: lista de filas [[(texto, callback_data), …], …]."""
+    buttons: lista de filas [[(texto, callback_data), …], …].
+
+    (Ola 17-L, 25/8) Devuelve True SOLO si Telegram aceptó el mensaje.
+    Antes no devolvía nada y un rechazo (400 por Markdown roto, 429 por
+    exceso de ritmo) se quedaba en un `print`: la alerta se perdía, no
+    quedaba rastro en `/errores`, y quien llamaba marcaba `alerted=1`
+    igual — o sea que la base decía "enviada" sin que hubiera llegado.
+    Es la misma clase de fallo silencioso de la ola 17-I."""
     if not (BOT_TOKEN and ADMIN_ID):
-        return
+        return False
     payload = {"chat_id": int(ADMIN_ID), "text": text,
                "parse_mode": "Markdown",
                "disable_web_page_preview": True}
@@ -98,16 +105,26 @@ def tg_send(text: str, buttons: list | None = None):
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json=payload,
             timeout=15)
-        if not r.ok:
-            # Markdown roto (simbolos con *_`[ ) u otro 400: reintentar en
-            # texto plano para NO perder la alerta en silencio.
-            payload.pop("parse_mode", None)
-            r = requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json=payload, timeout=15)
-            if not r.ok:
-                print(f"· Alerta TG rechazada ({r.status_code}): "
-                      f"{r.text[:200]}")
+        if r.ok:
+            return True
+        # Markdown roto (simbolos con *_`[ ) u otro 400: reintentar en
+        # texto plano para NO perder la alerta en silencio.
+        payload.pop("parse_mode", None)
+        r = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json=payload, timeout=15)
+        if r.ok:
+            return True
+        print(f"· Alerta TG rechazada ({r.status_code}): "
+              f"{r.text[:200]}")
+        try:
+            from errores import record
+            record("telegram_send",
+                   RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}"),
+                   "rechazado tras reintento en texto plano")
+        except Exception:
+            pass
+        return False
     except requests.RequestException as e:
         print(f"· No se pudo enviar alerta TG: {e}")
         try:
@@ -115,6 +132,7 @@ def tg_send(text: str, buttons: list | None = None):
             record("telegram_send", e)
         except Exception:
             pass
+        return False
 
 
 def tg_send_photo(photo_bytes: bytes, caption: str = ""):
@@ -1145,7 +1163,7 @@ def _proc(txs: list[dict], conn):
         bar = _bar(score_sig)
         salida_txt = _plan_salida(w) if es_compra else ""
         div = "━━━━━━━━━━━━━━"
-        tg_send(
+        _entregada = tg_send(
             f"{side_icon} *{side_txt}* de billetera ⭐{cons_txt}\n"
             f"{div}\n"
             f"💎 *{t['symbol']}*\n`{trade['mint']}`\n\n"
@@ -1168,10 +1186,21 @@ def _proc(txs: list[dict], conn):
         print(f"📡 Señal {trade['side']}: {t['symbol']} "
               f"por {trade['wallet'][:8]}")
 
-        # Marca la señal como alertada (para el cap de máximos por señal)
-        conn.execute("UPDATE signals SET alerted=1 WHERE signature=?",
-                     (trade["signature"],))
-        conn.commit()
+        # Marca la señal como alertada (para el cap de máximos por señal).
+        # (Ola 17-L) SOLO si Telegram la aceptó. `alerted` es la marca
+        # historica que usan los topes anti-spam y el chequeo de Medicion
+        # de /salud; ponerla tras un envio rechazado hacia dos daños a la
+        # vez: la alerta perdida gastaba cupo del tope (tapando la
+        # siguiente, que quizas si hubiera entrado) y la base afirmaba un
+        # envio que no ocurrio. El paper SI se abre igual: la simulacion
+        # mide la señal, no si el mensaje llego.
+        if _entregada:
+            conn.execute("UPDATE signals SET alerted=1 WHERE signature=?",
+                         (trade["signature"],))
+            conn.commit()
+        else:
+            print(f"· La alerta de {t['symbol']} NO se pudo entregar; "
+                  f"la señal NO se marca como alertada (queda en /errores)")
 
         # Paper trading: abre posición simulada con la compra alertada;
         # si es venta de la ⭐ que dio la señal, cierra la simulada.

@@ -40,26 +40,78 @@ def _horas(ts):
 # ─────────────────────────── COMPROBACIONES ──────────────────────────
 
 def _c_webhook():
-    """¿Llegan transacciones de las ⭐ vigiladas?"""
+    """¿Llegan transacciones de las ⭐ vigiladas?
+
+    (Ola 17-L, 25/8) Antes solo miraba `LAST_HOOK_TS`, que se escribe en
+    UN sitio: la ruta Flask `helius_hook`. En el PC del dueño no hay
+    `PUBLIC_URL` (era de Railway), asi que Helius no tiene a donde enviar
+    y esa variable no se escribe NUNCA: el chequeo se quedaba amarillo
+    para siempre con la pista equivocada ("normal si el bot acaba de
+    arrancar") mientras la ingesta real, LaserStream, funcionaba. Ahora
+    se juzga la via que de verdad esta ingiriendo.
+    """
     try:
-        from realtime import LAST_HOOK_TS, tracked_addresses
+        from realtime import LAST_HOOK_TS, PUBLIC_URL, tracked_addresses
         n = len(tracked_addresses() or [])
         if n == 0:
-            return _chk("Webhook", WARN, "no hay ⭐ vigiladas todavía",
+            return _chk("Ingesta", WARN, "no hay ⭐ vigiladas todavía",
                         "el embudo aún no promociona billeteras")
-        if LAST_HOOK_TS is None:
-            return _chk("Webhook", WARN, f"{n} ⭐ vigiladas, sin datos aún",
+        # ── Via 1: LaserStream ──
+        ls_activo = ls_con = False
+        ls_rec, ls_err = 0, ""
+        try:
+            from laserstream import activo as _ls_act, estado as _ls_est
+            ls_activo = bool(_ls_act())
+            if ls_activo:
+                e = _ls_est() or {}
+                ls_con = bool(e.get("conectado"))
+                ls_rec = int(e.get("recibidas") or 0)
+                ls_err = str(e.get("error") or "")
+        except Exception:
+            ls_activo = False        # modulo ausente: no es via disponible
+        # ── Via 2: webhook HTTP de Helius ──
+        hook_conf = bool(PUBLIC_URL)
+        hook_h = _horas(LAST_HOOK_TS) if LAST_HOOK_TS else None
+        hook_vivo = hook_h is not None and hook_h <= 12
+
+        if ls_con:
+            _extra = ("" if hook_conf else
+                      " · el webhook HTTP no aplica aquí (sin PUBLIC_URL)")
+            return _chk("Ingesta", OK,
+                        f"LaserStream conectado · {ls_rec} transacciones "
+                        f"· {n} ⭐ vigiladas{_extra}")
+        if hook_vivo:
+            return _chk("Ingesta", OK,
+                        f"webhook HTTP activo (hace {hook_h:.0f} h) · "
+                        f"{n} ⭐ vigiladas"
+                        + (" · LaserStream caído" if ls_activo else ""))
+        # Ninguna via confirmada: el aviso depende de cuantas HAY.
+        if not ls_activo and not hook_conf:
+            return _chk("Ingesta", CRIT,
+                        "no hay vía de entrada: LaserStream apagado "
+                        "(USE_LASERSTREAM=0) y sin PUBLIC_URL para el "
+                        "webhook", "sin ingesta no entra ninguna señal")
+        if ls_activo:
+            _d = f"LaserStream desconectado{' — ' + ls_err if ls_err else ''}"
+            if not hook_conf:
+                return _chk("Ingesta", CRIT, _d + " y es la única vía",
+                            "sin PUBLIC_URL el webhook no puede recibir; "
+                            "reintenta solo, pero si sigue así reinicia")
+            return _chk("Ingesta", WARN, _d + "; queda el webhook HTTP",
+                        "vigila que sigan entrando señales")
+        # Solo webhook configurado y sin datos recientes
+        if hook_h is None:
+            return _chk("Ingesta", WARN,
+                        f"{n} ⭐ vigiladas, sin datos aún del webhook",
                         "normal si el bot acaba de arrancar")
-        h = _horas(LAST_HOOK_TS)
-        if h > 24:
-            return _chk("Webhook", CRIT, f"{h:.0f} h sin transacciones",
+        if hook_h > 24:
+            return _chk("Ingesta", CRIT,
+                        f"{hook_h:.0f} h sin transacciones",
                         "corre /ciclo para resincronizar el webhook")
-        if h > 12:
-            return _chk("Webhook", WARN, f"{h:.0f} h sin transacciones",
-                        "puede ser normal si las ⭐ están inactivas")
-        return _chk("Webhook", OK, f"activo · {n} ⭐ vigiladas")
+        return _chk("Ingesta", WARN, f"{hook_h:.0f} h sin transacciones",
+                    "puede ser normal si las ⭐ están inactivas")
     except Exception as e:
-        return _chk("Webhook", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Ingesta", WARN, f"no se pudo comprobar ({e})")
 
 
 def _c_senales(conn):
@@ -101,51 +153,96 @@ def _c_medicion(conn):
         # medir. Medido en la base del dueño: 34% de las compras sin
         # precio, de forma estable durante 10 dias, y /salud en verde.
         # Ahora se cuentan las tres cosas por separado.
-        r = conn.execute(
-            "SELECT COUNT(*) v, "
-            "COALESCE(SUM(CASE WHEN s.price_usd IS NOT NULL "
-            "AND s.price_usd > 0 THEN 1 ELSE 0 END), 0) con_px, "
-            "COALESCE(SUM(CASE WHEN s.chg_24h IS NOT NULL "
-            "OR s.chg_1h IS NOT NULL THEN 1 ELSE 0 END), 0) m "
+        # (Ola 17-L, 25/8) DOS POBLACIONES, DOS NUMEROS. La consulta de
+        # arriba agrupaba por el estado ACTUAL de la billetera
+        # (`is_tracked=1 OR winning_tokens_count>=2`), y eso es un flag
+        # que cambia varias veces por hora: una señal que alerto ayer,
+        # emitida por una ⭐ que hoy ya no lo es, se caia del recuento.
+        # Medido en la base del dueño el 25/8: de 123 compras ALERTADAS
+        # en la ventana, solo 7 sobrevivian al filtro — se tiraba el 94%.
+        # Resultado: /salud gritaba CRIT 33% mientras las alertas que el
+        # dueño recibe de verdad perdian el 4%.
+        #
+        # Ahora se miden por separado, y con el criterio correcto en cada
+        # caso:
+        #   · ALERTADAS  → sin filtro de billetera. `alerted=1` ya prueba
+        #     que en su momento era ⭐ y estaba en el top (realtime.py
+        #     hace `continue` antes de enviar si no lo es), y es un hecho
+        #     historico que no cambia. Un filtro por estado actual solo
+        #     puede quitar señales legitimas: 8 de las 123 venian de
+        #     billeteras marcadas como bot DESPUES de haber alertado.
+        #   · SILENCIOSAS → se mantiene `is_bot=0` para no contar el
+        #     ruido de los bots (1.031 de 14.235 en la ventana). Nunca
+        #     alertaron, asi que no hay historia que preservar.
+        _ini, _fin = ahora - 7 * 86400, ahora - 30 * 3600
+        _cols = ("COUNT(*) v, "
+                 "COALESCE(SUM(CASE WHEN s.price_usd IS NOT NULL "
+                 "AND s.price_usd > 0 THEN 1 ELSE 0 END), 0) con_px, "
+                 "COALESCE(SUM(CASE WHEN s.chg_24h IS NOT NULL "
+                 "OR s.chg_1h IS NOT NULL THEN 1 ELSE 0 END), 0) m ")
+        r_al = conn.execute(
+            "SELECT " + _cols +
+            "FROM signals s WHERE s.side='compra' AND s.alerted=1 "
+            "AND s.ts BETWEEN ? AND ?", (_ini, _fin)).fetchone()
+        r_si = conn.execute(
+            "SELECT " + _cols +
             "FROM signals s JOIN wallets w ON w.address = s.wallet "
             "AND COALESCE(w.is_bot, 0) = 0 "
-            "AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2) "
-            "WHERE s.side='compra' "
-            "AND s.ts BETWEEN ? AND ?",
-            (ahora - 7 * 86400, ahora - 30 * 3600)).fetchone()
-        viejas, con_px, medidas = r["v"], r["con_px"], r["m"]
-        sin_px = viejas - con_px
-        if viejas and sin_px * 100.0 / viejas >= 15:
+            "WHERE s.side='compra' AND s.alerted=0 "
+            "AND s.ts BETWEEN ? AND ?", (_ini, _fin)).fetchone()
+        al, al_px, al_m = r_al["v"], r_al["con_px"], r_al["m"]
+        si, si_px = r_si["v"], r_si["con_px"]
+        al_sin, si_sin = al - al_px, si - si_px
+        si_pct = (si_sin * 100.0 / si) if si else 0.0
+        # Frase de contexto: siempre se dice el numero de las silenciosas,
+        # aunque el aviso lo dispare otra cosa. Son las que deciden que
+        # candidata asciende a ⭐, asi que perderlas no es cosmetico.
+        _ctx = (f"; aparte, {si_sin} de {si} señales silenciosas "
+                f"({si_pct:.0f}%) sin precio" if si else "")
+        _accion_si = ("las silenciosas son las que deciden qué candidata "
+                      "asciende a ⭐: con esa parte sin medir, el ranking "
+                      "se decide con menos evidencia")
+
+        if al == 0:
+            # Sin alertas en 7 dias no se puede juzgar la medicion del
+            # dueño; se informa de lo que si hay.
+            if si == 0:
+                return _chk("Medición", OK,
+                            "sin señales medibles vencidas en 7 días")
+            return _chk("Medición", WARN,
+                        f"ninguna alerta en 7 días{_ctx}", _accion_si)
+        if al_sin * 100.0 / al >= 15:
             return _chk("Medición", CRIT,
-                        f"{sin_px} de {viejas} señales ({sin_px*100.0/viejas:.0f}%) "
-                        f"se quedaron SIN precio de entrada: no se pueden "
-                        f"medir nunca",
+                        f"{al_sin} de {al} señales ALERTADAS "
+                        f"({al_sin*100.0/al:.0f}%) se quedaron SIN precio "
+                        f"de entrada: no se pueden medir nunca{_ctx}",
                         "revisa si DexScreener está fallando o limitando; "
                         "sin precio base no hay win rate real")
-        if viejas == 0:
-            return _chk("Medición", OK,
-                        "sin señales medibles vencidas en 7 días")
-        # El % de medición se calcula sobre las que SI tenian precio
-        # (las medibles de verdad); las que lo perdieron ya se avisaron
-        # arriba con su propio numero.
-        if con_px == 0:
+        if al_px == 0:
             return _chk("Medición", CRIT,
-                        f"ninguna de las {viejas} señales tenía precio de "
+                        f"ninguna de las {al} alertas tenía precio de "
                         f"entrada", "la medición está parada del todo")
-        pct = 100.0 * medidas / con_px
+        # El % de medicion se calcula sobre las que SI tenian precio
+        # (las medibles de verdad); las que lo perdieron ya salen arriba.
+        pct = 100.0 * al_m / al_px
         if pct < 30:
             return _chk("Medición", CRIT,
-                        f"solo {pct:.0f}% de las señales medibles de 7 días "
-                        f"medidas ({medidas}/{con_px})",
+                        f"solo {pct:.0f}% de las alertas medibles de 7 días "
+                        f"medidas ({al_m}/{al_px}){_ctx}",
                         "sin medición no hay aprendizaje ni backtest fiable")
         if pct < 70:
             return _chk("Medición", WARN,
-                        f"{pct:.0f}% medidas ({medidas}/{con_px} "
-                        f"con precio, de {viejas} señales · 7 días)")
+                        f"{pct:.0f}% de las alertas medidas "
+                        f"({al_m}/{al_px} con precio){_ctx}", _accion_si)
+        if si_pct >= 25:
+            return _chk("Medición", WARN,
+                        f"alertas OK ({pct:.0f}% medidas, {al_m}/{al_px})"
+                        f"{_ctx}", _accion_si)
         return _chk("Medición", OK,
-                    f"{pct:.0f}% medidas ({medidas}/{con_px} con precio"
-                    + (f", {sin_px} sin precio de entrada" if sin_px else "")
-                    + " · 7 días)")
+                    f"{pct:.0f}% de las alertas medidas ({al_m}/{al_px} "
+                    f"con precio"
+                    + (f", {al_sin} sin precio de entrada" if al_sin else "")
+                    + f" · 7 días){_ctx}")
     except Exception as e:
         return _chk("Medición", WARN, f"no se pudo comprobar ({e})")
 
