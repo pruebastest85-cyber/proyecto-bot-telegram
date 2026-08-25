@@ -621,18 +621,38 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
-    """Evalúa predicciones vencidas y rellena rendimiento del token.
-    Fuera del webhook: aquí sí puede hacer llamadas de red sin bloquear."""
-    # (Ola 17-D) Precalentar la caché de clusters AQUÍ, en un hilo y cada
-    # 10 min (la caché dura 30), para que el camino caliente del webhook
-    # —que ahora pide `construir=False`— siempre la encuentre lista y no
-    # tenga que construir el grafo de co-compra con una señal esperando.
+async def _precalentar_grafos():
+    """Deja listas las dos cachés que el camino caliente NO puede construir.
+
+    (Ola 17-D) Clusters y (Ola 18-C) influencia: los dos grafos se
+    construían dentro del hilo de ingesta cada vez que una ⭐ compraba, y
+    mientras tanto ese hilo no atendía nada. Ahora ambos se piden con
+    `construir=False` desde ahí, así que alguien tiene que construirlos
+    fuera. Eso se hace aquí, en un hilo aparte: cada 10 min desde
+    `predictions_job` y una vez al arranque, porque hasta que estén no se
+    abre ninguna predicción — y esas compras no vuelven.
+    """
     try:
         from clusters import precalentar
         await asyncio.to_thread(precalentar)
     except Exception as e:
         print(f"· No pude precalentar los clusters: {e}")
+    try:
+        from influence import precalentar as _precal_inf
+        await asyncio.to_thread(_precal_inf)
+    except Exception as e:
+        print(f"· No pude precalentar el grafo de influencia: {e}")
+
+
+async def warmup_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Una sola vez, poco después de arrancar (Ola 18-C)."""
+    await _precalentar_grafos()
+
+
+async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Evalúa predicciones vencidas y rellena rendimiento del token.
+    Fuera del webhook: aquí sí puede hacer llamadas de red sin bloquear."""
+    await _precalentar_grafos()
     try:
         from predictions import run_maintenance
         await asyncio.to_thread(run_maintenance)
@@ -2403,6 +2423,12 @@ def main():
         first=300,
         name="paper_trading",
     )
+    # (Ola 18-C) Ventana fría del arranque: hasta que los dos grafos
+    # estén en caché, `on_buy` no abre ninguna predicción, y esas compras
+    # no se recuperan. `predictions_job` no llega hasta el minuto 6, así
+    # que se precalienta una vez a los 40 s. Va en su propio hilo: no
+    # retrasa el arranque ni bloquea la ingesta.
+    app.job_queue.run_once(warmup_job, when=40, name="warmup_grafos")
     # Motor predictivo: evalúa predicciones vencidas cada 10 min
     app.job_queue.run_repeating(
         predictions_job,

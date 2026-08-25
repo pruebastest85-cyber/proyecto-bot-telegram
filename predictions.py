@@ -23,7 +23,7 @@ import json
 import time
 
 from db import get_conn, get_setting
-from influence import influence, graph
+from influence import influence, graph, cache_lista
 
 import os as _os
 
@@ -243,8 +243,11 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
                2: "Nivel 2 · seguidor confirmó",
                3: "Nivel 3 · cluster propagando"}
     nivel = niveles.get(min(stage, 3), f"Nivel {stage}")
-    alias = graph()["wallets"].get(pred_row["leader"], {}).get("alias",
-                                                               pred_row["leader"][:6])
+    # (Ola 18-C) `construir=False`: esto corre en el hilo de ingesta y
+    # solo se usa para poner un alias bonito en el mensaje. Si el cache
+    # esta frio, `.get(...)` cae al alias corto y la alerta sale igual.
+    alias = graph(construir=False)["wallets"].get(
+        pred_row["leader"], {}).get("alias", pred_row["leader"][:6])
     badge = _TIER_BADGE.get(pred_row["tier"] or "", "")
     lines = [f"{badge}",
              f"🔮 *SEÑAL PREDICTIVA — {nivel}*",
@@ -256,6 +259,12 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
     if token_ctx.get("_cluster_sabido") is False:
         _neutros.append("6 pts de Cluster (aún sin calcular: el grafo de "
                         "co-compra no estaba listo)")
+    # (Ola 18-C) Lo mismo para el grafo de influencia: si no estaba en
+    # caché, los puntos de liderazgo valen 0 por falta de dato, no porque
+    # se haya medido que el líder no lidera.
+    if token_ctx.get("_influencia_sabida") is False:
+        _neutros.append("15 pts de Liderazgo (aún sin calcular: el grafo "
+                        "de influencia no estaba listo)")
     if stage <= 1:
         _neutros.append(f"{CONF_PTS_NEUTROS} pts de Confianza (etapa 1: "
                         f"aún no ha confirmado ningún seguidor)")
@@ -304,7 +313,12 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                 if not arrived:      # primer seguidor en llegar
                     first = max(0, int(ts) - int(row["created_ts"] or ts))
                 arrived.add(wallet)
-                inf = influence(row["leader"]) or {}
+                # (Ola 18-C) camino caliente: solo cache, nunca
+                # construye. Si el grafo aún no está, `inf` queda vacío y
+                # `confidence_score` no suma los puntos de liderazgo: se
+                # avisa en el mensaje en vez de darlo por medido.
+                inf = influence(row["leader"], construir=False) or {}
+                _inf_sabida = bool(inf) or cache_lista()
                 health = _leader_health(conn, row["leader"])
                 conf = confidence_score(inf, pred, token_ctx.get("liq"),
                                         health, arrived=len(arrived))
@@ -327,13 +341,24 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                     fresh = conn.execute(
                         "SELECT * FROM predictions WHERE id=?",
                         (row["id"],)).fetchone()
+                    _ctx_al = dict(token_ctx)
+                    _ctx_al["_influencia_sabida"] = _inf_sabida
                     _alert_stage(fresh, inf, conf,
-                                 row["meta_score"], pred, health, token_ctx)
+                                 row["meta_score"], pred, health, _ctx_al)
         return
 
     # No hay predicción abierta: ¿este comprador es LÍDER con seguidores?
-    inf = influence(wallet)
+    # (Ola 18-C) camino caliente: solo cache, nunca construye.
+    inf = influence(wallet, construir=False)
     if not inf or not inf.get("followers"):
+        # None significa dos cosas distintas: "esta billetera no lidera a
+        # nadie" (dato) o "todavia no tengo el grafo" (falta de dato). En
+        # el segundo caso la predicción se PIERDE, no se retrasa: on_buy
+        # solo corre con la compra. Se deja constancia en el log para que
+        # la ventana fría del arranque sea visible y medible.
+        if inf is None and not cache_lista():
+            print(f"· Predicción: grafo de influencia aún sin construir; "
+                  f"no evalúo la compra de {wallet[:8]}")
         return
     followers = [f for f in inf["followers"] if f["prob"] >= 60]
     if len(followers) < 2:
@@ -370,6 +395,10 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                       token_ctx.get("liq"), _risk_pct(token_ctx))
     token_ctx = dict(token_ctx)
     token_ctx["_cluster_sabido"] = cluster_sabido
+    # Aquí el grafo de influencia SÍ estaba: si no, `inf` habría sido None
+    # y se habría vuelto antes. Se deja explícito para que no dependa de
+    # esa cadena de razonamiento si alguien toca la guarda de arriba.
+    token_ctx["_influencia_sabida"] = True
 
     tier = _tier(conf, meta, umbral, token_ctx.get("liq"),
                  _risk_pct(token_ctx), u=_u_ef)

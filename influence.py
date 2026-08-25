@@ -41,7 +41,7 @@ import time
 import db as _db
 from db import get_conn
 
-_CACHE = {"g": None, "ts": 0.0}
+_CACHE = {"g": None, "ts": 0.0, "fallo": 0.0}
 _TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
                    # cada 10 min y forzaba una reconstruccion en CADA
                    # pasada. Son datos historicos: media hora de
@@ -313,11 +313,42 @@ def _build():
 _BUILD_LOCK = threading.Lock()
 
 
-def graph():
+def _vacio() -> dict:
+    """Grafo vacio VALIDO: mismas cuatro claves que el de verdad, para
+    que `g["wallets"]` nunca reviente. Uno nuevo en cada llamada, porque
+    `_indice_aristas` cuelga su indice del propio dict y no queremos que
+    ensucie una constante compartida."""
+    return {"edges": {}, "both": {}, "wallets": {}, "meta": {}}
+
+
+def graph(construir: bool = True):
+    """Grafo de co-compra, cacheado.
+
+    `construir=False` (Ola 18-C) es el modo del CAMINO CALIENTE: devuelve
+    lo que haya en cache — aunque este pasado de TTL — y si no hay nada,
+    un grafo vacio valido. NUNCA construye, NUNCA pide el candado, NUNCA
+    toca la base. Es el mismo patron que ya funciona en
+    `clusters.find_clusters(construir=False)`.
+
+    Por que: `_build()` son 13 consultas pesadas —37,2 s medidos el 25/8
+    sobre la base real del dueño (32.409 apariciones, 362 tokens)— y se
+    disparaban desde el hilo de ingesta (webhook/LaserStream) cada vez que
+    una ⭐ compraba con el cache caducado. Mientras construia, ese hilo no
+    atendia nada: son los ~40 min diarios de senales perdidas que midio la
+    auditoria del 25/8.
+
+    Devolver el grafo viejo no es una perdida: las parejas de co-compra se
+    mueven en semanas, no en minutos, y `precalentar()` lo refresca desde
+    `predictions_job` en cuanto vence el TTL de 30 min.
+    """
     if _CACHE["g"] and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["g"]
-    # Soltar el viejo ANTES de construir el nuevo: si no, durante la
-    # construccion conviven dos grafos enteros y el pico es el doble.
+    if not construir:
+        # Cache caducado o frio: se entrega lo viejo (o el vacio), pero
+        # se vuelve sin construir. Copia superficial NO: los llamadores
+        # solo leen, y `_indice_aristas` cuelga su indice del propio dict
+        # para reutilizarlo entre llamadas.
+        return _CACHE["g"] or _vacio()
     # CANDADO: sin el, dos hilos con el cache caducado construian el grafo
     # A LA VEZ y las consultas pesadas corrian duplicadas en Postgres. El
     # 12/8/2026 varios procesos simultaneos llenaron el disco con archivos
@@ -329,20 +360,38 @@ def graph():
         if _CACHE["g"] is not None and time.time() - _CACHE["ts"] < _TTL:
             return _CACHE["g"]
         # Enfriamiento tras fallo: el 13/8 la construccion fallaba (temp
-        # de Postgres) y cada llamada la reintentaba entera: 9 consultas
-        # de ~30 s en 4 minutos, pura lena al fuego. Si fallo hace poco,
-        # se devuelve un grafo vacio valido y se reintenta en 10 min.
+        # de Postgres) y cada llamada la reintentaba entera: 13 consultas
+        # pesadas en 4 minutos, pura lena al fuego. Si fallo hace poco, no
+        # se reintenta: se sigue con lo que haya en cache (Ola 18-C; antes
+        # se devolvia el vacio y el camino caliente quedaba ciego 10 min,
+        # el mismo fallo que la Ola 17-E cerro en clusters.py).
         if time.time() - _CACHE.get("fallo", 0) < 600:
-            return {"edges": {}, "both": {}, "wallets": {}, "meta": {}}
-        _CACHE["g"] = None
+            return _CACHE["g"] or _vacio()
+        # (Ola 18-C) El cache NO se vacia antes de construir. Antes se
+        # ponia a None para que durante la construccion no conviviesen dos
+        # grafos en RAM (CLAUDE.md §5), pero eso solo tenia sentido cuando
+        # el que pedia el grafo era el propio hilo de ingesta y esperaba
+        # bloqueado: nadie leia el cache mientras tanto. Ahora el camino
+        # caliente NO espera — lee el cache y sigue — asi que vaciarlo lo
+        # dejaba ciego durante todo el build, cada 30 min. Se cambia RAM
+        # por señales: el grafo viejo se mantiene hasta que el nuevo esta
+        # listo, y el relevo es una sola asignacion (atomica).
         try:
             g = _build()
         except Exception as e:
             _CACHE["fallo"] = time.time()
-            print(f"· Grafo de influencia falló ({e}); reintento en 10 min")
-            return {"edges": {}, "both": {}, "wallets": {}, "meta": {}}
+            # No se toca `_CACHE["g"]`: se sigue con el grafo anterior en
+            # vez de quedarse ciego (clusters.py hace lo mismo).
+            if _CACHE["g"] is None:
+                print(f"· Grafo de influencia falló ({e}) y NO hay copia "
+                      f"anterior: me quedo sin grafo; reintento en 10 min")
+            else:
+                print(f"· Grafo de influencia falló ({e}); se sigue con la "
+                      f"copia anterior y se reintenta en 10 min")
+            return _CACHE["g"] or _vacio()
         _CACHE["g"] = g
         _CACHE["ts"] = time.time()
+        _CACHE["fallo"] = 0.0
         return g
 
 
@@ -359,9 +408,11 @@ def _weight(g, a, b):
     return e.get("count", 0) / sh, sh, e.get("med_gap")
 
 
-def role(address: str) -> str | None:
-    g = graph()
-    w = g["wallets"].get(address)
+def _rol_de(w) -> str | None:
+    """El rol a partir de la ficha de la billetera, sin volver a pedir el
+    grafo. (Ola 18-C) Antes `influence()` llamaba a `role()`, que pedia
+    `graph()` por segunda vez: si el cache cambiaba entre las dos
+    lecturas, salia un resultado mezclado de dos grafos distintos."""
     if not w or w["leader_score"] is None:
         return None
     if (w["pct_first"] or 0) >= 50 or w["leader_score"] >= 70:
@@ -374,6 +425,10 @@ def role(address: str) -> str | None:
     if d <= 90:
         return "Confirmador"
     return "Seguidor tardío"
+
+
+def role(address: str, construir: bool = True) -> str | None:
+    return _rol_de(graph(construir=construir)["wallets"].get(address))
 
 
 def _indice_aristas(g) -> tuple[dict, dict]:
@@ -412,8 +467,11 @@ def influencia_ligera(address: str) -> dict | None:
             "avg_lag_s": w.get("avg_lag_s")}
 
 
-def influence(address: str) -> dict | None:
-    g = graph()
+def influence(address: str, construir: bool = True) -> dict | None:
+    """`construir=False`: solo cache, nunca construye (ver `graph`). Con el
+    cache frio devuelve None, que los llamadores del camino caliente ya
+    tratan como 'sin dato' (no como 'sin seguidores confirmado')."""
+    g = graph(construir=construir)
     if address not in g["wallets"]:
         return None
     salientes, entrantes = _indice_aristas(g)
@@ -431,11 +489,59 @@ def influence(address: str) -> dict | None:
     followers.sort(key=lambda x: x["prob"], reverse=True)
     leaders.sort(key=lambda x: x["prob"], reverse=True)
     w = g["wallets"][address]
-    return {"role": role(address), "leader_score": w["leader_score"],
+    return {"role": _rol_de(w),
+            "leader_score": w["leader_score"],
             "follower_score": w["follower_score"], "pct_first": w["pct_first"],
             "avg_lead_s": w["avg_lead_s"], "avg_lag_s": w["avg_lag_s"],
             "followers": followers, "leaders": leaders,
             "followers_count": len(followers)}
+
+
+def cache_lista() -> bool:
+    """¿Hay grafo ya construido en cache?
+
+    (Ola 18-C) El camino caliente pide `construir=False` y recibe None
+    tanto cuando la billetera NO figura en el grafo como cuando el cache
+    aun no se ha construido. Sin distinguirlo, "no tiene seguidores" y
+    "todavia no lo se" se confunden — el mismo fallo que la Ola 17-E
+    cerro en clusters con `clusters.cache_lista()`."""
+    return _CACHE["g"] is not None
+
+
+def precalentar():
+    """Construye la cache del grafo FUERA del camino caliente.
+
+    La llama `predictions_job` cada 10 min; como `graph()` vuelve al
+    instante mientras el cache esta fresco, la construccion de verdad solo
+    ocurre en la primera pasada tras vencer el TTL de 30 min. Asi los
+    llamadores con `construir=False` (ingesta) encuentran siempre un grafo
+    listo sin pagar los ~37 s de construccion medidos el 25/8 sobre la
+    base real. Mismo arreglo que ya se hizo con `clusters.precalentar`.
+
+    OJO: `graph()` se traga sus propias excepciones y devuelve el grafo
+    anterior, asi que el `except` de aqui casi nunca salta. Para no
+    cantar "al día" cuando en realidad fallo, se mira `_CACHE["fallo"]`.
+    """
+    try:
+        g = graph()
+        n = len(g.get("wallets") or {})
+        if not cache_lista():
+            # Sin grafo: o es el primer arranque, o fallo y no habia copia.
+            # Este es el caso grave — el camino caliente no evalua nada.
+            if time.time() - _CACHE["fallo"] < 600:
+                print("⚠ Influencia: la construcción falló y no hay copia "
+                      "anterior; SIN grafo, reintento en 10 min")
+            else:
+                print("⚠ Influencia: sin grafo en caché todavía")
+        elif time.time() - _CACHE["fallo"] < 600:
+            print(f"⚠ Influencia: la construcción falló; se sigue con la "
+                  f"copia anterior ({n} billeteras)")
+        else:
+            edad = int(time.time() - _CACHE["ts"])
+            print(f"🕸 Influencia: caché al día ({n} billeteras, "
+                  f"{edad//60} min)")
+    except Exception as e:
+        print(f"· Influencia: no pude precalentar la caché: {e}")
 
 
 def predict_followers(address: str, min_prob: int = 60) -> dict | None:
