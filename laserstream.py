@@ -31,7 +31,15 @@ WS_URL = "wss://mainnet.helius-rpc.com/?api-key={key}"
 _HILO = None
 _ULTIMO_SLOT = [0]
 _SLOT_PERSISTIDO = [0.0]   # cuando se escribio a settings por ultima vez
-_ESTADO = {"conectado": False, "desde": None, "recibidas": 0, "error": None}
+# (Ola 17-N) `ultimo` y `arranque` existen para poder responder "¿cuánto
+# lleva sin llegar NADA?", que es la única pregunta que delata una
+# suscripción muerta. `recibidas` no sirve: es acumulado desde el
+# arranque del proceso y nunca se reinicia, así que en cuanto llega una
+# sola transacción deja de valer como señal de vida. Y `desde` tampoco:
+# se reescribe en cada reconexión, y el watchdog reconecta cada 10 min,
+# así que nunca crece. `ultimo` SOLO avanza con datos reales.
+_ESTADO = {"conectado": False, "desde": None, "recibidas": 0,
+           "error": None, "ultimo": None, "arranque": None}
 
 # v2 (auditoria 19/8) — tres agujeros de la unica via de ingesta del bot
 # local, todos silenciosos:
@@ -192,6 +200,7 @@ def _procesar(mensaje: str) -> None:
         return
 
     _ESTADO["recibidas"] += 1
+    _ESTADO["ultimo"] = time.time()      # (17-N) señal de vida REAL
     if slot:
         _guardar_slot(int(slot))
     # Pool FIJO de workers (Ola 5, auditoria 19/8 - M4): antes se lanzaba
@@ -315,6 +324,11 @@ def start() -> bool:
     if _HILO and _HILO.is_alive():
         return True
     _ULTIMO_SLOT[0] = _cargar_slot()
+    # (17-N) Referencia para medir el silencio cuando aun no ha llegado
+    # NADA: sin esto, un stream mudo desde el arranque no se distingue de
+    # uno recien conectado, porque `desde` se reinicia en cada reconexion.
+    if _ESTADO.get("arranque") is None:
+        _ESTADO["arranque"] = time.time()
     _arrancar_workers()
     _HILO = threading.Thread(target=_bucle, daemon=True, name="laserstream")
     _HILO.start()

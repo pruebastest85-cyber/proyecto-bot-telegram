@@ -67,21 +67,33 @@ def _c_webhook():
                 ls_con = bool(e.get("conectado"))
                 ls_rec = int(e.get("recibidas") or 0)
                 ls_err = str(e.get("error") or "")
-                ls_h = _horas(e.get("desde"))
+                # (Ola 17-N, auditoria de la 17-M) `ls_h` medía desde
+                # `desde`, la ultima conexion CON EXITO, y el watchdog
+                # reconecta cada 10 min: nunca pasaba de 0,17 h, asi que
+                # el CRIT de "conectado pero mudo" era codigo muerto y el
+                # margen de reconexion se volvia un WARN permanente. Lo
+                # que hay que medir es el SILENCIO: cuanto lleva sin
+                # llegar un dato real. `ultimo` solo avanza con datos;
+                # si nunca llego ninguno, se cuenta desde el arranque.
+                ls_h = _horas(e.get("ultimo") or e.get("arranque")
+                              or e.get("desde"))
         except Exception:
             ls_activo = False        # modulo ausente: no es via disponible
         # ── Via 2: webhook HTTP de Helius ──
         hook_conf = bool(PUBLIC_URL)
         hook_h = _horas(LAST_HOOK_TS) if LAST_HOOK_TS else None
         hook_vivo = hook_h is not None and hook_h <= 12
-        # (Ola 17-M, auditoria de la 17-L) `conectado` se pone a True en
-        # cuanto abre el socket, ANTES de recibir nada, y una suscripcion
-        # rechazada guarda el motivo en `error` sin tocar `conectado`.
-        # Con solo `ls_con` el chequeo se quedaba en verde diciendo
-        # "conectado · 0 transacciones" indefinidamente. Se exige que
-        # ademas haya llegado algo, con margen para la conexion recien
-        # hecha (el watchdog del propio LaserStream corta a los 10 min).
-        ls_mudo = ls_con and ls_rec == 0 and (ls_h is None or ls_h > 0.25)
+        # (Ola 17-M) `conectado` se pone a True en cuanto abre el socket,
+        # ANTES de recibir nada, y una suscripcion rechazada guarda el
+        # motivo en `error` sin tocar `conectado`: el chequeo se quedaba
+        # en verde diciendo "conectado · 0 transacciones".
+        # (17-N) La condicion era `ls_rec == 0`, que no vale: `recibidas`
+        # es acumulado desde el arranque del proceso, asi que en cuanto
+        # llegaba UNA transaccion el detector quedaba desarmado para
+        # siempre. Ahora manda el silencio, que es lo que de verdad
+        # delata una suscripcion muerta.
+        MUDO_H = 0.25            # 15 min; el watchdog interno corta a 10
+        ls_mudo = ls_con and ls_h is not None and ls_h > MUDO_H
 
         if ls_con and not ls_mudo:
             _extra = ("" if hook_conf else
@@ -98,8 +110,9 @@ def _c_webhook():
                            else ""))
         if ls_mudo:
             return _chk("Ingesta", CRIT,
-                        f"LaserStream dice conectado pero no ha recibido "
-                        f"NADA{' — ' + ls_err if ls_err else ''}",
+                        f"LaserStream dice conectado pero lleva "
+                        f"{ls_h * 60:.0f} min sin recibir nada"
+                        f"{' — ' + ls_err if ls_err else ''}",
                         "suele ser una suscripción rechazada: revisa la "
                         "clave de Helius y reinicia el bot")
         # Ninguna via confirmada: el aviso depende de cuantas HAY.
@@ -115,7 +128,10 @@ def _c_webhook():
                 # corte de segundos es NORMAL: el backoff de reconexion
                 # llega a 300 s y el arranque espera 120 s si aun no hay
                 # ⭐. Se da margen antes de gritar; pasado eso, es rojo.
-                if ls_h is not None and ls_h < 0.25:
+                # (17-N) El margen se mide sobre el SILENCIO, no sobre
+                # `desde`: con `desde` la reconexion cada 10 min dejaba
+                # el aviso en amarillo permanente aunque no entrara nada.
+                if ls_h is not None and ls_h < MUDO_H:
                     return _chk("Ingesta", WARN, _d + " (reconectando)",
                                 "normal tras un corte; si sigue en el "
                                 "próximo /salud, reinicia el bot")
@@ -127,12 +143,22 @@ def _c_webhook():
             # degradaba un apagon TOTAL (LaserStream caido + webhook mudo
             # 50 h) de rojo a amarillo — y `revisar_y_avisar` solo avisa
             # por Telegram ante CRIT, asi que el apagon pasaba callado.
-            if hook_h is None or hook_h > 24:
-                _t = ("y el webhook no ha recibido nada"
-                      if hook_h is None
-                      else f"y el webhook lleva {hook_h:.0f} h mudo")
-                return _chk("Ingesta", CRIT, f"{_d} {_t}: sin ingesta",
+            # (17-N) `hook_h is None` NO es prueba de apagon: LAST_HOOK_TS
+            # es un global de proceso que vuelve a None en cada reinicio,
+            # asi que entre arrancar y el primer POST de Helius este
+            # camino gritaba "las dos vías están caídas; reinicia el bot"
+            # justo despues de un reinicio, recomendando lo que acababa
+            # de pasar. Solo es rojo con un reloj que lo demuestre.
+            if hook_h is not None and hook_h > 24:
+                return _chk("Ingesta", CRIT,
+                            f"{_d} y el webhook lleva {hook_h:.0f} h "
+                            f"mudo: sin ingesta",
                             "las dos vías están caídas; reinicia el bot")
+            if hook_h is None:
+                return _chk("Ingesta", WARN,
+                            _d + " y el webhook no ha recibido nada aún",
+                            "normal si el bot acaba de arrancar; si sigue "
+                            "en el próximo /salud, no hay ingesta")
             return _chk("Ingesta", WARN, _d + "; queda el webhook HTTP",
                         "vigila que sigan entrando señales")
         # Solo webhook configurado y sin datos recientes
@@ -317,18 +343,22 @@ def _c_medicion(conn):
                         f"de entrada: no se pueden medir nunca{_ctx}",
                         "revisa si DexScreener está fallando o limitando; "
                         "sin precio base no hay win rate real")
-        if al_px == 0:
-            return _chk("Medición", CRIT,
-                        f"ninguna de las {al} alertas tenía precio de "
-                        f"entrada", "la medición está parada del todo")
+        # (17-N) Aqui habia un `if al_px == 0` con su propio CRIT: era
+        # codigo muerto. Si `al > 0` y `al_px == 0`, entonces `al_sin ==
+        # al` y el 100% supera el umbral del 15% de arriba, que ya ha
+        # devuelto. Se quita en vez de dejar un aviso que no puede salir.
         if med_px == 0:
-            # Todas las alertadas con precio se salieron del alcance del
-            # medidor: no hay % que calcular, pero tampoco es un fallo
-            # del medidor. Se dice tal cual.
-            return _chk("Medición", WARN,
-                        f"las {al_px} alertas con precio quedaron fuera "
-                        f"del alcance del medidor{_ctx_si}",
-                        "sus billeteras se degradaron antes de medirse")
+            # Ninguna alertada con precio esta medida NI sigue al alcance
+            # del medidor. (17-N) Devolvia WARN, y eso era una regresion:
+            # con la 17-L este mismo estado daba pct=0 → CRIT, y
+            # `revisar_y_avisar` solo manda Telegram ante CRIT. Que el
+            # medidor este parado y que las billeteras se hayan degradado
+            # producen el mismo sintoma, asi que se nombran los dos.
+            return _chk("Medición", CRIT,
+                        f"ninguna de las {al_px} alertas con precio está "
+                        f"medida{_ctx_si}",
+                        "o el medidor está parado, o sus billeteras se "
+                        "degradaron antes de que le diera tiempo")
         # El % de medicion se calcula sobre las que SI tenian precio Y el
         # medidor todavia alcanza; las demas ya salen arriba.
         pct = 100.0 * al_m / med_px
