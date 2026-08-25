@@ -88,6 +88,58 @@ _MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _BG_TASKS: set = set()
 
 
+# ── (Ola 18-E) Texto ajeno dentro de un mensaje en Markdown ──────────
+# El simbolo de un token lo elige quien crea el token, y viaja hasta los
+# mensajes. Medido en la base del dueño: **439 tokens** tienen `*`, `_`,
+# `[` o backtick en el simbolo. Con uno de esos, Telegram rechaza el
+# mensaje entero; el reintento en texto plano lo salva, pero llega sin
+# formato — y si ademas es largo, no llega.
+_MD_FUERA = {"*": "", "_": " ", "`": "", "[": "(", "]": ")"}
+
+# Tope de Telegram para un mensaje de texto.
+TG_MAX_CHARS = 4096
+
+
+def _md_escapar(txt) -> str:
+    """Deja el texto que NO escribimos nosotros (simbolo de token, razon
+    de la IA, alias) sin nada que Telegram lea como formato.
+
+    Se QUITAN los caracteres en vez de escaparlos con `\\`, que es lo que
+    ya hace el resto del proyecto (digest, /salud, rendimiento,
+    wallet_links): el Markdown legacy de Telegram no des-escapa la barra
+    invertida en todos los contextos y acaban viendose barras sueltas en
+    el mensaje."""
+    s = str(txt if txt is not None else "")
+    for c, r in _MD_FUERA.items():
+        s = s.replace(c, r)
+    return s
+
+
+def _largo_tg(text: str) -> int:
+    """Longitud como la cuenta Telegram: unidades UTF-16, no caracteres.
+    Cada emoji fuera del BMP (🎯 🚀 ⭐ 💵…) cuenta DOS, y estos mensajes
+    van llenos de ellos: medir con `len()` deja pasar mensajes de ~4.000
+    caracteres que Telegram rechaza igual."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _recortar_tg(text: str) -> str:
+    """Un mensaje mas largo que el tope de Telegram NO se envia — ni en
+    Markdown ni en texto plano. Medido: la evidencia de la billetera mas
+    activa del dueño ocupa 6.585 caracteres, o sea que hoy ese mensaje se
+    pierde entero. Mejor recortado y diciendolo que perdido en silencio."""
+    largo = _largo_tg(text)
+    if largo <= TG_MAX_CHARS:
+        return text
+    aviso = f"\n\n_(mensaje recortado: {largo} caracteres)_"
+    # Se recorta a ojo y se comprueba de verdad: cortar por caracteres no
+    # garantiza el largo en UTF-16, asi que se ajusta hasta que entra.
+    cuerpo = text[:TG_MAX_CHARS - 120]
+    while _largo_tg(cuerpo) + _largo_tg(aviso) + 1 > TG_MAX_CHARS and cuerpo:
+        cuerpo = cuerpo[:-40] or ""
+    return cuerpo.rstrip() + "…" + aviso
+
+
 async def _send_md(chat, text, **kw):
     """Envía en Markdown; si Telegram lo rechaza (símbolos raros del token),
     reintenta en texto plano para NO perder el mensaje en silencio.
@@ -95,8 +147,14 @@ async def _send_md(chat, text, **kw):
 
     (Ola 16) Acepta Chat o Message: pasar `update.message` por error dejaba
     /radar, /postmortem y /salidas MUDOS — AttributeError capturado por el
-    propio except, dos líneas de "Markdown rechazado" y silencio total."""
+    propio except, dos líneas de "Markdown rechazado" y silencio total.
+
+    (Ola 18-E) Recorta al tope de Telegram (si no, el mensaje no se envia
+    de ninguna forma) y, cuando ni el texto plano entra, lo apunta en
+    `/errores`: antes solo quedaba un `print` en una ventana que nadie
+    mira, igual que el fallo que la Ola 17-L cerro en `tg_send`."""
     chat = getattr(chat, "chat", chat)
+    text = _recortar_tg(text)
     try:
         return await chat.send_message(text, parse_mode="Markdown", **kw)
     except Exception as e:
@@ -105,6 +163,15 @@ async def _send_md(chat, text, **kw):
             return await chat.send_message(text, **kw)
         except Exception as e2:
             print(f"· No se pudo enviar el mensaje: {e2}")
+            try:
+                from errores import record as _rec_md
+                await asyncio.to_thread(
+                    _rec_md, "telegram_send_md", e2,
+                    f"{_largo_tg(text)} unidades (tope {TG_MAX_CHARS}); "
+                    f"Markdown fallo con: "
+                    f"{str(e)[:120]}")
+            except Exception:
+                pass
             return None
 
 
@@ -374,15 +441,34 @@ def _senales_text() -> str:
     return "\n".join(lines).rstrip()
 
 
+# Cuantas apariciones se muestran en /evidencia. Medido en la base del
+# dueño: la billetera mas activa tiene 65 apariciones y su texto ocupa
+# 6.585 caracteres — por encima del tope de 4.096 de Telegram, o sea que
+# ese mensaje no se enviaba NI en Markdown ni en texto plano. 30
+# billeteras pasan de 20 apariciones.
+EVIDENCIA_MAX = 25
+
+
 def _evidencia_text(address: str) -> str:
     conn = get_conn()
     rows = wallet_evidence(conn, address)
     conn.close()
     if not rows:
         return "Sin registros para esa dirección."
-    lines = [f"📋 *Evidencia de* `{address[:20]}…`:\n"]
-    for ev in rows:
-        lines.append(f"• {ev['reason']}\n")
+    total = len(rows)
+    # Las mas recientes primero: `wallet_evidence` ordena por buy_time
+    # ascendente, y lo interesante de una billetera es lo ultimo que hizo.
+    mostradas = rows[-EVIDENCIA_MAX:][::-1]
+    lines = [f"📋 *Evidencia de* `{address[:20]}…`"
+             + (f"  ·  {total} apariciones" if total > 1 else "") + "\n"]
+    for ev in mostradas:
+        # `reason` lleva dentro el SIMBOLO del token, que lo elige quien
+        # crea el token: sin limpiarlo, un `*` o un `_` rompe el Markdown
+        # del mensaje entero (439 tokens de la base tienen alguno).
+        lines.append(f"• {_md_escapar(ev['reason'])}\n")
+    if total > len(mostradas):
+        lines.append(f"_…y {total - len(mostradas)} apariciones más "
+                     f"antiguas que no caben en un mensaje._\n")
     lines.append(f"\n🔗 Verificar: gmgn.ai/sol/address/{address}")
     return "\n".join(lines)
 
@@ -467,26 +553,24 @@ async def run_address_command(chat, cmd: str, arg: str):
     if cmd == "perfil":
         await chat.send_message("🔬 Investigando billetera… (30-60 segundos)")
         p = await asyncio.to_thread(profile_wallet, arg)
-        await chat.send_message(format_profile(p), parse_mode="Markdown")
+        await _send_md(chat, format_profile(p))
     elif cmd == "ficha":
         await chat.send_message("🧮 Calculando Wallet Score… (~1 min)")
         ficha = await asyncio.to_thread(_ficha_text, arg)
-        await chat.send_message(ficha or "Sin transacciones para esa dirección.",
-                                parse_mode="Markdown")
+        await _send_md(chat, ficha or "Sin transacciones para esa dirección.")
     elif cmd == "adn":
         await chat.send_message("🧬 Componiendo el Wallet DNA… (~1 min)")
         from dna import wallet_dna_text
         text = await asyncio.to_thread(wallet_dna_text, arg)
-        await chat.send_message(text or "Sin transacciones para esa dirección.",
-                                parse_mode="Markdown")
+        await _send_md(chat, text or "Sin transacciones para esa dirección.")
     elif cmd == "prediccion":
         from influence import predict_text
         text = await asyncio.to_thread(predict_text, arg)
-        await chat.send_message(text, parse_mode="Markdown")
+        await _send_md(chat, text)
     elif cmd == "similar":
         from similarity import similar_text
         text = await asyncio.to_thread(similar_text, arg)
-        await chat.send_message(text, parse_mode="Markdown")
+        await _send_md(chat, text)
     elif cmd == "token":
         await chat.send_message("🧬 Analizando el token…")
         from token_report import token_report
@@ -509,16 +593,18 @@ async def run_address_command(chat, cmd: str, arg: str):
     elif cmd == "entidad":
         from entity_resolution import format_entity
         text = await asyncio.to_thread(format_entity, arg)
-        await chat.send_message(text or "No detecto que esa wallet forme "
-                                "parte de una entidad multi-wallet.",
-                                parse_mode="Markdown")
+        await _send_md(chat, text or "No detecto que esa wallet forme "
+                       "parte de una entidad multi-wallet.")
     elif cmd == "ia":
         await chat.send_message("🧠 Perfilando y consultando a la IA… (~1 min)")
         text = await asyncio.to_thread(_ia_text, arg)
-        await chat.send_message(text, parse_mode="Markdown")
+        await _send_md(chat, text)
     elif cmd == "evidencia":
         text = await asyncio.to_thread(_evidencia_text, arg)
-        await chat.send_message(text, parse_mode="Markdown")
+        # (Ola 18-E) Por `_send_md`, no por `send_message` a pelo: es
+        # donde estan el recorte al tope de Telegram, el reintento en
+        # texto plano y el registro del fallo en /errores.
+        await _send_md(chat, text)
     elif cmd == "descartar":
         msg = await asyncio.to_thread(discard_wallet, arg)
         await chat.send_message(msg)
@@ -1014,7 +1100,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt = txt or "Sin datos para esa dirección."
         else:
             txt = await asyncio.to_thread(_saldo_uno_text, addr)
-        await q.message.chat.send_message(txt, parse_mode="Markdown")
+        await _send_md(q.message.chat, txt)
         return
 
     # Confirmación de acciones del agente IA

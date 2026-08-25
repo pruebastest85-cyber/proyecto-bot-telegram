@@ -12,6 +12,7 @@ lo hayan comprado. El mayor múltiplo ya avisado por token se guarda en
 la tabla settings (clave "mult_alert:<mint>").
 """
 
+import threading
 import time
 
 import requests
@@ -55,6 +56,31 @@ MC_BASE_MIN_USD = _f_env("MC_BASE_MIN_USD", 1000.0)
 MULT_TARJETA_MAX = _f_env("MULT_TARJETA_MAX", 1000.0)
 
 
+# ── (Ola 18-E) ¿DexScreener dijo "no hay par", o no dijo nada? ────────
+# `_price_mc_ex` se traga los fallos de red y devuelve
+# (None, None, False, 0.0) — lo MISMO que cuando responde bien pero sin
+# ningun par con precio usable. Quien llama no podia distinguirlos, y el
+# paper cerraba posiciones a -99% ("sin liquidez") por un timeout de red,
+# grabando una perdida total que nunca comprobo. El historico medido es
+# lo unico irreversible del sistema (CLAUDE.md), asi que ese dato falso
+# no se puede deshacer.
+#
+# POR HILO, como en helius_rpc (Ola 18-D) y wallet_analyzer (Ola 17-K):
+# el job del paper, la medicion y los comandos corren a la vez.
+_local_px = threading.local()
+
+
+def _set_fallo_precio(motivo):
+    _local_px.fallo = motivo
+
+
+def ultimo_fallo_precio() -> str | None:
+    """Motivo por el que el ULTIMO sondeo de precio de ESTE hilo no pudo
+    hacerse, o None si DexScreener contesto (aunque fuera para decir que
+    el token ya no cotiza)."""
+    return getattr(_local_px, "fallo", None)
+
+
 def _price_mc_ex(mint: str):
     """(precio_usd, market_cap, muerto, liq_usd) según DexScreener, del par de mayor
     liquidez. Se devuelven JUNTOS porque el MC no se puede deducir del
@@ -66,7 +92,12 @@ def _price_mc_ex(mint: str):
     fallo de red o un 429 NO es muerte — devuelve (None, None, False) y
     se reintenta. Antes ambos casos eran indistinguibles y las señales de
     tokens muertos quedaban sin medir PARA SIEMPRE: las peores pérdidas
-    desaparecían del win rate y todos los % de acierto salían inflados."""
+    desaparecían del win rate y todos los % de acierto salían inflados.
+
+    (Ola 18-E) Y como `(None, None, False, 0.0)` sale TAMBIÉN cuando la
+    petición no llega a hacerse, el motivo queda en `ultimo_fallo_precio()`
+    para quien necesite distinguirlo. Ver el comentario de arriba."""
+    _set_fallo_precio(None)
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=mint),
                          timeout=15)
@@ -75,17 +106,35 @@ def _price_mc_ex(mint: str):
         pairs = (r.json() or {}).get("pairs") or []
         if not pairs:
             return (None, None, True, 0.0)
-        mejor, mejor_liq = None, -1.0
+        mejor, mejor_liq, mejor_liq_sabida = None, -1.0, False
         for p in pairs:
+            # (Ola 18-E) La liquidez tambien va DENTRO del try. Estaba
+            # fuera, y si DexScreener mandaba `liquidity` como lista en
+            # UN par (o `usd` como texto raro), reventaba el sondeo
+            # ENTERO del token — que ademas se leia como "fallo de red",
+            # cuando en realidad es la respuesta de ese mint y se repite
+            # igual en cada pasada. Un par ilegible se salta y ya.
             try:
                 px = float(p.get("priceUsd") or 0)
-            except (TypeError, ValueError):
+                if px <= 0:
+                    continue
+                # (Ola 18-E) "no viene el dato" NO es "vale 0". Antes las
+                # dos cosas daban `liq=0.0`, o sea por debajo de
+                # LIQ_MUERTO_USD, o sea MUERTO — y el paper cierra eso a
+                # -99% sobre el historico, que no se puede deshacer.
+                _liq_bruta = (p.get("liquidity") or {}).get("usd")
+                liq = None if _liq_bruta is None else float(_liq_bruta)
+                if liq is not None and liq < 0:
+                    liq = None      # dato absurdo: se trata como ausente
+            except (TypeError, ValueError, AttributeError):
                 continue
-            if px <= 0:
-                continue
-            liq = float(((p.get("liquidity") or {}).get("usd")) or 0)
-            if liq > mejor_liq:
-                mejor_liq, mejor = liq, p
+            # `mejor is None` va primero: si no, un par SIN dato de
+            # liquidez (_cmp = -1.0) nunca superaria el -1.0 inicial y el
+            # token entero saldria "sin precio usable".
+            _cmp = -1.0 if liq is None else liq
+            if mejor is None or _cmp > mejor_liq:
+                mejor_liq, mejor = _cmp, p
+                mejor_liq_sabida = liq is not None
         if not mejor:
             # Hay pares pero ninguno con precio usable: sin dato, no muerte.
             return (None, None, False, 0.0)
@@ -95,12 +144,19 @@ def _price_mc_ex(mint: str):
             mc = float(mc) if mc else None
         except (TypeError, ValueError):
             mc = None
+        if not mejor_liq_sabida:
+            # (Ola 18-E) Hay precio pero DexScreener no dice la liquidez.
+            # No se puede declarar muerto por algo que no se ha leido: se
+            # devuelve el precio y la liquidez como desconocida (None).
+            return (px, mc, False, None)
         if mejor_liq < LIQ_MUERTO_USD:
             # Liquidez de polvo: intradeable. Para la medicion es una
             # perdida total, igual que un par retirado.
             return (None, None, True, mejor_liq)
         return (px, mc, False, mejor_liq)
-    except (requests.RequestException, ValueError, TypeError):
+    except (requests.RequestException, ValueError, TypeError,
+            AttributeError, KeyError) as e:
+        _set_fallo_precio(f"{type(e).__name__}: {str(e)[:80]}")
         return (None, None, False, 0.0)
 
 
@@ -219,11 +275,29 @@ def _prices_mc_lote(mints: list) -> dict:
             # ninguna muerte.
             try:
                 _lq = ((p.get("liquidity") or {}).get("usd"))
-                liq = float(_lq) if _lq is not None else 0.0
-            except (TypeError, ValueError):
+                # (Ola 18-E) El campo AUSENTE tambien es "no se pudo
+                # leer", no "vale 0". Antes daba 0.0 y unas lineas mas
+                # abajo eso era muerte: -100% en el historico medido por
+                # un campo que DexScreener no mando. La ruta individual ya
+                # lo distingue desde esta misma ola; aqui decia lo
+                # contrario para el MISMO token, y este lote es el que
+                # manda en `track_outcomes`.
+                liq = float(_lq) if _lq is not None else None
+            except (TypeError, ValueError, AttributeError):
                 liq = None
+            if liq is not None and liq < 0:
+                liq = None          # dato absurdo: se trata como ausente
             _orden = -1.0 if liq is None else liq
-            if m not in mejor or _orden > mejor[m][1]:
+            # (Ola 18-E) `mejor[m][2]`, NO `[1]`. La posicion 1 es `liq`,
+            # que puede ser None; la 2 es `_orden`, que existe justo para
+            # poder comparar siempre. Comparar contra `[1]` reventaba con
+            # `float > None` en cuanto el PRIMER par guardado de un mint
+            # no traia liquidez — y eso, desde que el campo ausente ya no
+            # se falsea como 0.0, es un caso corriente. La excepcion salia
+            # de esta funcion (el `try` de arriba solo cubre la peticion),
+            # mataba la pasada entera de `track_outcomes` antes de escribir
+            # ninguna medicion y dejaba la conexion sin cerrar.
+            if m not in mejor or _orden > mejor[m][2]:
                 mejor[m] = (p, liq, _orden)
         for m, (p, liq, _o) in mejor.items():
             px = float(p.get("priceUsd") or 0) or None
@@ -712,6 +786,17 @@ def track_outcomes() -> int:
         base = s["price_usd"]
         p, mc_now, _muerto, _liq = _px_mc(s["mint"])
         if not p:
+            continue
+        # (Ola 18-E) `_liq` puede ser None: desde esta ola, "DexScreener
+        # no dice la liquidez" ya no se falsea como 0. Sin ese dato NO se
+        # saca tarjeta —el criterio es el mismo: sin liquidez comprobada
+        # no hay precio fiable— pero se dice distinto. Antes esta linea
+        # habria hecho `None < 1000.0` y reventado la pasada ENTERA de
+        # `track_outcomes`, dejando ademas la conexion sin cerrar (el
+        # `conn.close()` de esta funcion no esta en un `finally`).
+        if _liq is None:
+            print(f"  · {s['mint'][:8]}… sin tarjeta: DexScreener no dio "
+                  f"la liquidez")
             continue
         if _liq < LIQ_FIABLE_USD:
             # (22/8) Sin liquidez real no hay precio fiable: ninguna

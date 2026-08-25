@@ -590,6 +590,22 @@ def _preparar_pg(pg):
             # vendidos. Si la ⭐ vende el 15%, el paper vende SU 15%.
             ("paper_trades", "fraccion_restante", "DOUBLE PRECISION"),
             ("paper_trades", "pnl_realizado_usd", "DOUBLE PRECISION"),
+            # (Ola 18-E) Rendimiento ya realizado por los trozos, en
+            # FRACCION del importe invertido, no en dolares. Existe porque
+            # el PnL de una venta parcial no depende de saber el cambio
+            # SOL/USD en ese instante: el trozo rindio `pct_precio` sobre
+            # `vendida`. Cuando no habia precio de SOL, el dolar no se
+            # podia calcular, la fraccion SI bajaba y esa ganancia se
+            # perdia para siempre — una ganadora se publicaba como
+            # perdedora. Aqui se guarda sin dolares y el cierre lo
+            # convierte con el importe que tenga. Filas viejas: 0.
+            ("paper_trades", "pnl_realizado_frac", "DOUBLE PRECISION"),
+            # (Ola 18-E) Desde cuando esta posicion NO tiene precio
+            # utilizable (DexScreener responde pero sin par con precio, o
+            # no responde). No cierra nada por si sola: sirve para que una
+            # posicion sin dato deje de ocupar plaza en `paper_max_abiertas`
+            # y para poder decirlo en /paper.
+            ("paper_trades", "sin_dato_desde", "DOUBLE PRECISION"),
             # Copia por consenso (19/8): 'top' = copia clasica del top 30;
             # 'consenso' = N ⭐ de cualquier liga compraron el mismo token
             # y se imita al LIDER (la primera en entrar). Medibles aparte.
@@ -699,6 +715,8 @@ def _preparar_sqlite(conn):
                      ("pnl_usd_neto", "REAL"), ("demora_s", "REAL"),
                      ("fraccion_restante", "REAL"),
                      ("pnl_realizado_usd", "REAL"),
+                     ("pnl_realizado_frac", "REAL"),
+                     ("sin_dato_desde", "REAL"),
                      ("gestion", "TEXT"), ("decidido_por", "TEXT"),
                      ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT"),
                      ("origen", "TEXT"), ("ultima_venta_sig", "TEXT"),

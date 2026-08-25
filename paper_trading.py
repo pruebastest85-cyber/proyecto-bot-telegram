@@ -210,10 +210,10 @@ def open_trade(conn, trade: dict, token: dict, score,
             return False
 
     # Máximo de posiciones abiertas
-    max_abiertas = int(_f(conn, "paper_max_abiertas", 10))
-    n = conn.execute(
-        "SELECT COUNT(*) c FROM paper_trades WHERE status='abierta'"
-    ).fetchone()["c"]
+    max_abiertas = _tope_abiertas(conn)
+    # (Ola 18-E) No cuentan las que llevan mas de SIN_DATO_H sin precio:
+    # ver el comentario de `_abiertas_que_ocupan`.
+    n = _abiertas_que_ocupan(conn)
     if n >= max_abiertas:
         print(f"· Paper: {n} posiciones abiertas (máx {max_abiertas}); "
               "no se abre otra")
@@ -466,14 +466,27 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     frac = _campo(row, "fraccion_restante")
     frac = 1.0 if frac is None else frac
     realizado = _campo(row, "pnl_realizado_usd") or 0
+    # (Ola 18-E) Trozos que se vendieron sin precio de SOL: su rendimiento
+    # se guardo como fraccion del importe. Aqui, con `stake_usd` ya
+    # reconstruido si hacia falta, se pasa a dolares. Filas viejas: 0.
+    realizado_frac = _campo(row, "pnl_realizado_frac") or 0.0
+    if stake_usd is not None and realizado_frac:
+        realizado = realizado + stake_usd * realizado_frac
     pnl_usd = (stake_usd * frac * pct / 100 + realizado
                if stake_usd is not None else None)
     # pnl_sol tambien respeta la fraccion viva (Ola 4): antes aplicaba el
     # pct final al stake COMPLETO — con parciales de por medio, el win
     # rate (que contaba por pnl_sol) podia contradecir al PnL en dolares.
-    # Sigue sin incluir lo realizado por los trozos (eso vive en USD);
-    # es la cifra legada, el resumen decide por pnl_usd.
-    pnl = (row["stake_sol"] or 0) * frac * pct / 100
+    # (Ola 18-E) Y ahora SI incluye lo realizado por los trozos que se
+    # vendieron sin precio de SOL: `pnl_realizado_frac` es adimensional,
+    # asi que en SOL se aplica igual de bien que en dolares. Importa
+    # porque cuando `stake_usd` es None tambien al cerrar, `pnl_usd` sale
+    # NULL y quien decide gana/pierde es justo esta cifra — sin el
+    # termino, una ganadora seguia publicandose como perdedora, que es
+    # exactamente lo que esta ola vino a matar. Lo realizado en DOLARES
+    # (`pnl_realizado_usd`) no se puede sumar aqui: no hay cambio a SOL.
+    pnl = ((row["stake_sol"] or 0) * frac * pct / 100
+           + (row["stake_sol"] or 0) * realizado_frac)
 
     # stake_usd se guarda también cuando se ha reconstruido. Si no, el
     # SUM(stake_usd) del resumen se saltaría esa fila y el ROI saldría
@@ -604,9 +617,28 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
         _su0 = _sol_a_usd()
         stake_usd = ((row["stake_sol"] or 0) * _su0
                      if _su0 and _su0 > 0 else None)
-    pnl_trozo = (stake_usd * vendida * pct_precio / 100
-                 if stake_usd is not None else None)
-    realizado = (_campo(row, "pnl_realizado_usd") or 0) + (pnl_trozo or 0)
+    # (Ola 18-E) EL RENDIMIENTO DEL TROZO NO NECESITA DOLARES.
+    # Antes: si no habia `stake_usd` (y `_sol_a_usd()` tampoco respondia),
+    # `pnl_trozo` quedaba en None, `pnl_realizado_usd` no crecia... y la
+    # fraccion SI bajaba. Esa ganancia se perdia para siempre y una
+    # posicion ganadora se publicaba como perdedora.
+    # Ahora se apunta lo que SI se sabe con certeza: el trozo `vendida`
+    # rindio `pct_precio`. Eso es una fraccion del importe invertido, y el
+    # cierre la convierte a dolares con el importe que tenga entonces.
+    # La fraccion viva baja igual en los dos casos, asi que el espejo de
+    # la venta de la ⭐ se respeta siempre.
+    realizado = _campo(row, "pnl_realizado_usd") or 0
+    realizado_frac = _campo(row, "pnl_realizado_frac") or 0.0
+    rinde_frac = vendida * pct_precio / 100.0
+    pnl_trozo = None
+    if stake_usd is not None:
+        pnl_trozo = stake_usd * rinde_frac
+        realizado = realizado + pnl_trozo
+    else:
+        realizado_frac = realizado_frac + rinde_frac
+        print(f"· Paper: sin precio de SOL para poner en dólares el "
+              f"{pct:.0f}% de {row['symbol']}; se apunta el rendimiento "
+              f"({rinde_frac*100:+.1f}% del importe) y lo convierte el cierre")
 
     # Ejecucion simulada del trozo: cotizar en Jupiter la venta de la
     # parte proporcional de los tokens crudos. Los tokens se descuentan
@@ -641,9 +673,9 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
 
     conn.execute(
         """UPDATE paper_trades SET fraccion_restante=?, pnl_realizado_usd=?,
-           tokens_raw=?, usd_salida_real=?, costos_usd=?, stake_usd=?
-           WHERE id=?""",
-        (nueva, realizado, nuevos_tokens, usd_real, costos,
+           pnl_realizado_frac=?, tokens_raw=?, usd_salida_real=?,
+           costos_usd=?, stake_usd=? WHERE id=?""",
+        (nueva, realizado, realizado_frac, nuevos_tokens, usd_real, costos,
          stake_usd if stake_usd is not None else _campo(row, "stake_usd"),
          row["id"]))
     conn.commit()
@@ -652,7 +684,9 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
                     price, _usd_fill, _fee_fill)
 
     txt_pnl = (f" · PnL del trozo {_usd_firmado(pnl_trozo)}"
-               if pnl_trozo is not None else "")
+               if pnl_trozo is not None
+               else f" · el trozo rindió {rinde_frac*100:+.1f}% del importe "
+                    f"(sin precio de SOL para ponerlo en dólares)")
     try:
         _rw = conn.execute("SELECT alias FROM wallets WHERE address=?",
                            (row["wallet"],)).fetchone()
@@ -861,6 +895,73 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
     _close(conn, row, price, motivo, "🚪", firma=_firma)
 
 
+# (Ola 18-E) A partir de cuantas horas SIN precio utilizable una posicion
+# deja de ocupar plaza en `paper_max_abiertas`.
+#
+# POR QUE EXISTE: desde que el paper ya NO cierra a -99% por un fallo de
+# red ni por "hay pares pero ninguno con precio", una posicion en ese
+# estado se queda abierta hasta que el token vuelva a cotizar. Eso es lo
+# correcto para el historico —no inventar una perdida total—, pero
+# `_close` es el UNICO sitio que marca 'cerrada': con el tope por defecto
+# en 10, diez posiciones asi dejarian el paper sin abrir una sola
+# operacion mas, y /paper seguiria diciendo "activo". Se corta ese camino
+# sin escribir ni un dato falso: la posicion sigue abierta y sin cifras
+# inventadas, pero no bloquea a las demas.
+SIN_DATO_H = 24.0
+
+
+def _tope_abiertas(conn) -> int:
+    """`paper_max_abiertas` en entero, a prueba de basura.
+
+    (Ola 18-E) `_f` protege el `float()`, pero no el `int()` de fuera:
+    `float("inf")` y `float("nan")` NO lanzan y el `int()` si
+    (OverflowError / ValueError). Y "999999" es el modismo que ya usa
+    `/copiapura` para decir "sin limite", asi que llegar aqui es
+    plausible. Se acota a algo sensato en vez de reventar el job."""
+    try:
+        v = int(_f(conn, "paper_max_abiertas", 10))
+    except (ValueError, OverflowError, TypeError):
+        v = 10
+    # `max(0, ...)`, no `max(1, ...)`: con 0 el tope significa "no abras
+    # nada" (`n >= 0` siempre), que es un interruptor de apagado valido y
+    # se perderia subiendolo a 1.
+    return max(0, min(v, 500))
+
+
+def _marcar_sin_dato(conn, row, ahora):
+    """Apunta desde cuando esta posicion no tiene precio utilizable."""
+    if _campo(row, "sin_dato_desde") is not None:
+        return
+    try:
+        conn.execute("UPDATE paper_trades SET sin_dato_desde=? WHERE id=?",
+                     (ahora, row["id"]))
+        conn.commit()
+    except Exception as e:
+        print(f"· Paper: no pude marcar sin_dato_desde ({e})")
+
+
+def _abiertas_que_ocupan(conn, ahora=None) -> int:
+    """Posiciones abiertas que SI cuentan para el tope. Las que llevan mas
+    de SIN_DATO_H sin precio no cuentan: no se pueden gestionar, y
+    dejarlas bloqueando el tope apagaria la simulacion entera."""
+    ahora = time.time() if ahora is None else ahora
+    corte = ahora - SIN_DATO_H * HOUR
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) c FROM paper_trades WHERE status='abierta' "
+            "AND (sin_dato_desde IS NULL OR sin_dato_desde > ?)",
+            (corte,)).fetchone()["c"]
+    except Exception as e:
+        # La columna es de esta ola. Si la migracion no ha corrido (en
+        # Postgres el ALTER se traga sus fallos), el COUNT reventaria y el
+        # paper dejaria de abrir posiciones sin que se note. Se cae al
+        # conteo de siempre, que solo usa `status`.
+        print(f"· Paper: sin columna sin_dato_desde ({e}); cuento todas")
+        return conn.execute(
+            "SELECT COUNT(*) c FROM paper_trades "
+            "WHERE status='abierta'").fetchone()["c"]
+
+
 def update_open_trades() -> int:
     """Job periódico: revisa TP / SL / tiempo de las posiciones abiertas.
     Devuelve cuántas cerró."""
@@ -868,9 +969,44 @@ def update_open_trades() -> int:
     if not _enabled(conn):
         conn.close()
         return 0
-    rows = conn.execute(
-        "SELECT * FROM paper_trades WHERE status='abierta' "
-        "ORDER BY entry_ts").fetchall()
+    # (Ola 18-E) Techo y prioridad. Las posiciones "sin dato" ya no
+    # cierran solas, asi que su numero solo puede crecer, y cada una
+    # cuesta una peticion a DexScreener + el delay en CADA pasada: sin
+    # tope, el job se alarga sin fin y mantiene abierta la conexion
+    # (justo lo que CLAUDE.md §3 señala como lo que agoto el cupo de
+    # Postgres). Se atienden primero las gestionables y se corta en 60;
+    # las "sin dato" se siguen sondeando cuando queda sitio, asi que
+    # pueden revivir.
+    # El techo se calcula desde el tope configurado, NO fijo: con
+    # `/copiapura on` el tope sube a 50, y un LIMIT fijo de 60 dejaria
+    # solo 10 huecos para las "sin dato" — o, si alguien subiera el tope
+    # por encima del limite, dejaria posiciones VIVAS sin gestionar (sin
+    # TP, sin SL, sin reloj) y siempre las mismas.
+    # `min(..., 225)` para que el LIMIT siga siendo un techo: sin el, un
+    # `paper_max_abiertas` enorme (o el "999999" de /copiapura) devolveria
+    # el bucle sin fin que este limite vino a cerrar.
+    _limite = max(60, min(_tope_abiertas(conn) + 25, 225))
+    try:
+        rows = conn.execute(
+            "SELECT * FROM paper_trades WHERE status='abierta' "
+            "ORDER BY CASE WHEN sin_dato_desde IS NULL THEN 0 ELSE 1 END, "
+            # Dentro de las "sin dato", las marcadas MAS RECIENTEMENTE
+            # primero: son las que aun ocupan plaza en el tope y las que
+            # mas posibilidades tienen de revivir. Por `entry_ts` se
+            # sondeaban siempre las mismas (las mas antiguas) y una
+            # posicion recien marcada podia no volver a mirarse nunca,
+            # cumplir las 24 h y quedarse zombi POR EL ORDEN, no porque
+            # el token hubiera muerto.
+            "CASE WHEN sin_dato_desde IS NULL THEN 0 "
+            "     ELSE -sin_dato_desde END, entry_ts LIMIT ?",
+            (_limite,)).fetchall()
+    except Exception as e:
+        # La columna es de esta ola; si la migracion no ha corrido, se
+        # gestiona como siempre en vez de dejar el job muerto.
+        print(f"· Paper: sin columna sin_dato_desde ({e}); orden normal")
+        rows = conn.execute(
+            "SELECT * FROM paper_trades WHERE status='abierta' "
+            "ORDER BY entry_ts LIMIT ?", (_limite,)).fetchall()
     if not rows:
         conn.close()
         return 0
@@ -880,8 +1016,19 @@ def update_open_trades() -> int:
     now = time.time()
 
     import config
-    from signal_tracker import _price
     cerradas = 0
+    # (Ola 18-E) ¿Ha contestado DexScreener a alguien en ESTA pasada? Si
+    # si, un fallo en otra posicion no es "DexScreener caido": es la
+    # respuesta de ESE mint, que se repetira igual pasada tras pasada, y
+    # entonces si hay que marcarla (o se quedaria ocupando plaza para
+    # siempre, sin marca y sin que nadie lo vea).
+    hubo_respuesta = False
+    # (Ola 18-E) Las que fallaron se apuntan y se deciden AL FINAL. Si se
+    # decidiera sobre la marcha, la PRIMERA fila de la pasada nunca
+    # tendria a nadie que hubiera contestado antes — y el orden es
+    # estable, asi que seria siempre la misma fila, pasada tras pasada:
+    # un fallo permanente justo ahi no se marcaria jamas.
+    fallaron = []
     for row in rows:
         # (Ola 16) UNA sola petición por posición: precio, muerte y
         # liquidez del mismo sondeo.
@@ -891,9 +1038,15 @@ def update_open_trades() -> int:
         # se filtraba la conexion), y en las siguientes arrastraba la
         # liquidez del token ANTERIOR al mensaje de cierre de este.
         _liq_salida = None
+        _fallo_px = None
         try:
             from signal_tracker import _price_mc_ex as _pmx
+            from signal_tracker import ultimo_fallo_precio as _ufp
             price, _mcx, _muerto, _liqx = _pmx(row["mint"])
+            # (Ola 18-E) ¿DexScreener contesto, o no llego la peticion?
+            # Sin esto, `price=None, _muerto=False` significaba las dos
+            # cosas a la vez y el cierre por tiempo grababa -99%.
+            _fallo_px = _ufp()
             # (Ola 17-J, auditoria 6) `_liqx` es la liquidez del pool en
             # el que habria que VENDER. Estaba aqui, se pedia, llegaba…
             # y no se usaba en ninguna otra linea del archivo. Sin ella,
@@ -904,18 +1057,37 @@ def update_open_trades() -> int:
             # esta en la pata de salida. Ahora viaja hasta el mensaje.
             _liq_salida = _liqx
         except Exception as _e_px:
-            price, _muerto = _price(row["mint"]), False
+            # (Ola 18-E) Ya no se vuelve a pedir el precio por otra via:
+            # si el sondeo revento, no tenemos dato, y fingir que si lo
+            # tenemos es justo lo que hacia que se cerrara a -99%.
+            price, _muerto = None, False
             _liq_salida = None
+            _fallo_px = f"{type(_e_px).__name__}: {str(_e_px)[:80]}"
             print(f"· Paper: sondeo de {row['symbol']} falló ({_e_px}); "
-                  f"sin liquidez de salida para esta posición")
+                  f"esta posición se revisa en la próxima pasada")
         time.sleep(config.DEXSCREENER_DELAY)
+        if _fallo_px:
+            # No se sabe nada de este token AHORA MISMO. No se cierra, no
+            # se confirma muerte, no se toca `muerto_desde`: se reintenta
+            # en la proxima pasada (15 min). Grabar una perdida total sin
+            # haber preguntado es irreversible; esperar no cuesta nada.
+            # (Ola 18-E) A PROPOSITO no se marca `sin_dato_desde` aqui.
+            # Un fallo de sondeo es GLOBAL y pasajero (DexScreener caido,
+            # 429, corte de salida): marcaria TODAS las posiciones a la
+            # vez y, si el corte durase mas de SIN_DATO_H, el tope de
+            # posiciones se quedaria en cero y el paper abriria muy por
+            # encima de `paper_max_abiertas` — que es su control de
+            # riesgo. La marca es solo para el caso POR TOKEN de abajo.
+            print(f"· Paper: no pude consultar {row['symbol']} "
+                  f"({_fallo_px}); no toco la posición")
+            fallaron.append(row)
+            continue
+        hubo_respuesta = True
         if not price:
-            # (Ola 15, corregido en Ola 16) Aquí NO se vuelve a llamar a
-            # la red: `_price` YA es `_price_mc_ex` por dentro, así que la
-            # segunda llamada era la misma petición duplicada y sin
-            # respetar el delay. El estado de muerte viene del mismo
-            # sondeo (`_muerto`, más arriba).
-            # Y la muerte se CONFIRMA en dos pasadas: un token de pump.fun
+            # (Ola 15/16, y desde la 18-E ya ni existe la segunda
+            # llamada a la red: el precio y el estado de muerte salen del
+            # MISMO sondeo de arriba.)
+            # La muerte se CONFIRMA en dos pasadas: un token de pump.fun
             # que migra a Raydium se queda sin pares unos minutos, y
             # cerrarlo al instante lo anotaba como -99% en el histórico
             # medido, que es lo único irreversible del sistema.
@@ -933,12 +1105,25 @@ def update_open_trades() -> int:
                            "sin liquidez", "💀")
                     cerradas += 1
                 continue
-            if now - row["entry_ts"] > timeout:
-                _close(conn, row, row["entry_price"] * 0.01,
-                       "sin liquidez", "💀")
-                cerradas += 1
+            # (Ola 18-E) Aqui DexScreener SI contesto (si no, ya se
+            # habria hecho `continue` arriba) pero dice que hay pares y
+            # ninguno con precio usable: no es muerte comprobada. Antes,
+            # al vencer el reloj se cerraba a -99% con el motivo "sin
+            # liquidez" — afirmando algo que nadie habia comprobado, y
+            # sobre el historico, que es irreversible. Ahora se deja
+            # abierta y se vuelve a mirar en la proxima pasada; el cierre
+            # a -99% queda SOLO para la muerte confirmada en dos pasadas
+            # (la rama de arriba).
+            print(f"· Paper: {row['symbol']} sin precio usable pero con "
+                  f"pares vivos; no cierro, lo reviso en la próxima pasada")
+            _marcar_sin_dato(conn, row, now)
             continue
-        elif _campo(row, "muerto_desde"):
+        # Hay precio: si venia marcada como "sin dato", ya no lo esta.
+        if _campo(row, "sin_dato_desde") is not None:
+            conn.execute("UPDATE paper_trades SET sin_dato_desde=NULL "
+                         "WHERE id=?", (row["id"],))
+            conn.commit()
+        if _campo(row, "muerto_desde"):
             # Revivió (era la migración, no un rug): se borra la marca.
             conn.execute("UPDATE paper_trades SET muerto_desde=NULL "
                          "WHERE id=?", (row["id"],))
@@ -976,6 +1161,14 @@ def update_open_trades() -> int:
             _close(conn, row, price, "tiempo", "⏰",
                    liq_salida=_liq_salida)
             cerradas += 1
+    # (Ola 18-E) Ahora si: si ALGUIEN contesto en esta pasada, los fallos
+    # no eran un corte general de DexScreener sino la respuesta de esos
+    # mints concretos, que se repetira igual la proxima vez. Se marcan
+    # para que no ocupen plaza en el tope de por vida. Si no contesto
+    # nadie, no se marca a nadie: eso si era un corte.
+    if hubo_respuesta and fallaron:
+        for _r in fallaron:
+            _marcar_sin_dato(conn, _r, now)
     conn.close()
     # (Ola 12, afinado Ola 15) Vigilancia dev-sell de respaldo EN HILO
     # DE FONDO: hasta 15 posiciones x llamadas de red podian alargar
@@ -1187,7 +1380,25 @@ def resumen_text() -> str:
         out.append("Aún no hay operaciones cerradas.")
     out.append("")
     if abiertas:
-        out.append(f"📂 *Abiertas ({len(abiertas)}):*")
+        # (Ola 18-E) Cuantas de esas abiertas estan "sin dato" — no se
+        # pueden gestionar y ya no ocupan plaza en el tope. Si no se
+        # dijera, el dueño veria N abiertas y no entenderia por que se
+        # siguen abriendo mas (o por que estas no se mueven nunca).
+        _corte_sd = time.time() - SIN_DATO_H * HOUR
+        def _sd_viejo(r):
+            v = _campo(r, "sin_dato_desde")
+            return v is not None and v <= _corte_sd
+
+        _sd = sum(1 for r in abiertas if _sd_viejo(r))
+        _sd_nuevas = sum(1 for r in abiertas
+                         if _campo(r, "sin_dato_desde") is not None) - _sd
+        _cab = ""
+        if _sd:
+            _cab += (f"  ·  ⚠️ {_sd} sin precio desde hace más de "
+                     f"{SIN_DATO_H:g} h (no cuentan para el tope)")
+        if _sd_nuevas:
+            _cab += f"  ·  {_sd_nuevas} sin precio ahora mismo"
+        out.append(f"📂 *Abiertas ({len(abiertas)}):*{_cab}")
         now = time.time()
         try:
             from card_image import _ago
@@ -1200,8 +1411,10 @@ def resumen_text() -> str:
             hs = (now - r["entry_ts"]) / HOUR
             su = _campo(r, "stake_usd")
             monto = _usd(su) if su is not None else f"{r['stake_sol']:.2f} SOL"
+            _marca = (" · ⚠️ sin precio"
+                      if _campo(r, "sin_dato_desde") is not None else "")
             out.append(f"   · *{r['symbol']}* {monto} "
-                       f"@ ${_precio(r['entry_price'])} · {_ago(hs)}")
+                       f"@ ${_precio(r['entry_price'])} · {_ago(hs)}{_marca}")
     else:
         out.append("📂 Sin posiciones abiertas.")
     out.append("\nComandos: /paper on · /paper off · /paper max <SOL> · "

@@ -18,6 +18,24 @@ from datetime import datetime, timedelta, timezone
 from db import get_conn, get_setting
 
 
+# ── (Ola 18-E) Texto ajeno dentro de un mensaje en Markdown ──────────
+# El simbolo del token lo elige quien crea el token, y el alias lo escribe
+# la IA. Medido en la base del dueño: 439 tokens tienen `*`, `_`, `[` o
+# backtick en el simbolo. Uno solo de ellos rompe el Markdown del resumen
+# ENTERO — el brief diario llegaba sin formato (o no llegaba). Habia un
+# saneado, pero solo en el bloque de Elite: los otros cuatro bloques
+# metian el texto tal cual.
+_MD_FUERA = {"*": "", "_": " ", "`": "", "[": "(", "]": ")"}
+
+
+def _txt(v, defecto: str = "?") -> str:
+    """Texto de fuera, sin nada que Telegram lea como formato."""
+    s = str(v) if v not in (None, "") else defecto
+    for c, r in _MD_FUERA.items():
+        s = s.replace(c, r)
+    return s
+
+
 def _cutoff_iso(hours: int) -> str:
     return (datetime.now(timezone.utc)
             - timedelta(hours=hours)).isoformat(timespec="seconds")
@@ -44,9 +62,7 @@ def resumen_text() -> str:
             out.append("⭐ *Elite confirmadas en 24h* (nuevas o "
                        "re-evaluadas):")
             for r in elites:
-                nom = (str(r["alias"] or r["address"][:8]).replace("*", "")
-                       .replace("_", " ").replace("`", "")
-                       .replace("[", "(").replace("]", ")"))
+                nom = _txt(r["alias"] or r["address"][:8])
                 pnl = f" · {r['pnl_total']:+.0f} SOL" if r["pnl_total"] is not None else ""
                 out.append(f"  • {nom}{pnl}")
     except Exception:
@@ -63,8 +79,9 @@ def resumen_text() -> str:
             algo = True
             out.append("\n🚀 *Señales de alta confianza (24h):*")
             for s in sigs:
-                out.append(f"  • {s['symbol'] or '?'} "
-                           f"({s['side']}, score {round(s['signal_score'])})")
+                out.append(f"  • {_txt(s['symbol'])} "
+                           f"({_txt(s['side'], '?')}, "
+                           f"score {round(s['signal_score'])})")
     except Exception:
         pass
 
@@ -78,7 +95,8 @@ def resumen_text() -> str:
             algo = True
             out.append("\n📈 *Líderes emergentes (descubren antes):*")
             for w in ta:
-                out.append(f"  • {w['alias']} · Alpha {w['alpha_score']} · "
+                out.append(f"  • {_txt(w['alias'])} · "
+                           f"Alpha {w['alpha_score']} · "
                            f"~{w['avg_lead_min']:.0f} min antes")
     except Exception:
         pass
@@ -103,8 +121,9 @@ def resumen_text() -> str:
             algo = True
             out.append("\n⚠️ *Líderes en declive:*")
             for d in dec:
-                nom = gmap.get(d["leader"], d["leader"][:8]) or d["leader"][:8]
-                out.append(f"  • {nom} · {round(d['a'])}% acierto ({d['n']} pred.)")
+                nom = _txt(gmap.get(d["leader"]) or d["leader"][:8])
+                out.append(f"  • {nom} · {round(d['a'])}% acierto "
+                           f"({d['n']} pred.)")
     except Exception:
         pass
 
@@ -116,7 +135,7 @@ def resumen_text() -> str:
             algo = True
             out.append("\n🔥 *Clusters activos:*")
             for c in cs:
-                lid = c.get("leader") or "?"
+                lid = _txt(c.get("leader"))
                 out.append(f"  • {c['size']} billeteras · líder {lid} · "
                            f"{c['shared_tokens']} tokens en común")
     except Exception:
@@ -132,7 +151,8 @@ def resumen_text() -> str:
             conn.close()
         if hyp:
             algo = True
-            primera = hyp.split("\n")[0][:200]
+            # La hipotesis la escribe la IA: mismo saneado.
+            primera = _txt(hyp.split("\n")[0][:200], "")
             out.append(f"\n🧠 *Hipótesis ({hts}):*\n  {primera}\n  _(completo: /hipotesis)_")
     except Exception:
         pass

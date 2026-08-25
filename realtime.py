@@ -304,8 +304,65 @@ MODEL_FAST = "claude-haiku-4-5-20251001"
 MODEL_SMART = os.getenv("AI_SMART_MODEL", "claude-sonnet-5")
 
 
+# ── (Ola 18-E) El veredicto de la IA, saneado ─────────────────────────
+_VEREDICTOS = ("entrar", "precaucion", "evitar", "salir")
+# La IA responde en español y a veces con tilde ("precaución"), o con la
+# palabra dentro de una frase. Se normaliza sin depender de acentos.
+_SIN_TILDE = str.maketrans("áéíóúÁÉÍÓÚüÜ", "aeiouAEIOUuU")
+
+
+def _sanear_veredicto(v) -> dict:
+    """Un dict con `veredicto` (uno de `_VEREDICTOS`, o None) y `razon`
+    (texto, nunca None).
+
+    POR QUE EXISTE: `extraer_json` devuelve lo que haya contestado el
+    modelo. Si contestaba `{"veredicto": null}` —o una lista, o un texto—
+    la linea del mensaje hacia `.get("veredicto").upper()` y reventaba con
+    AttributeError. Eso ocurre DENTRO de `_proc`, fuera de todo `try`
+    util: el reintento de `process_transactions` solo cubre "database is
+    locked", asi que **se perdia el lote entero del webhook**, no solo esa
+    señal. Una respuesta rara de la IA no puede tirar la ingesta.
+    """
+    if not isinstance(v, dict):
+        return {"veredicto": None, "razon": ""}
+    crudo = v.get("veredicto")
+    ver = None
+    if crudo is not None and not isinstance(crudo, (dict, list)):
+        txt = str(crudo).strip().lower().translate(_SIN_TILDE)
+        if txt in _VEREDICTOS:
+            ver = txt
+        else:
+            # "evitar: baja liquidez" → la PRIMERA palabra, y solo esa.
+            # NADA de buscar la palabra dentro de la frase: "no entrar"
+            # contiene "entrar" y saldria como 🟢 ENTRAR, que es lo
+            # contrario de lo que dijo la IA — y ademas se grabaria asi en
+            # `signals.verdict`, que es lo que lee el aprendizaje semanal
+            # ("¿los veredictos 'entrar' acertaron mas que los 'evitar'?").
+            # Si no encaja la primera palabra, se prefiere no tener
+            # veredicto (⚪) a tener uno al reves.
+            primera = ""
+            for ch in txt:
+                if ch.isalpha():
+                    primera += ch
+                elif primera:
+                    break
+            if primera in _VEREDICTOS:
+                ver = primera
+    razon = v.get("razon")
+    if razon is None or isinstance(razon, (dict, list)):
+        razon = ""
+    # La razon la escribe la IA y va dentro de `_..._` en la alerta: sin
+    # limpiarla, un `*` o un `_` rompe el Markdown del mensaje entero.
+    razon = str(razon).strip()[:400]
+    for _c, _r in (("*", ""), ("_", " "), ("`", ""), ("[", "("), ("]", ")")):
+        razon = razon.replace(_c, _r)
+    return {"veredicto": ver, "razon": razon}
+
+
 def _ai_signal_verdict(payload: dict, smart: bool = False,
                        conn=None) -> dict | None:
+    # (None si no hay IA o no contesto; si contesta, SIEMPRE un dict
+    # saneado — ver `_sanear_veredicto`.)
     """Veredicto IA de la señal via el puente (18/8/2026): la LOCAL es
     titular; `smart` queda como pista historica (la nube escalaba de
     modelo, el puente ya no distingue). `conn` prestada del hilo que
@@ -328,7 +385,7 @@ def _ai_signal_verdict(payload: dict, smart: bool = False,
     text = completar(prompt, max_tokens=200, timeout=25, conn=conn)
     if not text:
         return None
-    return extraer_json(text)
+    return _sanear_veredicto(extraer_json(text))
 def _wallet_sol_delta(tx: dict, wallet: str) -> float:
     """Cambio neto de SOL de la billetera en esta tx (negativo = gastó)."""
     for acc in (tx.get("accountData") or []):
@@ -587,6 +644,16 @@ def process_transactions(txs: list[dict]):
             # Es seguro re-procesar: el INSERT OR IGNORE por firma hace que
             # lo ya registrado se salte solo.
             if "locked" not in str(e).lower():
+                # (Ola 18-E) El lote se pierde, pero al menos se ve. Antes
+                # la excepcion subia y solo dejaba un `print` en el worker
+                # de LaserStream: ni una linea en `/errores`, asi que una
+                # señal perdida por un dato raro era invisible.
+                try:
+                    from errores import record as _rec_lote
+                    _rec_lote("realtime.lote", e,
+                              f"{len(txs)} transaccion(es) sin procesar")
+                except Exception:
+                    pass
                 raise
             print("· Base ocupada; reintento el lote en 3 s")
             import time as _t
@@ -1189,8 +1256,8 @@ def _proc(txs: list[dict], conn):
             f"{div}\n"
             f"📋 *Token*\n{token_block}{redes}\n"
             f"{div}\n"
-            f"{v_icon} *{verdict.get('veredicto', 'sin veredicto').upper()}*\n"
-            f"_{verdict.get('razon', '')}_\n\n"
+            f"{v_icon} *{(verdict.get('veredicto') or 'sin veredicto').upper()}*\n"
+            f"_{verdict.get('razon') or ''}_\n\n"
             f"📊 [DexScreener](https://dexscreener.com/solana/{trade['mint']})"
             f"  ·  📈 [GMGN](https://gmgn.ai/sol/token/{trade['mint']})",
             buttons=[[("📋 Ficha", f"ficha:{trade['wallet']}"),
