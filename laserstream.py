@@ -319,16 +319,19 @@ def start() -> bool:
     if not activo():
         print("· LaserStream desactivado (USE_LASERSTREAM=0)")
         return False
+    # (17-O) `arranque` se fijaba DESPUES del corte por falta de clave,
+    # que es justo el unico caso en que hacia falta: sin clave el estado
+    # quedaba entero a None y /salud no sabia ni cuanto llevaba asi.
+    # Tambien se deja dicho el motivo, que antes iba vacio.
+    if _ESTADO.get("arranque") is None:
+        _ESTADO["arranque"] = time.time()
     if not config.HELIUS_API_KEY:
+        _ESTADO["error"] = "falta HELIUS_API_KEY"
+        print("· LaserStream no arranca: falta HELIUS_API_KEY")
         return False
     if _HILO and _HILO.is_alive():
         return True
     _ULTIMO_SLOT[0] = _cargar_slot()
-    # (17-N) Referencia para medir el silencio cuando aun no ha llegado
-    # NADA: sin esto, un stream mudo desde el arranque no se distingue de
-    # uno recien conectado, porque `desde` se reinicia en cada reconexion.
-    if _ESTADO.get("arranque") is None:
-        _ESTADO["arranque"] = time.time()
     _arrancar_workers()
     _HILO = threading.Thread(target=_bucle, daemon=True, name="laserstream")
     _HILO.start()

@@ -58,7 +58,7 @@ def _c_webhook():
                         "el embudo aún no promociona billeteras")
         # ── Via 1: LaserStream ──
         ls_activo = ls_con = False
-        ls_rec, ls_err, ls_h = 0, "", None
+        ls_rec, ls_err, ls_h, ls_desc = 0, "", None, 0
         try:
             from laserstream import activo as _ls_act, estado as _ls_est
             ls_activo = bool(_ls_act())
@@ -67,6 +67,7 @@ def _c_webhook():
                 ls_con = bool(e.get("conectado"))
                 ls_rec = int(e.get("recibidas") or 0)
                 ls_err = str(e.get("error") or "")
+                ls_desc = int(e.get("descartadas") or 0)
                 # (Ola 17-N, auditoria de la 17-M) `ls_h` medía desde
                 # `desde`, la ultima conexion CON EXITO, y el watchdog
                 # reconecta cada 10 min: nunca pasaba de 0,17 h, asi que
@@ -92,12 +93,46 @@ def _c_webhook():
         # llegaba UNA transaccion el detector quedaba desarmado para
         # siempre. Ahora manda el silencio, que es lo que de verdad
         # delata una suscripcion muerta.
-        MUDO_H = 0.25            # 15 min; el watchdog interno corta a 10
-        ls_mudo = ls_con and ls_h is not None and ls_h > MUDO_H
+        # (Ola 17-O) El umbral era 0,25 h (15 min), copiado del watchdog
+        # interno de LaserStream — y estaba mal, porque ese watchdog solo
+        # RE-SUSCRIBE (gratis) mientras esto enciende una alarma roja que
+        # dice "reinicia el bot". El socket solo emite cuando una
+        # billetera vigilada opera de verdad: no hay latido. Medido en la
+        # base del dueño, 34.573 señales de 7 dias:
+        #   mediana 6 s · p99 2,7 min · p99,9 7,1 min
+        #   huecos > 15 min:  6 en 7 dias  → ~1 falso rojo AL DIA
+        #   huecos > 30 min:  2 en 7 dias
+        #   huecos > 90 min:  1 en 7 dias (uno de 226 min el 21/8, que
+        #                     tiene toda la pinta de corte real)
+        # Con 90 min no hay falsos y una suscripcion muerta se caza
+        # igual: /salud corre cada 6 h, asi que 1,5 h de margen no
+        # retrasa nada. El aviso naranja a los 30 min avisa sin gritar.
+        MUDO_H = 1.5             # rojo: 90 min sin un solo dato
+        FLOJO_H = 0.5            # aviso: 30 min
+        ls_silencio = ls_con and ls_h is not None
+        ls_mudo = ls_silencio and ls_h > MUDO_H
+        ls_flojo = ls_silencio and FLOJO_H < ls_h <= MUDO_H
 
         if ls_con and not ls_mudo:
             _extra = ("" if hook_conf else
                       " · el webhook HTTP no aplica aquí (sin PUBLIC_URL)")
+            # (17-O) `descartadas` no lo miraba nadie: si la cola de
+            # workers se llena, LaserStream sigue contando "recibidas" y
+            # el chequeo daba verde mientras los datos se tiraban.
+            if ls_desc > 0:
+                return _chk("Ingesta", WARN,
+                            f"LaserStream conectado pero ha DESCARTADO "
+                            f"{ls_desc} transacciones (cola llena) · "
+                            f"{ls_rec} recibidas",
+                            "esas señales no se han procesado; si el "
+                            "número sube, reinicia el bot")
+            if ls_flojo:
+                return _chk("Ingesta", WARN,
+                            f"LaserStream conectado pero lleva "
+                            f"{ls_h * 60:.0f} min sin recibir nada · "
+                            f"{ls_rec} transacciones{_extra}",
+                            "puede ser mercado tranquilo; se avisa en "
+                            "rojo si pasa de 90 min")
             return _chk("Ingesta", OK,
                         f"LaserStream conectado · {ls_rec} transacciones "
                         f"· {n} ⭐ vigiladas{_extra}")
@@ -131,7 +166,11 @@ def _c_webhook():
                 # (17-N) El margen se mide sobre el SILENCIO, no sobre
                 # `desde`: con `desde` la reconexion cada 10 min dejaba
                 # el aviso en amarillo permanente aunque no entrara nada.
-                if ls_h is not None and ls_h < MUDO_H:
+                # (17-O) El margen aqui es FLOJO_H, no MUDO_H: estar
+                # DESCONECTADO no es mercado tranquilo, es un estado
+                # duro, y el backoff de reconexion no pasa de 5 min. 30
+                # min desconectado ya es un problema de verdad.
+                if ls_h is not None and ls_h < FLOJO_H:
                     return _chk("Ingesta", WARN, _d + " (reconectando)",
                                 "normal tras un corte; si sigue en el "
                                 "próximo /salud, reinicia el bot")
@@ -155,6 +194,18 @@ def _c_webhook():
                             f"mudo: sin ingesta",
                             "las dos vías están caídas; reinicia el bot")
             if hook_h is None:
+                # (17-O) Este WARN no tenia techo: un apagon total con
+                # PUBLIC_URL puesta se quedaba en amarillo para siempre,
+                # porque LAST_HOOK_TS vuelve a None en cada reinicio y
+                # nunca vuelve a llenarse. El reloj que faltaba es el del
+                # proceso: si lleva mas de una hora arriba y NINGUNA de
+                # las dos vias ha traido nada, ya no es un arranque.
+                if ls_h is not None and ls_h > 1.0:
+                    return _chk("Ingesta", CRIT,
+                                f"{_d} y el webhook tampoco ha recibido "
+                                f"nada en {ls_h:.0f} h: sin ingesta",
+                                "las dos vías están caídas; reinicia el "
+                                "bot")
                 return _chk("Ingesta", WARN,
                             _d + " y el webhook no ha recibido nada aún",
                             "normal si el bot acaba de arrancar; si sigue "
@@ -354,11 +405,21 @@ def _c_medicion(conn):
             # `revisar_y_avisar` solo manda Telegram ante CRIT. Que el
             # medidor este parado y que las billeteras se hayan degradado
             # producen el mismo sintoma, asi que se nombran los dos.
-            return _chk("Medición", CRIT,
-                        f"ninguna de las {al_px} alertas con precio está "
-                        f"medida{_ctx_si}",
-                        "o el medidor está parado, o sus billeteras se "
-                        "degradaron antes de que le diera tiempo")
+            # (17-O) La 17-N lo puso en CRIT diciendo "o el medidor esta
+            # parado, o las billeteras se degradaron". La primera causa
+            # es IMPOSIBLE aqui: un medidor parado con billeteras
+            # vigentes las mete en `med_px` por el EXISTS, y acaba en el
+            # CRIT de `pct < 30`. Llegar aqui exige que TODAS esten fuera
+            # de alcance, que es el caso benigno y ya documentado (8 de
+            # 123 venian de billeteras marcadas bot despues de alertar).
+            # En una semana floja con una sola alerta eso daba un rojo
+            # por Telegram por un unico dato perdido. Vuelve a WARN, con
+            # la frase que de verdad explica lo que paso.
+            return _chk("Medición", WARN,
+                        f"las {al_px} alertas con precio quedaron fuera "
+                        f"del alcance del medidor{_ctx_si}",
+                        "sus billeteras se degradaron antes de que el "
+                        "medidor llegara; si se repite, mira /errores")
         # El % de medicion se calcula sobre las que SI tenian precio Y el
         # medidor todavia alcanza; las demas ya salen arriba.
         pct = 100.0 * al_m / med_px
