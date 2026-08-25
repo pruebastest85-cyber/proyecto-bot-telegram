@@ -94,8 +94,21 @@ def extract_buyers(mint: str, symbol: str | None = None,
                 "price_change_24h": float(price_change_24h or 0.0),
             }
             registradas = analyze_token(conn, token)
+            # (Ola 18-D) Si la descarga fallo, `analyze_token` no registra
+            # nada y deja el token pendiente a proposito. Marcarlo aqui lo
+            # bloqueaba 12 h (`TOKEN_EXTRACT_CACHE_H`) y ademas se le decia
+            # al dueño "0 billeteras registradas", como si el token no
+            # tuviera compradores. Un mint pegado a mano no esta en
+            # `winning_tokens`, asi que el ciclo tampoco lo reintenta: se
+            # perdia del todo.
+            from wallet_analyzer import motivo_fallo_descarga
+            _motivo = motivo_fallo_descarga()
         finally:
             conn.close()
+        if _motivo:
+            print(f"· extract_buyers: descarga incompleta ({_motivo}); "
+                  f"no se cachea, se puede reintentar")
+            return ("descarga", 0)
         _mark(mint)
         return ("ok", registradas)
     except Exception as e:

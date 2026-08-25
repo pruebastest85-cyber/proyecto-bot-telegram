@@ -22,6 +22,7 @@ nativeTransfers, accountData, timestamp, signature). Así `extract_buys` y
 `wallet_profiler` siguen funcionando sin tocarlos.
 """
 
+import threading
 import time
 
 import requests
@@ -156,9 +157,44 @@ def traducir(entrada: dict) -> dict | None:
 
 # ─────────────────────────── llamada al RPC ──────────────────────────────
 
+# ── (Ola 18-D) ¿La paginación se acabó, o se ROMPIÓ? ──────────────────
+# `_rpc` devuelve ([], None) tanto cuando de verdad no hay mas paginas
+# como cuando la red falla o Helius rechaza la peticion. Quien pagina no
+# podia distinguirlo, y `primeras_txs` leia ese None como "historial
+# completo": con la primera pagina buena y la segunda caida se registraban
+# puestos de compra calculados sobre una ventana truncada, y el token se
+# marcaba analizado para siempre. Eso ensucia `appearances`, que segun
+# CLAUDE.md es lo unico irrecuperable del sistema.
+#
+# POR HILO (`threading.local`), por el mismo motivo que en
+# wallet_analyzer (Ola 17-K): el ciclo, la extraccion manual y dev_check
+# corren a la vez y una bandera global la limpiaria el hilo equivocado.
+_local = threading.local()
+
+
+def _set_fallo(motivo):
+    _local.fallo = motivo
+
+
+def reset_fallo():
+    """Empieza a contar de cero. La llaman las funciones que paginan
+    (`primeras_txs`, `historial_wallet`). Una llamada buena a `_rpc`
+    tambien la limpia, asi que quien use `_rpc` suelto no ensucia a
+    nadie."""
+    _local.fallo = None
+
+
+def ultimo_fallo() -> str | None:
+    """Motivo del ultimo fallo de `_rpc` EN ESTE HILO, o None."""
+    return getattr(_local, "fallo", None)
+
+
 def _rpc(address: str, *, orden: str = "desc", limite: int = 1000,
          token_pag: str | None = None) -> tuple[list[dict], str | None]:
-    """Una página del historial. Devuelve (transacciones_traducidas, token)."""
+    """Una página del historial. Devuelve (transacciones_traducidas, token).
+
+    Si falla, ademas de devolver ([], None) deja el motivo en la bandera
+    del hilo: `ultimo_fallo()`."""
     cfg = {
         "transactionDetails": "full",
         "encoding": "jsonParsed",
@@ -182,11 +218,18 @@ def _rpc(address: str, *, orden: str = "desc", limite: int = 1000,
         data = r.json()
     except requests.RequestException as e:
         print(f"  · Error RPC Helius: {e}")
+        _set_fallo(f"Helius no respondió ({str(e)[:80]})")
         return ([], None)
     if data.get("error"):
         print(f"  · RPC rechazado: {data['error']}")
+        _set_fallo(f"Helius rechazó la petición ({str(data['error'])[:80]})")
         return ([], None)
 
+    # (Ola 18-D) Llamada buena: se limpia la marca. Asi ningun lector
+    # hereda el fallo de una llamada anterior de este mismo hilo — los
+    # hilos se reutilizan (`asyncio.to_thread`) y `dev_watch` llama a
+    # `_rpc` directamente, sin reiniciar nada.
+    _set_fallo(None)
     res = data.get("result") or {}
     filas = res.get("data") or []
     # Coste real: 10 créditos por cada 100 devueltas (mínimo 10)
@@ -223,9 +266,11 @@ def primeras_txs(mint: str, max_txs: int = 1500) -> tuple[list[dict], bool]:
     """
     Las PRIMERAS transacciones del token, en orden cronológico real.
 
-    Devuelve (transacciones, completo). `completo` es True porque al pedir
-    desde el inicio sí estamos viendo el arranque del token — a diferencia
-    de paginar hacia atrás, donde casi nunca se llegaba.
+    Devuelve (transacciones, completo). `completo` es True SOLO si se
+    agotó la paginación de verdad: es False si se corta por cupo
+    (`max_txs`) o —desde la Ola 18-D— si una página falla. Pedir desde el
+    inicio hace posible ver el arranque del token, a diferencia de paginar
+    hacia atrás, pero no lo garantiza.
     """
     # Paginacion honesta (Ola 6, auditoria 19/8 - M23): cortar por
     # "pagina vacia" mentia — una pagina cuyas filas fallaron todas en
@@ -234,12 +279,19 @@ def primeras_txs(mint: str, max_txs: int = 1500) -> tuple[list[dict], bool]:
     # ranks inventados desde una ventana truncada, el bug exacto que
     # este modulo existe para evitar. Se corta cuando se AGOTA la
     # paginacion; "completo" significa eso y nada mas.
+    # (Ola 18-D) Y ahora tambien se corta cuando la peticion FALLA, sin
+    # dar por completo lo que solo esta roto: sin esto, la primera pagina
+    # buena + la segunda caida devolvia token=None y por tanto
+    # completo=True, con puestos de compra calculados sobre media historia.
+    reset_fallo()
     todas, token, completo = [], None, False
     for _ in range(40):                     # tope duro anti-bucle
         lote, token = _rpc(mint, orden="asc",
                            limite=min(1000, max(1, max_txs - len(todas))),
                            token_pag=token)
         todas.extend(lote or [])
+        if ultimo_fallo():
+            break                           # roto, NO completo
         if not token:
             completo = True                 # no hay mas paginas
             break
@@ -248,17 +300,39 @@ def primeras_txs(mint: str, max_txs: int = 1500) -> tuple[list[dict], bool]:
     return (todas[:max_txs], completo and bool(todas))
 
 
-def historial_wallet(address: str, max_txs: int = 4000) -> list[dict]:
+def historial_wallet(address: str, max_txs: int = 4000,
+                     con_estado: bool = False):
     """Historial reciente de una billetera (para perfilar), del más nuevo al
-    más viejo — el mismo orden que esperaba el perfilador."""
+    más viejo — el mismo orden que esperaba el perfilador.
+
+    (Ola 18-D) `con_estado=True` devuelve `(txs, entero)`. `entero` es
+    False si la paginación se cortó por algo que NO se pidió: un fallo de
+    red, un rechazo de Helius, o una página sin nada traducible con la
+    paginación todavía viva (el fallo M23 que la Ola 6 cerró en
+    `primeras_txs` y aquí seguía abierto). Llegar al tope de `max_txs` NO
+    lo pone en False: eso es un corte pedido por el llamador.
+
+    Importa porque el perfilador calcula PnL, win rate y "posible bot"
+    sobre lo que le llegue: media historia da un perfil equivocado y lo
+    guarda en la base como si estuviera medido."""
+    # (Ola 18-D) Se reinicia la bandera para que el llamador pueda
+    # preguntar despues si esta historia se corto por un fallo — antes
+    # podia quedar la marca de una llamada anterior de este mismo hilo.
+    reset_fallo()
     todas, token = [], None
     while len(todas) < max_txs:
         lote, token = _rpc(address, orden="desc",
                            limite=min(1000, max_txs - len(todas)),
                            token_pag=token)
         if not lote:
+            if token:
+                # Pagina sin nada traducible pero con paginacion VIVA: se
+                # esta cortando a mitad de historia, no al final.
+                _set_fallo("página vacía con la paginación todavía viva")
             break
         todas.extend(lote)
         if not token:
             break
-    return todas[:max_txs]
+    entero = not ultimo_fallo()
+    txs = todas[:max_txs]
+    return (txs, entero) if con_estado else txs

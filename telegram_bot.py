@@ -392,6 +392,11 @@ def _ficha_text(address: str):
     from signal_tracker import wallet_track_record, format_track_record
     p = profile_wallet(address)
     if not p["tx_sampled"]:
+        # (Ola 18-D) None = "no hay nada"; el texto explica si en realidad
+        # es "no pude bajarlo", que no es lo mismo.
+        if p.get("historial_entero") is False:
+            return ("⚠️ No pude descargar el historial (Helius se cortó a "
+                    "mitad). Inténtalo de nuevo en un rato.")
         return None
     conn = get_conn()
     track = wallet_track_record(conn, address)
@@ -419,6 +424,11 @@ def _ia_text(address: str) -> str:
     from ai_analyst import ai_verdict
     p = profile_wallet(address)
     if not p["tx_sampled"]:
+        # (Ola 18-D) Distinguir "no tiene actividad" de "no pude bajarla".
+        if p.get("historial_entero") is False:
+            return ("⚠️ No pude descargar el historial (Helius se cortó a "
+                    "mitad). No es que la billetera esté vacía: no tengo "
+                    "el dato. Inténtalo de nuevo en un rato.")
         return "Sin transacciones para esa dirección."
     conn = get_conn()
     ev = conn.execute(
@@ -1499,6 +1509,14 @@ async def _extract_buyers_bg(chat, mint: str, symbol, chg24):
             await chat.send_message(
                 "⏳ Alcancé el límite de análisis de tokens por hora "
                 "(para cuidar la cuota). Intenta de nuevo más tarde.")
+        elif status == "descarga":
+            # (Ola 18-D) Antes esto salía como "0 billeteras registradas",
+            # que se lee como "este token no tiene compradores buenos".
+            await chat.send_message(
+                f"⚠️ No pude descargar el historial completo de {nombre} "
+                f"(Helius no respondió). No registré nada para no meter "
+                f"datos a medias. Vuelve a pegar el mint cuando quieras: "
+                f"no se ha guardado en caché.")
         # "cache" y "error" no molestan al usuario
     except Exception as e:
         print(f"· _extract_buyers_bg falló: {e}")

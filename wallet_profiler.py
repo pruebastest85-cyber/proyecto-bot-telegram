@@ -53,7 +53,10 @@ JITO_TIP_ACCOUNTS = {
 }
 
 
-def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
+def _fetch_txs(address: str, pages: int | None = None) -> tuple[list, bool]:
+    """(Ola 18-D) Devuelve `(txs, entero)`. `entero` es False cuando la
+    descarga se corto por un fallo, para que el perfil no se calcule —ni
+    se guarde— sobre media historia."""
     if pages is None:
         pages = getattr(config, "PROFILE_MAX_PAGES", 10)
     # Ruta preferente: RPC (10x más barato y hasta 1.000 txs por llamada),
@@ -61,14 +64,50 @@ def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
     if getattr(config, "USE_RPC_HISTORY", True):
         try:
             from helius_rpc import historial_wallet
-            txs = historial_wallet(address, max_txs=pages * 100)
-            if txs:
-                return txs
+            txs, entero = historial_wallet(address, max_txs=pages * 100,
+                                           con_estado=True)
+            # (Ola 18-D) Media historia da un PnL, un win rate y un
+            # "posible bot" equivocados, y el perfil se guarda en la base
+            # como si estuviera medido — `ai_analyst` puede marcar
+            # `is_bot=1` y sacar la billetera del embudo con ese dato.
+            # Asi que si la paginacion se corto por un fallo se devuelve
+            # NADA, no medio historial: `profile_wallet` da
+            # `tx_sampled = 0` y `ai_analyst` la deja pendiente para el
+            # proximo ciclo. Tampoco se cae al camino antiguo, que cuesta
+            # PROFILE_MAX_PAGES (50) x 100 = 5.000 creditos por billetera
+            # y ademas trunca en silencio exactamente igual (su `except
+            # RequestException: break` devuelve lo que llevara sin decir
+            # nada). Ojo: esto vale TAMBIEN cuando no llego ni una
+            # transaccion — si la pagina 1 se cayo, caer al camino antiguo
+            # seria pagar 5.000 creditos justo cuando Helius no responde.
+            if txs and entero:
+                return (txs, True)
+            if not entero:
+                print("  · El historial se cortó a mitad; no perfilo con "
+                      "datos incompletos, se reintenta en el próximo ciclo")
+                return ([], False)
+            # Sin fallo y sin transacciones: puede ser una billetera nueva
+            # o que el RPC no cubra este caso. Se prueba el camino antiguo,
+            # como se hacia siempre.
         except Exception as e:
             print(f"  · RPC no disponible en perfil ({e}); método antiguo")
     url = config.HELIUS_PARSED_TX.format(address=address)
     all_txs, before = [], None
     for _ in range(pages):
+        # (Ola 18-D) Freno de presupuesto, que aqui no estaba: este bucle
+        # gasta HELIUS_CREDITS_PER_CALL (100) por vuelta y hasta
+        # PROFILE_MAX_PAGES (50) vueltas por billetera. Desde que un corte
+        # a mitad ya no da el perfil por bueno, una billetera que falle
+        # siempre en la misma pagina se reintenta cada ciclo — sin este
+        # freno podria comerse la cuota del mes ella sola.
+        try:
+            from helius_budget import puede_llamar
+            if not puede_llamar():
+                print("  ⛔ Presupuesto de Helius casi agotado: no perfilo "
+                      "por el método antiguo")
+                return ([], False)
+        except Exception:
+            pass
         params = {"api-key": config.HELIUS_API_KEY, "limit": 100}
         if before:
             params["before"] = before
@@ -86,15 +125,27 @@ def _fetch_txs(address: str, pages: int | None = None) -> list[dict]:
             _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
             batch = r.json()
         except requests.RequestException as e:
+            # (Ola 18-D) Antes se devolvia lo que llevara descargado sin
+            # decir nada, y el perfil salia calculado sobre media
+            # historia. Ahora se avisa igual que en la ruta RPC.
             print(f"  · Error Helius en perfil: {e}")
-            break
-        if not isinstance(batch, list) or not batch:
+            return ([], False)
+        if not isinstance(batch, list):
+            # (Ola 18-D) Helius puede devolver 200 con un cuerpo que no es
+            # una lista (p. ej. {"error": ...}), que `raise_for_status` no
+            # coge. Antes se cortaba aqui y el historial salia truncado
+            # dandose por entero: el mismo fallo M23 que la Ola 6 cerro en
+            # `primeras_txs`. Una lista VACIA si es final legitimo.
+            print("  · Helius devolvió algo que no es una lista de "
+                  "transacciones; no perfilo con datos a medias")
+            return ([], False)
+        if not batch:
             break
         all_txs.extend(batch)
         if len(batch) < 100:
             break
         before = batch[-1].get("signature")
-    return all_txs
+    return (all_txs, True)
 
 
 def _sol_delta(tx: dict, wallet: str) -> float:
@@ -147,7 +198,7 @@ def _sol_delta(tx: dict, wallet: str) -> float:
 
 
 def profile_wallet(address: str, with_holdings: bool = True) -> dict:
-    txs = _fetch_txs(address)
+    txs, historial_entero = _fetch_txs(address)
     now = time.time()
     result = {
         "address": address,
@@ -163,6 +214,9 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
         "priced_tokens": 0,
         "metrics": {},        # métricas quant (ver wallet_metrics)
         "possible_bot": False,
+        # (Ola 18-D) False = la descarga se corto por un fallo, asi que
+        # "sin transacciones" NO significa "billetera sin actividad".
+        "historial_entero": historial_entero,
     }
     if not txs:
         return result
@@ -358,6 +412,10 @@ def format_profile(p: dict) -> str:
     lines = [f"🔬 *Perfil de* `{addr[:16]}…`\n"]
 
     if not p["tx_sampled"]:
+        if p.get("historial_entero") is False:
+            return (f"⚠️ No pude descargar el historial de `{addr[:16]}…` "
+                    "(Helius se cortó a mitad). NO es que la billetera esté "
+                    "vacía: no tengo el dato. Vuelve a intentarlo en un rato.")
         return (f"🔬 Sin transacciones recuperadas para `{addr[:16]}…`. "
                 "Puede ser una billetera nueva o hubo un error de API.")
 

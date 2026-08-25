@@ -114,9 +114,28 @@ def fetch_earliest_txs(mint: str, max_pages: int | None = None,
     _set_fallo(None)                   # se reinicia en cada intento
     if getattr(config, "USE_RPC_HISTORY", True):
         try:
-            from helius_rpc import primeras_txs
+            from helius_rpc import primeras_txs, ultimo_fallo
             tope = getattr(config, "EARLY_BUYER_WINDOW", 1500)
             txs, ok = primeras_txs(mint, max_txs=tope)
+            # (Ola 18-D) Si la paginacion se rompio a mitad, esto NO es
+            # una descarga buena aunque hayan llegado transacciones: la
+            # bandera pasa a `motivo_fallo_descarga()` y `analyze_token`
+            # deja el token PENDIENTE en vez de darlo por analizado con
+            # media historia.
+            _fallo_rpc = ultimo_fallo()
+            if _fallo_rpc:
+                _set_fallo(_fallo_rpc)
+            # NO se cae al camino antiguo cuando la marca esta puesta, y
+            # se midio por que: `_fetch_earliest_txs_legacy` usa
+            # HISTORY_MAX_PAGES (60) x HELIUS_CREDITS_PER_CALL (100) =
+            # hasta 6.000 creditos por token, 30 veces lo que acaba de
+            # costar la descarga por RPC — y con MAX_TOKENS_PER_CYCLE=30
+            # un bache pasajero de Helius se comeria la cuota del mes.
+            # Ademas pagina hacia atras: casi nunca llega al inicio del
+            # token, asi que registraria apariciones con `buy_rank` NULO
+            # que `INSERT OR IGNORE` no vuelve a rellenar JAMAS. Sale mas
+            # barato y mas limpio dejar el token pendiente y reintentar
+            # por RPC en el proximo ciclo (10 creditos por cada 100 txs).
             if txs:
                 return (txs, ok) if con_estado else txs
         except Exception as e:
@@ -246,6 +265,25 @@ def analyze_token(conn, token) -> int:
     min_mult = float(getattr(config, "MIN_ENTRY_MULTIPLE", 3.0))
 
     txs, historial_completo = fetch_earliest_txs(mint, con_estado=True)
+    # (Ola 18-D) Un fallo de descarga NO es lo mismo que un historial
+    # corto. Antes esto solo se miraba cuando no llegaba ni una
+    # transaccion; si la primera pagina venia bien y la segunda se caia,
+    # se registraban compradores de media historia (con `buy_rank` NULO,
+    # que `INSERT OR IGNORE` ya no vuelve a rellenar nunca) y el token
+    # quedaba marcado como analizado para siempre. Ahora, con fallo, no
+    # se escribe nada y el token se reintenta en el proximo ciclo.
+    _motivo = motivo_fallo_descarga()
+    if _motivo:
+        print(f"  ⚠️ No pude descargar el historial ({_motivo}): NO se marca "
+              f"como analizado ni se registra nada. Se reintentará en el "
+              f"próximo ciclo.")
+        try:
+            from errores import record as _rec
+            _rec("wallet_analyzer.descarga",
+                 RuntimeError(f"{mint[:12]}…: {_motivo}"))
+        except Exception:
+            pass
+        return 0
     if not historial_completo:
         print("  · Historial incompleto: no se alcanzó el inicio del token; "
               "los puestos de compra NO son fiables y no se registrarán")
@@ -255,17 +293,8 @@ def analyze_token(conn, token) -> int:
         # el proximo ciclo: marcarlo lo sacaba de `pending_tokens` para
         # siempre (db.pending_tokens filtra `analyzed = 0`) y con el se
         # perdian sus compradores tempranos.
-        _motivo = motivo_fallo_descarga()
-        if _motivo:
-            print(f"  ⚠️ NO se marca como analizado: {_motivo}. "
-                  f"Se reintentará en el próximo ciclo.")
-            try:
-                from errores import record as _rec
-                _rec("wallet_analyzer.descarga",
-                     RuntimeError(f"{mint[:12]}…: {_motivo}"))
-            except Exception:
-                pass
-            return 0
+        # El fallo ya se ha mirado arriba (Ola 18-D): si se llega aqui,
+        # la descarga fue buena y de verdad no hay nada que analizar.
         print("  · Sin transacciones recuperadas (el token no tiene "
               "historial): se marca como analizado")
         mark_analyzed(conn, mint)

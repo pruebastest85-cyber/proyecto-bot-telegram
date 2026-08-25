@@ -22,6 +22,11 @@ from wallet_profiler import profile_wallet
 def wallet_dna_text(address: str) -> str | None:
     p = profile_wallet(address)
     if not p.get("tx_sampled"):
+        # (Ola 18-D) Igual que en la ficha: "no pude bajarlo" no es
+        # "no tiene actividad".
+        if p.get("historial_entero") is False:
+            return ("⚠️ No pude descargar el historial (Helius se cortó a "
+                    "mitad). Inténtalo de nuevo en un rato.")
         return None
 
     from wallet_score import compute_score
