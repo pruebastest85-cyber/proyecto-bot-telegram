@@ -820,7 +820,18 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             except Exception as e:
                 print(f"· Decisión IA falló ({e}); reglas de siempre")
 
-        if perfil and perfil.get("clase") == "vende temprano":
+        # (Ola 18-A) El hold extra es una ESTRATEGIA PROPIA, no una copia:
+        # cuando salta, la posicion NO se cierra con la venta de la ⭐,
+        # sino mas tarde por trailing o por reloj. Estaba activo por
+        # defecto y sin interruptor, asi que el dueño no podia medir su
+        # estrategia real ("compro cuando compra, vendo cuando vende").
+        # Ahora se puede apagar. El defecto es "1" = lo de siempre, o sea
+        # que sin tocar nada el comportamiento es identico al de hoy.
+        # OJO: `paper_hold_extra_min = 0` NO sirve para apagarlo — deja la
+        # posicion en politica 'holdear' y la cierra hasta 15 min despues,
+        # a otro precio. Hay que saltarse el bloque entero.
+        _hold_on = (str(_g(conn, "paper_hold_extra", "1")).strip() != "0")
+        if _hold_on and perfil and perfil.get("clase") == "vende temprano":
             try:
                 conn.execute("UPDATE paper_trades SET decidido_por='reglas' "
                              "WHERE id=? AND decidido_por IS NULL",
