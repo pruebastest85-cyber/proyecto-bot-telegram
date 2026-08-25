@@ -1005,16 +1005,29 @@ def _proc(txs: list[dict], conn):
             max_w, max_t, max_h = 3, 2, 12
         hace_1h = trade["ts"] - 3600
         _side = trade["side"]
+        # (Ola 17-M) Los topes cuentan `alert_intento`, no `alerted`.
+        # Desde la 17-L `alerted` solo se pone si Telegram acepto, y con
+        # eso un 429 dejaba de gastar cupo: la tormenta de reintentos se
+        # quedaba sin cortacircuito justo cuando hacia falta. El intento
+        # gasta cupo aunque el mensaje no llegue; `alerted` sigue
+        # significando "llego". Las filas viejas no tienen la columna
+        # puesta, asi que se cuenta tambien `alerted=1` para no perder de
+        # golpe la memoria del tope en el primer arranque tras el deploy.
+        # (El SQL va literal, sin concatenar: `auditoria.py` solo revisa
+        # las consultas que son una cadena constante.)
         n_w = conn.execute(
             "SELECT COUNT(*) c FROM signals WHERE wallet=? AND ts>=? "
-            "AND side=? AND alerted=1 AND signature<>?",
+            "AND side=? AND (COALESCE(alert_intento, 0)=1 OR alerted=1) "
+            "AND signature<>?",
             (trade["wallet"], hace_1h, _side, trade["signature"])).fetchone()["c"]
         n_t = conn.execute(
             "SELECT COUNT(*) c FROM signals WHERE mint=? AND ts>=? "
-            "AND side=? AND alerted=1 AND signature<>?",
+            "AND side=? AND (COALESCE(alert_intento, 0)=1 OR alerted=1) "
+            "AND signature<>?",
             (trade["mint"], hace_1h, _side, trade["signature"])).fetchone()["c"]
         n_h = conn.execute(
-            "SELECT COUNT(*) c FROM signals WHERE ts>=? AND alerted=1 "
+            "SELECT COUNT(*) c FROM signals WHERE ts>=? "
+            "AND (COALESCE(alert_intento, 0)=1 OR alerted=1) "
             "AND signature<>?",
             (hace_1h, trade["signature"])).fetchone()["c"]
         if n_w >= max_w or n_t >= max_t or n_h >= max_h:
@@ -1194,13 +1207,18 @@ def _proc(txs: list[dict], conn):
         # siguiente, que quizas si hubiera entrado) y la base afirmaba un
         # envio que no ocurrio. El paper SI se abre igual: la simulacion
         # mide la señal, no si el mensaje llego.
+        # (Ola 17-M) El INTENTO se marca siempre: es lo que gasta cupo en
+        # los topes anti-spam de arriba. `alerted` solo si Telegram la
+        # acepto.
+        conn.execute("UPDATE signals SET alert_intento=1 WHERE signature=?",
+                     (trade["signature"],))
         if _entregada:
             conn.execute("UPDATE signals SET alerted=1 WHERE signature=?",
                          (trade["signature"],))
-            conn.commit()
         else:
             print(f"· La alerta de {t['symbol']} NO se pudo entregar; "
                   f"la señal NO se marca como alertada (queda en /errores)")
+        conn.commit()
 
         # Paper trading: abre posición simulada con la compra alertada;
         # si es venta de la ⭐ que dio la señal, cierra la simulada.

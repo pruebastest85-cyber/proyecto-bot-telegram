@@ -58,7 +58,7 @@ def _c_webhook():
                         "el embudo aún no promociona billeteras")
         # ── Via 1: LaserStream ──
         ls_activo = ls_con = False
-        ls_rec, ls_err = 0, ""
+        ls_rec, ls_err, ls_h = 0, "", None
         try:
             from laserstream import activo as _ls_act, estado as _ls_est
             ls_activo = bool(_ls_act())
@@ -67,14 +67,23 @@ def _c_webhook():
                 ls_con = bool(e.get("conectado"))
                 ls_rec = int(e.get("recibidas") or 0)
                 ls_err = str(e.get("error") or "")
+                ls_h = _horas(e.get("desde"))
         except Exception:
             ls_activo = False        # modulo ausente: no es via disponible
         # ── Via 2: webhook HTTP de Helius ──
         hook_conf = bool(PUBLIC_URL)
         hook_h = _horas(LAST_HOOK_TS) if LAST_HOOK_TS else None
         hook_vivo = hook_h is not None and hook_h <= 12
+        # (Ola 17-M, auditoria de la 17-L) `conectado` se pone a True en
+        # cuanto abre el socket, ANTES de recibir nada, y una suscripcion
+        # rechazada guarda el motivo en `error` sin tocar `conectado`.
+        # Con solo `ls_con` el chequeo se quedaba en verde diciendo
+        # "conectado · 0 transacciones" indefinidamente. Se exige que
+        # ademas haya llegado algo, con margen para la conexion recien
+        # hecha (el watchdog del propio LaserStream corta a los 10 min).
+        ls_mudo = ls_con and ls_rec == 0 and (ls_h is None or ls_h > 0.25)
 
-        if ls_con:
+        if ls_con and not ls_mudo:
             _extra = ("" if hook_conf else
                       " · el webhook HTTP no aplica aquí (sin PUBLIC_URL)")
             return _chk("Ingesta", OK,
@@ -84,7 +93,15 @@ def _c_webhook():
             return _chk("Ingesta", OK,
                         f"webhook HTTP activo (hace {hook_h:.0f} h) · "
                         f"{n} ⭐ vigiladas"
-                        + (" · LaserStream caído" if ls_activo else ""))
+                        + ((" · LaserStream sin datos" if ls_mudo
+                            else " · LaserStream caído") if ls_activo
+                           else ""))
+        if ls_mudo:
+            return _chk("Ingesta", CRIT,
+                        f"LaserStream dice conectado pero no ha recibido "
+                        f"NADA{' — ' + ls_err if ls_err else ''}",
+                        "suele ser una suscripción rechazada: revisa la "
+                        "clave de Helius y reinicia el bot")
         # Ninguna via confirmada: el aviso depende de cuantas HAY.
         if not ls_activo and not hook_conf:
             return _chk("Ingesta", CRIT,
@@ -94,9 +111,28 @@ def _c_webhook():
         if ls_activo:
             _d = f"LaserStream desconectado{' — ' + ls_err if ls_err else ''}"
             if not hook_conf:
+                # (17-M) Sin webhook posible es la unica via, pero un
+                # corte de segundos es NORMAL: el backoff de reconexion
+                # llega a 300 s y el arranque espera 120 s si aun no hay
+                # ⭐. Se da margen antes de gritar; pasado eso, es rojo.
+                if ls_h is not None and ls_h < 0.25:
+                    return _chk("Ingesta", WARN, _d + " (reconectando)",
+                                "normal tras un corte; si sigue en el "
+                                "próximo /salud, reinicia el bot")
                 return _chk("Ingesta", CRIT, _d + " y es la única vía",
                             "sin PUBLIC_URL el webhook no puede recibir; "
                             "reintenta solo, pero si sigue así reinicia")
+            # (17-M) Con webhook configurado el viejo chequeo daba CRIT a
+            # las 24 h de silencio. Devolver WARN aqui sin mirar el reloj
+            # degradaba un apagon TOTAL (LaserStream caido + webhook mudo
+            # 50 h) de rojo a amarillo — y `revisar_y_avisar` solo avisa
+            # por Telegram ante CRIT, asi que el apagon pasaba callado.
+            if hook_h is None or hook_h > 24:
+                _t = ("y el webhook no ha recibido nada"
+                      if hook_h is None
+                      else f"y el webhook lleva {hook_h:.0f} h mudo")
+                return _chk("Ingesta", CRIT, f"{_d} {_t}: sin ingesta",
+                            "las dos vías están caídas; reinicia el bot")
             return _chk("Ingesta", WARN, _d + "; queda el webhook HTTP",
                         "vigila que sigan entrando señales")
         # Solo webhook configurado y sin datos recientes
@@ -174,43 +210,106 @@ def _c_medicion(conn):
         #   · SILENCIOSAS → se mantiene `is_bot=0` para no contar el
         #     ruido de los bots (1.031 de 14.235 en la ventana). Nunca
         #     alertaron, asi que no hay historia que preservar.
+        # (Ola 17-M, auditoria de la 17-L) Dos correcciones sobre lo de
+        # arriba, ambas medidas:
+        #  a) El SQL se escribia concatenando `"SELECT " + _cols + ...`.
+        #     concatenando la lista de columnas en una variable aparte.
+        #     `auditoria.py` solo extrae consultas cuando el argumento de
+        #     execute() es una cadena LITERAL (ast.Constant), asi que
+        #     decia "Sin hallazgos" sin haber mirado estas dos. Ahora van
+        #     literales, aunque se repita texto: la red de seguridad vale
+        #     mas que ahorrar seis lineas.
+        #  b) El PORCENTAJE MEDIDO usaba de denominador todas las
+        #     alertadas con precio, pero `chg_1h`/`chg_24h` solo las
+        #     escribe `track_outcomes`, y ese SELECT sigue filtrando por
+        #     `is_bot=0 AND (is_tracked=1 OR winning_tokens_count>=2)`
+        #     (signal_tracker.py). Una ⭐ degradada DENTRO de la ventana
+        #     de medicion deja su señal inmedible para siempre, y estaba
+        #     cayendo en el denominador: el % bajaba solo con el tiempo.
+        #     Medido en la base del dueño: 3 de 118 a 7 dias (97%), 17 de
+        #     338 a 30 dias (95%) — poco hoy, pero deriva sin suelo.
+        #     Reparto correcto: el "sin precio" se juzga sobre TODAS las
+        #     alertadas (poblacion estable), y el "% medido" solo sobre
+        #     las que el medidor todavia puede tocar; las que quedan
+        #     fuera de su alcance se dicen aparte en vez de esconderse.
         _ini, _fin = ahora - 7 * 86400, ahora - 30 * 3600
-        _cols = ("COUNT(*) v, "
-                 "COALESCE(SUM(CASE WHEN s.price_usd IS NOT NULL "
-                 "AND s.price_usd > 0 THEN 1 ELSE 0 END), 0) con_px, "
-                 "COALESCE(SUM(CASE WHEN s.chg_24h IS NOT NULL "
-                 "OR s.chg_1h IS NOT NULL THEN 1 ELSE 0 END), 0) m ")
         r_al = conn.execute(
-            "SELECT " + _cols +
+            "SELECT COUNT(*) v, "
+            "COALESCE(SUM(CASE WHEN s.price_usd IS NOT NULL "
+            "AND s.price_usd > 0 THEN 1 ELSE 0 END), 0) con_px "
             "FROM signals s WHERE s.side='compra' AND s.alerted=1 "
             "AND s.ts BETWEEN ? AND ?", (_ini, _fin)).fetchone()
+        # Poblacion que el medidor PUDO tocar. Ojo con el matiz, que me
+        # costo una pasada: filtrar solo por `EXISTS(billetera vigente)`
+        # es igual de erroneo que el filtro que la 17-L quito, porque
+        # mira el estado de HOY sobre un trabajo que se hizo AYER. Una
+        # señal ya medida cuya ⭐ se degrado despues salia del
+        # denominador aunque su medicion existiera: probado contra la
+        # base del dueño, el denominador caia de 118 a 5 y el chequeo
+        # decia "100% medidas (5/5)", un numero cierto e inutil.
+        # La condicion correcta es: YA MEDIDA (prueba de que se pudo)
+        # O todavia al alcance del medidor. Solo queda fuera lo que no
+        # se midio y ya no se podra medir nunca.
+        r_med = conn.execute(
+            "SELECT COUNT(*) v, "
+            "COALESCE(SUM(CASE WHEN s.chg_24h IS NOT NULL "
+            "OR s.chg_1h IS NOT NULL THEN 1 ELSE 0 END), 0) m "
+            "FROM signals s WHERE s.side='compra' AND s.alerted=1 "
+            "AND s.price_usd IS NOT NULL AND s.price_usd > 0 "
+            "AND (s.chg_1h IS NOT NULL OR s.chg_24h IS NOT NULL "
+            "OR EXISTS (SELECT 1 FROM wallets w WHERE w.address = s.wallet "
+            "AND COALESCE(w.is_bot, 0) = 0 "
+            "AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2))) "
+            "AND s.ts BETWEEN ? AND ?", (_ini, _fin)).fetchone()
         r_si = conn.execute(
-            "SELECT " + _cols +
+            "SELECT COUNT(*) v, "
+            "COALESCE(SUM(CASE WHEN s.price_usd IS NOT NULL "
+            "AND s.price_usd > 0 THEN 1 ELSE 0 END), 0) con_px "
             "FROM signals s JOIN wallets w ON w.address = s.wallet "
             "AND COALESCE(w.is_bot, 0) = 0 "
             "WHERE s.side='compra' AND s.alerted=0 "
             "AND s.ts BETWEEN ? AND ?", (_ini, _fin)).fetchone()
-        al, al_px, al_m = r_al["v"], r_al["con_px"], r_al["m"]
+        al, al_px = r_al["v"], r_al["con_px"]
+        med_px, al_m = r_med["v"], r_med["m"]
         si, si_px = r_si["v"], r_si["con_px"]
         al_sin, si_sin = al - al_px, si - si_px
         si_pct = (si_sin * 100.0 / si) if si else 0.0
+        fuera = al_px - med_px          # alertadas que el medidor ya no ve
         # Frase de contexto: siempre se dice el numero de las silenciosas,
         # aunque el aviso lo dispare otra cosa. Son las que deciden que
         # candidata asciende a ⭐, asi que perderlas no es cosmetico.
-        _ctx = (f"; aparte, {si_sin} de {si} señales silenciosas "
-                f"({si_pct:.0f}%) sin precio" if si else "")
+        _ctx_si = (f"; aparte, {si_sin} de {si} señales silenciosas "
+                   f"({si_pct:.0f}%) sin precio" if si else "")
+        _ctx_fuera = (f"; {fuera} alertadas quedaron fuera del alcance "
+                      f"del medidor (su billetera se degradó)"
+                      if fuera > 0 else "")
+        _ctx = _ctx_si + _ctx_fuera
         _accion_si = ("las silenciosas son las que deciden qué candidata "
                       "asciende a ⭐: con esa parte sin medir, el ranking "
                       "se decide con menos evidencia")
 
         if al == 0:
-            # Sin alertas en 7 dias no se puede juzgar la medicion del
-            # dueño; se informa de lo que si hay.
+            # (Ola 17-M) Sin alertas NO se puede quedar mudo. `alerted`
+            # significa desde la 17-L "Telegram la acepto": si el token
+            # se rota o el chat se bloquea, esta columna deja de
+            # escribirse y los tres CRIT de abajo se volvian
+            # inalcanzables — justo mientras el medidor sigue perdiendo
+            # datos. Sin alertas se juzga la poblacion silenciosa con los
+            # mismos umbrales, que es la unica evidencia que queda.
             if si == 0:
                 return _chk("Medición", OK,
                             "sin señales medibles vencidas en 7 días")
-            return _chk("Medición", WARN,
-                        f"ninguna alerta en 7 días{_ctx}", _accion_si)
+            _nota = "ninguna alerta en 7 días"
+            if si_pct >= 15:
+                return _chk("Medición", CRIT,
+                            f"{_nota}; {si_sin} de {si} señales "
+                            f"({si_pct:.0f}%) se quedaron SIN precio de "
+                            f"entrada: no se pueden medir nunca",
+                            "revisa si DexScreener está fallando o "
+                            "limitando; y por qué no sale ninguna alerta")
+            return _chk("Medición", WARN, f"{_nota}{_ctx}",
+                        "comprueba que las alertas de Telegram salen: "
+                        "desde la 17-L solo se marcan si se entregaron")
         if al_sin * 100.0 / al >= 15:
             return _chk("Medición", CRIT,
                         f"{al_sin} de {al} señales ALERTADAS "
@@ -222,24 +321,34 @@ def _c_medicion(conn):
             return _chk("Medición", CRIT,
                         f"ninguna de las {al} alertas tenía precio de "
                         f"entrada", "la medición está parada del todo")
-        # El % de medicion se calcula sobre las que SI tenian precio
-        # (las medibles de verdad); las que lo perdieron ya salen arriba.
-        pct = 100.0 * al_m / al_px
+        if med_px == 0:
+            # Todas las alertadas con precio se salieron del alcance del
+            # medidor: no hay % que calcular, pero tampoco es un fallo
+            # del medidor. Se dice tal cual.
+            return _chk("Medición", WARN,
+                        f"las {al_px} alertas con precio quedaron fuera "
+                        f"del alcance del medidor{_ctx_si}",
+                        "sus billeteras se degradaron antes de medirse")
+        # El % de medicion se calcula sobre las que SI tenian precio Y el
+        # medidor todavia alcanza; las demas ya salen arriba.
+        pct = 100.0 * al_m / med_px
         if pct < 30:
             return _chk("Medición", CRIT,
                         f"solo {pct:.0f}% de las alertas medibles de 7 días "
-                        f"medidas ({al_m}/{al_px}){_ctx}",
+                        f"medidas ({al_m}/{med_px}){_ctx}",
                         "sin medición no hay aprendizaje ni backtest fiable")
         if pct < 70:
             return _chk("Medición", WARN,
                         f"{pct:.0f}% de las alertas medidas "
-                        f"({al_m}/{al_px} con precio){_ctx}", _accion_si)
+                        f"({al_m}/{med_px} con precio){_ctx}",
+                        "el medidor está perdiendo señales dentro de su "
+                        "propia ventana")
         if si_pct >= 25:
             return _chk("Medición", WARN,
-                        f"alertas OK ({pct:.0f}% medidas, {al_m}/{al_px})"
+                        f"alertas OK ({pct:.0f}% medidas, {al_m}/{med_px})"
                         f"{_ctx}", _accion_si)
         return _chk("Medición", OK,
-                    f"{pct:.0f}% de las alertas medidas ({al_m}/{al_px} "
+                    f"{pct:.0f}% de las alertas medidas ({al_m}/{med_px} "
                     f"con precio"
                     + (f", {al_sin} sin precio de entrada" if al_sin else "")
                     + f" · 7 días){_ctx}")

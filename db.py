@@ -623,7 +623,10 @@ def _preparar_pg(pg):
             ("radar_tokens", "price0", "DOUBLE PRECISION"),
             # (Ola 17-J) Retraso en segundos con que se consiguio el
             # precio de entrada de la señal. Ver el bloque de SQLite.
-            ("signals", "price_lag_s", "INTEGER")]:
+            ("signals", "price_lag_s", "INTEGER"),
+            # (Ola 17-M) Intento de alerta (llegue o no). Ver el bloque
+            # de SQLite: los topes anti-spam cuentan esto, no `alerted`.
+            ("signals", "alert_intento", "INTEGER DEFAULT 0")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -666,7 +669,16 @@ def _preparar_sqlite(conn):
                      # precio del instante. Existe para que un precio
                      # recuperado TARDE quede marcado y no se confunda
                      # con uno del momento exacto.
-                     ("price_lag_s", "INTEGER")]:
+                     ("price_lag_s", "INTEGER"),
+                     # (Ola 17-M) Se INTENTO alertar esta señal, llegara
+                     # o no. Desde la 17-L `alerted` significa "Telegram
+                     # la acepto", y los topes anti-spam contaban esa
+                     # columna: durante un 429 los envios rechazados
+                     # dejaban de gastar cupo, o sea que el cortacircuito
+                     # que frena la tormenta se apagaba justo cuando hace
+                     # falta. Los topes cuentan ahora los INTENTOS y
+                     # `alerted` se queda para "llego de verdad".
+                     ("alert_intento", "INTEGER DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
