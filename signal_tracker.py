@@ -107,6 +107,9 @@ def _price_mc_ex(mint: str):
         if not pairs:
             return (None, None, True, 0.0)
         mejor, mejor_liq, mejor_liq_sabida = None, -1.0, False
+        # (Ola 18-H, 3ª vuelta) La mayor liquidez LEIDA de cualquier par,
+        # solo para poder DECIRLO en el log. No se devuelve: ver abajo.
+        mejor_conocida = None
         for p in pairs:
             # (Ola 18-E) La liquidez tambien va DENTRO del try. Estaba
             # fuera, y si DexScreener mandaba `liquidity` como lista en
@@ -129,10 +132,36 @@ def _price_mc_ex(mint: str):
             except (TypeError, ValueError, AttributeError):
                 continue
             # `mejor is None` va primero: si no, un par SIN dato de
-            # liquidez (_cmp = -1.0) nunca superaria el -1.0 inicial y el
-            # token entero saldria "sin precio usable".
-            _cmp = -1.0 if liq is None else liq
-            if mejor is None or _cmp > mejor_liq:
+            # liquidez nunca superaria el -1.0 inicial y el token entero
+            # saldria "sin precio usable".
+            #
+            # (Ola 18-H) El desconocido se ordena EN el umbral de muerte,
+            # no por debajo de todo. Con `-1.0`, un par sin dato perdia
+            # contra CUALQUIER liquidez legible, incluido un pool muerto
+            # con `liquidity.usd: 0` — que en Solana es lo normal (el pool
+            # de pump.fun que queda abandonado tras migrar). Entonces
+            # `mejor` era el pool muerto, `mejor_liq_sabida` pasaba a True,
+            # la guarda de "no se puede declarar muerto lo que no se ha
+            # leido" no llegaba a saltar, y el token se daba por MUERTO:
+            # -99% en la simulacion y -100% en `signals.chg_1h/chg_24h`,
+            # que es historico y no se deshace. O sea: el arreglo de la
+            # Ola 18-E solo funcionaba si el token tenia UN par.
+            #
+            # Con `LIQ_MUERTO_USD` el orden dice lo que se quiere decir:
+            # una liquidez conocida y SANA gana al desconocido (es mas
+            # dato); una liquidez conocida y de POLVO pierde contra el
+            # desconocido (no vale para declarar muerto todo el token).
+            _cmp = float(LIQ_MUERTO_USD) if liq is None else liq
+            if liq is not None and (mejor_conocida is None
+                                    or liq > mejor_conocida):
+                mejor_conocida = liq
+            # (Ola 18-H) En el empate exacto gana el par cuya liquidez SI
+            # se conoce. Sin esto, con una liquidez leida de exactamente
+            # LIQ_MUERTO_USD el resultado —y hasta el precio devuelto—
+            # dependia del orden en que DexScreener listara los pares, que
+            # no es un criterio.
+            if mejor is None or (_cmp, liq is not None) > (mejor_liq,
+                                                           mejor_liq_sabida):
                 mejor_liq, mejor = _cmp, p
                 mejor_liq_sabida = liq is not None
         if not mejor:
@@ -145,18 +174,65 @@ def _price_mc_ex(mint: str):
         except (TypeError, ValueError):
             mc = None
         if not mejor_liq_sabida:
-            # (Ola 18-E) Hay precio pero DexScreener no dice la liquidez.
-            # No se puede declarar muerto por algo que no se ha leido: se
-            # devuelve el precio y la liquidez como desconocida (None).
+            # (Ola 18-E) Hay precio pero DexScreener no dice la liquidez
+            # del par que gana. No se puede declarar muerto por algo que
+            # no se ha leido: `muerto` se queda en False.
+            #
+            # (Ola 18-H, 3ª vuelta) Y se devuelve None, NO la liquidez
+            # de otro par. Este cuarto valor significa "la liquidez del
+            # pool del que sale este precio", y de ese pool no se sabe.
+            #
+            # La 2ª vuelta devolvia aqui la mayor liquidez leida en
+            # cualquier par —normalmente el 0 del pool de pump.fun que
+            # queda abandonado tras migrar— para que el suelo de 1.000 $
+            # del paper siguiera mordiendo. Salio mal por dos sitios, y la
+            # auditoria lo midio: (a) `realtime` escribe este valor en
+            # `signals.liq`, asi que un 0 que nadie leyo del par bueno
+            # entraba al HISTORICO, y `decision_ia` se lo cuenta luego a
+            # la IA como "liquidez muy baja"; y (b) el paper rechazaba sin
+            # mirar `paper_liq_desconocida`, dejando inerte el interruptor
+            # que la 1ª vuelta puso a proposito y sesgando la simulacion
+            # justo en la medicion que existe para producir.
+            #
+            # Asi que se dice la verdad —no se sabe— y se DEJA CONSTANCIA
+            # de lo que si se pudo leer, para que quede en el log y no en
+            # la base.
+            if mejor_conocida is not None:
+                print(f"  · {mint[:8]}… liquidez del par con precio: "
+                      f"desconocida (del otro par se leyo "
+                      f"${mejor_conocida:,.0f})")
             return (px, mc, False, None)
         if mejor_liq < LIQ_MUERTO_USD:
             # Liquidez de polvo: intradeable. Para la medicion es una
             # perdida total, igual que un par retirado.
             return (None, None, True, mejor_liq)
         return (px, mc, False, mejor_liq)
-    except (requests.RequestException, ValueError, TypeError,
-            AttributeError, KeyError) as e:
-        _set_fallo_precio(f"{type(e).__name__}: {str(e)[:80]}")
+    except requests.exceptions.InvalidJSONError as e:
+        # (Ola 18-H, 4ª vuelta) VA PRIMERA a proposito.
+        # `requests.exceptions.JSONDecodeError` hereda de
+        # `RequestException` ANTES que de `ValueError`, asi que el caso
+        # canonico de "DexScreener contesto pero lo que mando no se puede
+        # interpretar" caia en la rama de red y se marcaba `red:` — o sea
+        # que el fallo mas propio del token era el que se clasificaba como
+        # pasajero.
+        _set_fallo_precio(f"dato: {type(e).__name__}: {str(e)[:80]}")
+        return (None, None, False, 0.0)
+    except requests.RequestException as e:
+        # (Ola 18-H) Fallo de TRANSPORTE: la petición no llegó o no
+        # volvió (corte de salida, timeout, 429 por ritmo, 5xx). No dice
+        # NADA de este token en concreto: el mismo mint puede contestar
+        # perfectamente en la siguiente pasada, y de hecho depende de en
+        # qué lugar de la tanda le tocó. El prefijo `red:` existe para
+        # que quien decida algo a partir de esto pueda distinguirlo —
+        # `paper_trading` lo usa para no castigar a una posición por un
+        # 429 que era del ritmo, no suyo.
+        _set_fallo_precio(f"red: {type(e).__name__}: {str(e)[:80]}")
+        return (None, None, False, 0.0)
+    except (ValueError, TypeError, AttributeError, KeyError) as e:
+        # (Ola 18-H) Fallo al LEER la respuesta: DexScreener contestó,
+        # pero lo que mandó para este mint no se puede interpretar. Eso sí
+        # es propio del token y se va a repetir igual en cada pasada.
+        _set_fallo_precio(f"dato: {type(e).__name__}: {str(e)[:80]}")
         return (None, None, False, 0.0)
 
 
@@ -287,7 +363,15 @@ def _prices_mc_lote(mints: list) -> dict:
                 liq = None
             if liq is not None and liq < 0:
                 liq = None          # dato absurdo: se trata como ausente
-            _orden = -1.0 if liq is None else liq
+            # (Ola 18-H) Mismo cambio que en `_price_mc_ex`: el par sin
+            # dato de liquidez se ordena EN el umbral de muerte, no por
+            # debajo de todo. Si no, un pool residual con `usd: 0` ganaba
+            # al par bueno sin dato y el mint salia con `liq = 0` → muerte
+            # → -100% en el historico. Ahora ese mint se queda sin
+            # conclusion (`continue` de abajo) y `track_outcomes` lo
+            # confirma uno a uno, que es justo para lo que existe ese
+            # repesque.
+            _orden = float(LIQ_MUERTO_USD) if liq is None else liq
             # (Ola 18-E) `mejor[m][2]`, NO `[1]`. La posicion 1 es `liq`,
             # que puede ser None; la 2 es `_orden`, que existe justo para
             # poder comparar siempre. Comparar contra `[1]` reventaba con
@@ -297,7 +381,12 @@ def _prices_mc_lote(mints: list) -> dict:
             # de esta funcion (el `try` de arriba solo cubre la peticion),
             # mataba la pasada entera de `track_outcomes` antes de escribir
             # ninguna medicion y dejaba la conexion sin cerrar.
-            if m not in mejor or _orden > mejor[m][2]:
+            # (Ola 18-H, 3ª vuelta) Mismo desempate que en `_price_mc_ex`:
+            # en el empate exacto gana el par cuya liquidez SI se conoce,
+            # para que el resultado no dependa del orden en que
+            # DexScreener liste los pares.
+            if m not in mejor or ((_orden, liq is not None)
+                                  > (mejor[m][2], mejor[m][1] is not None)):
                 mejor[m] = (p, liq, _orden)
         for m, (p, liq, _o) in mejor.items():
             px = float(p.get("priceUsd") or 0) or None

@@ -235,6 +235,18 @@ def _exec_read(name: str, args: dict) -> str:
             addr = (args.get("address") or "").strip()
             p = profile_wallet(addr)
             if not p["tx_sampled"]:
+                # (Ola 18-H) "no pude bajarlo" NO es "no tiene actividad".
+                # La Ola 18-D puso `historial_entero` y actualizo la ficha,
+                # el ADN y el analista, pero se dejo esta herramienta — y
+                # es la que lee la IA que luego propone acciones sobre la
+                # billetera. Afirmarle que no tiene transacciones cuando
+                # lo que paso es que Helius se corto es justo el tipo de
+                # dato inventado que esa ola vino a quitar.
+                if p.get("historial_entero") is False:
+                    return ("No pude descargar el historial de esa "
+                            "dirección (Helius se cortó a mitad): NO "
+                            "quiere decir que no tenga actividad. "
+                            "Inténtalo de nuevo en un rato.")
                 return "Sin transacciones recuperadas para esa dirección."
             conn = get_conn()          # (Ola 15 - M7) sin fugas
             try:

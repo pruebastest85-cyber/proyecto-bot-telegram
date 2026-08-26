@@ -46,6 +46,24 @@ except (TypeError, ValueError):
     _CONFIRMA_MUERTE_S = 900
 
 
+# (Ola 18-H) Mismo criterio que `telegram_bot._md_escapar` y
+# `digest._md` (la tabla ya estaba duplicada en esos dos): el SIMBOLO del
+# token lo elige quien crea el token, y 439 de los de la base del dueño
+# llevan `*`, `_`, `[` o backtick. En los mensajes que salen por `_tg` un
+# Markdown roto se salva con el reintento en texto plano, pero `/paper`
+# responde por otra via SIN reintento: Telegram devolvia 400 y el comando
+# se quedaba MUDO. Se quitan los caracteres en vez de escaparlos con `\`
+# porque el Markdown legacy de Telegram no siempre los des-escapa.
+_MD_FUERA = {"*": "", "_": " ", "`": "", "[": "(", "]": ")"}
+
+
+def _md(txt) -> str:
+    s = str(txt if txt is not None else "")
+    for c, r in _MD_FUERA.items():
+        s = s.replace(c, r)
+    return s
+
+
 def _g(conn, key: str, default):
     """get_setting con tolerancia (el modulo ya importa db abajo)."""
     try:
@@ -182,6 +200,34 @@ def open_trade(conn, trade: dict, token: dict, score,
     if _liq is not None and _liq < 1000:
         print(f"· Paper: liquidez de polvo (${_liq:,.0f}); no se abre")
         return False
+    if _liq is None:
+        # (Ola 18-H) La liquidez DESCONOCIDA se dice en voz alta.
+        #
+        # Hasta la Ola 18-E, "DexScreener no manda el campo de liquidez"
+        # se falseaba como "liquidez = 0", o sea muerte, y el camino
+        # caliente ni siquiera llegaba aqui. Al arreglar aquella mentira
+        # aparecio este efecto de lado: con `liq = None` la condicion de
+        # arriba NO se evalua, asi que el suelo de los 1.000 $ dejo de
+        # aplicarse — y por el camino caliente se abre sin pasar tampoco
+        # por `min_signal_score` ni por los topes anti-spam.
+        #
+        # Se deja ABIERTO a proposito, y con la cifra delante: el 18% de
+        # las señales alertadas (217 de 1.227, medido en la base del
+        # dueño) no traen liquidez. Rechazarlas dejaria fuera casi una de
+        # cada cinco copias de la simulacion, que es exactamente el tipo
+        # de regla propia que las Olas 18-A y 18-B quitaron: el paper
+        # existe para medir "que habria pasado copiando a la ⭐", y la ⭐
+        # compro. Ademas "no lo se" no es prueba de pool fino, y el
+        # cierre ya avisa cuando el pool de SALIDA es fino (Ola 17-J).
+        #
+        # Pero es una decision del dueño, no una ley: con
+        # `paper_liq_desconocida = 0` en `settings` se rechaza.
+        if str(_g(conn, "paper_liq_desconocida", "1") or "1").strip() == "0":
+            print("· Paper: no se pudo comprobar la liquidez y el ajuste "
+                  "`paper_liq_desconocida` esta en 0; no se abre")
+            return False
+        print("· Paper: liquidez NO comprobada (DexScreener no la dio); "
+              "se abre igual, pero el dato no esta medido")
 
     # Una posición abierta por token
     ya = conn.execute(
@@ -337,7 +383,7 @@ def open_trade(conn, trade: dict, token: dict, score,
                      f"{cot['slippage_pct']:.1f}% (cotización Jupiter)")
     _tg(f"🧪 *Paper:* compra simulada{linea_star}\n"
         f"💵 Monto: *{monto}*\n"
-        f"🪙 Token: *{sym}*  ·  entrada ${_precio(price)}{extra_cot}\n"
+        f"🪙 Token: *{_md(sym)}*  ·  entrada ${_precio(price)}{extra_cot}\n"
         f"📂 {n + 1}/{max_abiertas} abiertas\nVer: /paper")
 
     # ── Filtro de entrada IA (modo SOMBRA, pedido del 17/8) ──────────
@@ -369,8 +415,8 @@ def open_trade(conn, trade: dict, token: dict, score,
                             c2.commit()
                             if v["entrada"] == "rechazar":
                                 _tg(f"🚫 *La IA habría rechazado* esta "
-                                    f"compra en {_sym}: "
-                                    f"_{v.get('razon','')}_\n"
+                                    f"compra en {_md(_sym)}: "
+                                    f"_{_md(v.get('razon', ''))}_\n"
                                     f"(la posición corre igual: al cierre "
                                     f"sabremos quién tenía razón)")
                     finally:
@@ -590,7 +636,7 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
                        if _rel and _rel >= 1 else "")
                     + ". El PnL de papel usa el precio medio; el "
                       "**neto** es la cifra realista._")
-    _tg(f"{icon} *Paper cerrada* ({reason}): *{row['symbol']}*\n"
+    _tg(f"{icon} *Paper cerrada* ({reason}): *{_md(row['symbol'])}*\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
         f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}{nota_parciales}\n"
         f"{linea_pnl}{linea_neto}{nota_liq}\n"
@@ -694,7 +740,7 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
                 else (row["wallet"] or "")[:8] + "…")
     except Exception:
         _nom = "la ⭐"
-    _tg(f"✂️ *Venta parcial copiada* en *{row['symbol']}*: *{_nom}* vendió "
+    _tg(f"✂️ *Venta parcial copiada* en *{_md(row['symbol'])}*: *{_nom}* vendió "
         f"el {pct:.0f}% y el paper vende su {pct:.0f}%"
         f" (queda {nueva*100:.0f}% de la posición){txt_pnl}")
     print(f"✂️ Paper: venta parcial {pct:.0f}% en {row['symbol']} "
@@ -839,9 +885,10 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
                         "precio_venta_lider=?, pico=?, hold_hasta=? "
                         "WHERE id=?", (price, price, hasta, row["id"]))
                     conn.commit()
-                    _tg(f"🤖 *IA local* en {row['symbol']}: la ⭐ vendió y "
-                        f"la IA decide holdear hasta {d['max_min']:.0f} min "
-                        f"con trailing. _{d.get('razon','')}_")
+                    _tg(f"🤖 *IA local* en {_md(row['symbol'])}: la ⭐ vendió "
+                        f"y la IA decide holdear hasta "
+                        f"{d['max_min']:.0f} min con trailing. "
+                        f"_{_md(d.get('razon', ''))}_")
                     print(f"🤖 Paper[ia]: hold {d['max_min']:.0f}min "
                           f"en {row['symbol']}")
                     return
@@ -882,7 +929,7 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             deriva = perfil.get("deriva_24h")
             if deriva is None:
                 deriva = perfil.get("deriva_1h")
-            _tg(f"🕐 *Hold extra* en {row['symbol']}: la ⭐ vendió, pero "
+            _tg(f"🕐 *Hold extra* en {_md(row['symbol'])}: la ⭐ vendió, pero "
                 f"su perfil dice que vende temprano "
                 f"({deriva:+.0f}% de deriva tras sus ventas). "
                 f"Mantengo hasta {extra_min:.0f} min con trailing stop.")
@@ -926,6 +973,17 @@ def _tope_abiertas(conn) -> int:
     # nada" (`n >= 0` siempre), que es un interruptor de apagado valido y
     # se perderia subiendolo a 1.
     return max(0, min(v, 500))
+
+
+def _limite_sondeo(conn) -> int:
+    """Cuantas posiciones abiertas se sondean como mucho en una pasada.
+
+    (Ola 18-H) Sale a funcion propia para que se pueda comprobar sola: la
+    formula estaba escrita dentro de `update_open_trades` y la prueba la
+    reproducia en vez de leerla, asi que no comprobaba nada. Verificado
+    por mutacion en la auditoria de esta ola.
+    """
+    return max(60, min(_tope_abiertas(conn) + 25, 525))
 
 
 def _marcar_sin_dato(conn, row, ahora):
@@ -982,10 +1040,18 @@ def update_open_trades() -> int:
     # solo 10 huecos para las "sin dato" — o, si alguien subiera el tope
     # por encima del limite, dejaria posiciones VIVAS sin gestionar (sin
     # TP, sin SL, sin reloj) y siempre las mismas.
-    # `min(..., 225)` para que el LIMIT siga siendo un techo: sin el, un
-    # `paper_max_abiertas` enorme (o el "999999" de /copiapura) devolveria
+    # `min(..., 525)` para que el LIMIT siga siendo un techo: sin el, un
+    # `paper_max_abiertas` enorme puesto a mano devolveria
     # el bucle sin fin que este limite vino a cerrar.
-    _limite = max(60, min(_tope_abiertas(conn) + 25, 225))
+    # (Ola 18-H) Era 225 mientras `_tope_abiertas` admite hasta 500: con
+    # el tope por encima de 200 volvia exactamente el caso que el
+    # comentario de arriba describe como inaceptable — posiciones VIVAS
+    # sin gestionar, y SIEMPRE las mismas, porque dentro de las
+    # gestionables el orden es `entry_ts` ascendente y estable, asi que
+    # las mas nuevas no se miraban nunca. El techo pasa a 525 = 500 + 25,
+    # que es el mismo criterio ("el tope mas un margen") aplicado al tope
+    # que de verdad se puede configurar.
+    _limite = _limite_sondeo(conn)
     try:
         rows = conn.execute(
             "SELECT * FROM paper_trades WHERE status='abierta' "
@@ -1029,147 +1095,196 @@ def update_open_trades() -> int:
     # estable, asi que seria siempre la misma fila, pasada tras pasada:
     # un fallo permanente justo ahi no se marcaria jamas.
     fallaron = []
-    for row in rows:
-        # (Ola 16) UNA sola petición por posición: precio, muerte y
-        # liquidez del mismo sondeo.
-        # (Ola 17-K) Se inicializa ANTES del try. En la 17-J la asigne
-        # solo en la rama del exito: si el `except` saltaba en la primera
-        # posicion daba UnboundLocalError (se perdia la pasada entera y
-        # se filtraba la conexion), y en las siguientes arrastraba la
-        # liquidez del token ANTERIOR al mensaje de cierre de este.
-        _liq_salida = None
-        _fallo_px = None
-        try:
-            from signal_tracker import _price_mc_ex as _pmx
-            from signal_tracker import ultimo_fallo_precio as _ufp
-            price, _mcx, _muerto, _liqx = _pmx(row["mint"])
-            # (Ola 18-E) ¿DexScreener contesto, o no llego la peticion?
-            # Sin esto, `price=None, _muerto=False` significaba las dos
-            # cosas a la vez y el cierre por tiempo grababa -99%.
-            _fallo_px = _ufp()
-            # (Ola 17-J, auditoria 6) `_liqx` es la liquidez del pool en
-            # el que habria que VENDER. Estaba aqui, se pedia, llegaba…
-            # y no se usaba en ninguna otra linea del archivo. Sin ella,
-            # el PnL de papel valora la bolsa al precio medio de
-            # DexScreener aunque el pool sea de $150 — mientras el neto
-            # la vende de verdad. Medido: papel +$2.060 / neto -$529
-            # sobre las mismas 130 operaciones, y el 85% de esa brecha
-            # esta en la pata de salida. Ahora viaja hasta el mensaje.
-            _liq_salida = _liqx
-        except Exception as _e_px:
-            # (Ola 18-E) Ya no se vuelve a pedir el precio por otra via:
-            # si el sondeo revento, no tenemos dato, y fingir que si lo
-            # tenemos es justo lo que hacia que se cerrara a -99%.
-            price, _muerto = None, False
+    # (Ola 18-H) try/finally alrededor de TODA la pasada.
+    #
+    # Aqui dentro se hacen ~200 escrituras y varias peticiones de
+    # red por pasada, y CUALQUIER excepcion —un `database is
+    # locked` porque el hilo de ingesta escribe a la vez, un
+    # formato raro— salia de la funcion sin cerrar la conexion.
+    # Ya paso en la Ola 17-K con un UnboundLocalError: se perdia
+    # la pasada entera Y se filtraba la conexion, cada 15 minutos.
+    # Con esto, la pasada se puede perder (eso se arregla solo en
+    # la siguiente) pero la conexion se cierra siempre.
+    try:
+        for row in rows:
+            # (Ola 16) UNA sola petición por posición: precio, muerte y
+            # liquidez del mismo sondeo.
+            # (Ola 17-K) Se inicializa ANTES del try. En la 17-J la asigne
+            # solo en la rama del exito: si el `except` saltaba en la primera
+            # posicion daba UnboundLocalError (se perdia la pasada entera y
+            # se filtraba la conexion), y en las siguientes arrastraba la
+            # liquidez del token ANTERIOR al mensaje de cierre de este.
             _liq_salida = None
-            _fallo_px = f"{type(_e_px).__name__}: {str(_e_px)[:80]}"
-            print(f"· Paper: sondeo de {row['symbol']} falló ({_e_px}); "
-                  f"esta posición se revisa en la próxima pasada")
-        time.sleep(config.DEXSCREENER_DELAY)
-        if _fallo_px:
-            # No se sabe nada de este token AHORA MISMO. No se cierra, no
-            # se confirma muerte, no se toca `muerto_desde`: se reintenta
-            # en la proxima pasada (15 min). Grabar una perdida total sin
-            # haber preguntado es irreversible; esperar no cuesta nada.
-            # (Ola 18-E) A PROPOSITO no se marca `sin_dato_desde` aqui.
-            # Un fallo de sondeo es GLOBAL y pasajero (DexScreener caido,
-            # 429, corte de salida): marcaria TODAS las posiciones a la
-            # vez y, si el corte durase mas de SIN_DATO_H, el tope de
-            # posiciones se quedaria en cero y el paper abriria muy por
-            # encima de `paper_max_abiertas` — que es su control de
-            # riesgo. La marca es solo para el caso POR TOKEN de abajo.
-            print(f"· Paper: no pude consultar {row['symbol']} "
-                  f"({_fallo_px}); no toco la posición")
-            fallaron.append(row)
-            continue
-        hubo_respuesta = True
-        if not price:
-            # (Ola 15/16, y desde la 18-E ya ni existe la segunda
-            # llamada a la red: el precio y el estado de muerte salen del
-            # MISMO sondeo de arriba.)
-            # La muerte se CONFIRMA en dos pasadas: un token de pump.fun
-            # que migra a Raydium se queda sin pares unos minutos, y
-            # cerrarlo al instante lo anotaba como -99% en el histórico
-            # medido, que es lo único irreversible del sistema.
-            if _muerto:
-                _antes = _campo(row, "muerto_desde")
-                if not _antes:
-                    conn.execute("UPDATE paper_trades SET muerto_desde=? "
-                                 "WHERE id=?", (now, row["id"]))
-                    conn.commit()
-                    print(f"· Paper: {row['symbol']} sin par; se confirma "
-                          f"en la próxima pasada antes de cerrar")
-                    continue
-                if now - float(_antes) >= _CONFIRMA_MUERTE_S:
-                    _close(conn, row, row["entry_price"] * 0.01,
-                           "sin liquidez", "💀")
-                    cerradas += 1
+            _fallo_px = None
+            try:
+                from signal_tracker import _price_mc_ex as _pmx
+                from signal_tracker import ultimo_fallo_precio as _ufp
+                price, _mcx, _muerto, _liqx = _pmx(row["mint"])
+                # (Ola 18-E) ¿DexScreener contesto, o no llego la peticion?
+                # Sin esto, `price=None, _muerto=False` significaba las dos
+                # cosas a la vez y el cierre por tiempo grababa -99%.
+                _fallo_px = _ufp()
+                # (Ola 17-J, auditoria 6) `_liqx` es la liquidez del pool en
+                # el que habria que VENDER. Estaba aqui, se pedia, llegaba…
+                # y no se usaba en ninguna otra linea del archivo. Sin ella,
+                # el PnL de papel valora la bolsa al precio medio de
+                # DexScreener aunque el pool sea de $150 — mientras el neto
+                # la vende de verdad. Medido: papel +$2.060 / neto -$529
+                # sobre las mismas 130 operaciones, y el 85% de esa brecha
+                # esta en la pata de salida. Ahora viaja hasta el mensaje.
+                _liq_salida = _liqx
+            except Exception as _e_px:
+                # (Ola 18-E) Ya no se vuelve a pedir el precio por otra via:
+                # si el sondeo revento, no tenemos dato, y fingir que si lo
+                # tenemos es justo lo que hacia que se cerrara a -99%.
+                price, _muerto = None, False
+                _liq_salida = None
+                _fallo_px = f"{type(_e_px).__name__}: {str(_e_px)[:80]}"
+                print(f"· Paper: sondeo de {row['symbol']} falló ({_e_px}); "
+                      f"esta posición se revisa en la próxima pasada")
+            time.sleep(config.DEXSCREENER_DELAY)
+            if _fallo_px:
+                # No se sabe nada de este token AHORA MISMO. No se cierra, no
+                # se confirma muerte, no se toca `muerto_desde`: se reintenta
+                # en la proxima pasada (15 min). Grabar una perdida total sin
+                # haber preguntado es irreversible; esperar no cuesta nada.
+                # (Ola 18-E) A PROPOSITO no se marca `sin_dato_desde` aqui.
+                # Un fallo de sondeo es GLOBAL y pasajero (DexScreener caido,
+                # 429, corte de salida): marcaria TODAS las posiciones a la
+                # vez y, si el corte durase mas de SIN_DATO_H, el tope de
+                # posiciones se quedaria en cero y el paper abriria muy por
+                # encima de `paper_max_abiertas` — que es su control de
+                # riesgo. La marca es solo para el caso POR TOKEN de abajo.
+                print(f"· Paper: no pude consultar {row['symbol']} "
+                      f"({_fallo_px}); no toco la posición")
+                fallaron.append((row, _fallo_px))
                 continue
-            # (Ola 18-E) Aqui DexScreener SI contesto (si no, ya se
-            # habria hecho `continue` arriba) pero dice que hay pares y
-            # ninguno con precio usable: no es muerte comprobada. Antes,
-            # al vencer el reloj se cerraba a -99% con el motivo "sin
-            # liquidez" — afirmando algo que nadie habia comprobado, y
-            # sobre el historico, que es irreversible. Ahora se deja
-            # abierta y se vuelve a mirar en la proxima pasada; el cierre
-            # a -99% queda SOLO para la muerte confirmada en dos pasadas
-            # (la rama de arriba).
-            print(f"· Paper: {row['symbol']} sin precio usable pero con "
-                  f"pares vivos; no cierro, lo reviso en la próxima pasada")
-            _marcar_sin_dato(conn, row, now)
-            continue
-        # Hay precio: si venia marcada como "sin dato", ya no lo esta.
-        if _campo(row, "sin_dato_desde") is not None:
-            conn.execute("UPDATE paper_trades SET sin_dato_desde=NULL "
-                         "WHERE id=?", (row["id"],))
-            conn.commit()
-        if _campo(row, "muerto_desde"):
-            # Revivió (era la migración, no un rug): se borra la marca.
-            conn.execute("UPDATE paper_trades SET muerto_desde=NULL "
-                         "WHERE id=?", (row["id"],))
-            conn.commit()
-        pct = (price / row["entry_price"] - 1) * 100
-        if pct >= tp:
-            _close(conn, row, price, "take-profit", "🎯",
-                   liq_salida=_liq_salida)
-            cerradas += 1
-        elif pct <= sl:
-            _close(conn, row, price, "stop-loss", "🛑",
-                   liq_salida=_liq_salida)
-            cerradas += 1
-        elif _campo(row, "politica") == "holdear":
-            # Posicion en hold extra: la ⭐ ya vendio pero su perfil dice
-            # "vende temprano". Trailing stop sobre el maximo alcanzado
-            # desde su venta, y tope de tiempo. TP/SL de arriba siguen
-            # mandando (por eso este bloque va despues).
-            trail = abs(_f(conn, "paper_trail_pct", 15.0))
-            pico = max(_campo(row, "pico") or price, price)
-            if pico != _campo(row, "pico"):
-                conn.execute("UPDATE paper_trades SET pico=? WHERE id=?",
-                             (pico, row["id"]))
-                conn.commit()
-            caida = (price / pico - 1) * 100
-            if caida <= -trail:
-                _close(conn, row, price, "trailing del hold", "🪂",
+            hubo_respuesta = True
+            if not price:
+                # (Ola 15/16, y desde la 18-E ya ni existe la segunda
+                # llamada a la red: el precio y el estado de muerte salen del
+                # MISMO sondeo de arriba.)
+                # La muerte se CONFIRMA en dos pasadas: un token de pump.fun
+                # que migra a Raydium se queda sin pares unos minutos, y
+                # cerrarlo al instante lo anotaba como -99% en el histórico
+                # medido, que es lo único irreversible del sistema.
+                if _muerto:
+                    _antes = _campo(row, "muerto_desde")
+                    if not _antes:
+                        conn.execute("UPDATE paper_trades SET muerto_desde=? "
+                                     "WHERE id=?", (now, row["id"]))
+                        conn.commit()
+                        print(f"· Paper: {row['symbol']} sin par; se confirma "
+                              f"en la próxima pasada antes de cerrar")
+                        continue
+                    if now - float(_antes) >= _CONFIRMA_MUERTE_S:
+                        _close(conn, row, row["entry_price"] * 0.01,
+                               "sin liquidez", "💀")
+                        cerradas += 1
+                    continue
+                # (Ola 18-E) Aqui DexScreener SI contesto (si no, ya se
+                # habria hecho `continue` arriba) pero dice que hay pares y
+                # ninguno con precio usable: no es muerte comprobada. Antes,
+                # al vencer el reloj se cerraba a -99% con el motivo "sin
+                # liquidez" — afirmando algo que nadie habia comprobado, y
+                # sobre el historico, que es irreversible. Ahora se deja
+                # abierta y se vuelve a mirar en la proxima pasada; el cierre
+                # a -99% queda SOLO para la muerte confirmada en dos pasadas
+                # (la rama de arriba).
+                print(f"· Paper: {row['symbol']} sin precio usable pero con "
+                      f"pares vivos; no cierro, lo reviso en la próxima pasada")
+                _marcar_sin_dato(conn, row, now)
+                continue
+            # Hay precio: si venia marcada como "sin dato", ya no lo esta.
+            # (Ola 18-H) Las dos limpiezas de marca van protegidas, igual
+            # que `_marcar_sin_dato`. Son escrituras accesorias: si la
+            # base esta ocupada un instante, borrar una marca puede
+            # esperar a la proxima pasada — lo que no puede es llevarse
+            # por delante la revision de TP/SL de las demas posiciones.
+            if _campo(row, "sin_dato_desde") is not None:
+                try:
+                    conn.execute(
+                        "UPDATE paper_trades SET sin_dato_desde=NULL "
+                        "WHERE id=?", (row["id"],))
+                    conn.commit()
+                except Exception as _e_marca:
+                    print(f"· Paper: no pude limpiar sin_dato_desde de "
+                          f"{row['symbol']} ({_e_marca})")
+            if _campo(row, "muerto_desde"):
+                # Revivió (era la migración, no un rug): se borra la marca.
+                try:
+                    conn.execute(
+                        "UPDATE paper_trades SET muerto_desde=NULL "
+                        "WHERE id=?", (row["id"],))
+                    conn.commit()
+                except Exception as _e_marca:
+                    print(f"· Paper: no pude limpiar muerto_desde de "
+                          f"{row['symbol']} ({_e_marca})")
+            pct = (price / row["entry_price"] - 1) * 100
+            if pct >= tp:
+                _close(conn, row, price, "take-profit", "🎯",
                        liq_salida=_liq_salida)
                 cerradas += 1
-            elif now >= (_campo(row, "hold_hasta") or 0):
-                _close(conn, row, price, "fin del hold extra", "🕐",
+            elif pct <= sl:
+                _close(conn, row, price, "stop-loss", "🛑",
                        liq_salida=_liq_salida)
                 cerradas += 1
-        elif now - row["entry_ts"] > timeout:
-            _close(conn, row, price, "tiempo", "⏰",
-                   liq_salida=_liq_salida)
-            cerradas += 1
-    # (Ola 18-E) Ahora si: si ALGUIEN contesto en esta pasada, los fallos
-    # no eran un corte general de DexScreener sino la respuesta de esos
-    # mints concretos, que se repetira igual la proxima vez. Se marcan
-    # para que no ocupen plaza en el tope de por vida. Si no contesto
-    # nadie, no se marca a nadie: eso si era un corte.
-    if hubo_respuesta and fallaron:
-        for _r in fallaron:
-            _marcar_sin_dato(conn, _r, now)
-    conn.close()
+            elif _campo(row, "politica") == "holdear":
+                # Posicion en hold extra: la ⭐ ya vendio pero su perfil dice
+                # "vende temprano". Trailing stop sobre el maximo alcanzado
+                # desde su venta, y tope de tiempo. TP/SL de arriba siguen
+                # mandando (por eso este bloque va despues).
+                trail = abs(_f(conn, "paper_trail_pct", 15.0))
+                pico = max(_campo(row, "pico") or price, price)
+                if pico != _campo(row, "pico"):
+                    conn.execute("UPDATE paper_trades SET pico=? WHERE id=?",
+                                 (pico, row["id"]))
+                    conn.commit()
+                caida = (price / pico - 1) * 100
+                if caida <= -trail:
+                    _close(conn, row, price, "trailing del hold", "🪂",
+                           liq_salida=_liq_salida)
+                    cerradas += 1
+                elif now >= (_campo(row, "hold_hasta") or 0):
+                    _close(conn, row, price, "fin del hold extra", "🕐",
+                           liq_salida=_liq_salida)
+                    cerradas += 1
+            elif now - row["entry_ts"] > timeout:
+                _close(conn, row, price, "tiempo", "⏰",
+                       liq_salida=_liq_salida)
+                cerradas += 1
+        # (Ola 18-E) Ahora si: si ALGUIEN contesto en esta pasada, los fallos
+        # no eran un corte general de DexScreener sino la respuesta de esos
+        # mints concretos, que se repetira igual la proxima vez. Se marcan
+        # para que no ocupen plaza en el tope de por vida. Si no contesto
+        # nadie, no se marca a nadie: eso si era un corte.
+        # (Ola 18-H) …pero solo los que fallaron POR EL DATO, no por la red.
+        #
+        # `hubo_respuesta` no basta para distinguirlos. Un 429 es de RITMO:
+        # este job hace cientos de peticiones a 0,3 s y corre a la vez que
+        # `track_outcomes` y el radar, asi que a unas posiciones les toca
+        # cupo y a otras no, sin que eso diga nada de sus tokens. Marcarlas
+        # las mandaba al FINAL del orden de sondeo de la pasada siguiente
+        # —donde el cupo ya esta gastado— y volvian a fallar: una posicion
+        # VIVA se quedaba sin TP, sin SL y sin reloj indefinidamente, y a las
+        # 24 h dejaba de contar para el tope.
+        #
+        # Desde esta ola `ultimo_fallo_precio()` dice de que tipo fue: `red:`
+        # (transporte, pasajero) o `dato:` (la respuesta de ESE mint no se
+        # puede leer, y se repetira igual). Solo el segundo merece la marca.
+        # El caso mas comun de "no hay precio" ni siquiera pasa por aqui: si
+        # DexScreener contesta y no hay precio usable, se marca arriba, en su
+        # propia rama.
+        if hubo_respuesta and fallaron:
+            for _r, _motivo in fallaron:
+                if str(_motivo or "").startswith("red: "):
+                    continue
+                _marcar_sin_dato(conn, _r, now)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     # (Ola 12, afinado Ola 15) Vigilancia dev-sell de respaldo EN HILO
     # DE FONDO: hasta 15 posiciones x llamadas de red podian alargar
     # ESTE job media hora y retrasar los chequeos de TP/SL. El candado
@@ -1413,7 +1528,7 @@ def resumen_text() -> str:
             monto = _usd(su) if su is not None else f"{r['stake_sol']:.2f} SOL"
             _marca = (" · ⚠️ sin precio"
                       if _campo(r, "sin_dato_desde") is not None else "")
-            out.append(f"   · *{r['symbol']}* {monto} "
+            out.append(f"   · *{_md(r['symbol'])}* {monto} "
                        f"@ ${_precio(r['entry_price'])} · {_ago(hs)}{_marca}")
     else:
         out.append("📂 Sin posiciones abiertas.")

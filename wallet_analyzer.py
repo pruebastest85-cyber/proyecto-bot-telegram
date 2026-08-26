@@ -136,6 +136,29 @@ def fetch_earliest_txs(mint: str, max_pages: int | None = None,
             # que `INSERT OR IGNORE` no vuelve a rellenar JAMAS. Sale mas
             # barato y mas limpio dejar el token pendiente y reintentar
             # por RPC en el proximo ciclo (10 creditos por cada 100 txs).
+            #
+            # (Ola 18-H) Eso es lo que decia el comentario, pero NO era lo
+            # que hacia el codigo: la unica salida era `if txs:`, asi que
+            # un fallo TOTAL del RPC (0 transacciones + marca puesta)
+            # devolvia una lista vacia, seguia hasta el `return` de abajo
+            # y entraba al camino antiguo igualmente. Y alli
+            # `fetch_parsed_txs` hace `_set_fallo(None)` en cada descarga
+            # buena, o sea que BORRABA la marca: `analyze_token` ya no via
+            # ningun fallo, registraba las apariciones del camino antiguo
+            # con `buy_rank` NULO y marcaba el token como analizado para
+            # siempre. Exactamente el daño que la Ola 18-D venia a
+            # impedir, mas hasta 6.000 creditos de Helius.
+            #
+            # Se vuelve con lo que haya (puede ser una lista vacia) y con
+            # `completo=False`, sin tocar el camino antiguo. Se devuelven
+            # las txs que SI llegaron en vez de `[]` porque hay un segundo
+            # llamador, `dev_check.find_creator`, que solo usa `txs[0]`
+            # para saber quien creo el token: con `sortOrder=asc` esa
+            # primera transaccion es correcta aunque la pagina 2 se caiga,
+            # y `analyze_token` no las va a usar de todas formas (mira
+            # `motivo_fallo_descarga()` antes de escribir nada).
+            if _fallo_rpc:
+                return (txs, False) if con_estado else txs
             if txs:
                 return (txs, ok) if con_estado else txs
         except Exception as e:

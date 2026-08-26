@@ -53,45 +53,96 @@ _SIGNAL_LOCK = threading.Lock()
 # perdia) y el "una posicion por token" de open_trade es SELECT-then-
 # INSERT (dos posiciones del mismo mint). Serializar por mint arregla
 # ambos sin frenar a los demas tokens.
+# mint -> [candado, nº de usuarios que lo tienen pedido]
 _MINT_LOCKS: dict = {}
 _MINT_LOCKS_GUARD = threading.Lock()
-# Los ultimos mints cuyo candado se ENTREGO. La purga no los toca: ver el
-# comentario de `_lock_mint`. Tope fijo, asi que no crece.
-from collections import deque as _deque
-_MINT_RECIENTES = _deque(maxlen=256)
 
 
-def _lock_mint(mint: str) -> threading.Lock:
+class _CandadoMint:
+    """Lo que devuelve `_lock_mint`: se usa con `with` y se apunta solo.
+
+    Toma el candado al entrar, lo suelta al salir y ademas descuenta su
+    reserva. Cuando no queda ningun usuario, la entrada desaparece del
+    diccionario: por eso no hace falta ninguna purga.
+    """
+
+    __slots__ = ("_mint", "_entrada", "_usado")
+
+    def __init__(self, mint, entrada):
+        self._mint = mint
+        self._entrada = entrada
+        self._usado = False
+
+    def __enter__(self):
+        # (Ola 18-H) Un mismo objeto NO se puede usar dos veces: la
+        # reserva se pide una vez y se descuenta una vez, asi que un
+        # segundo `with` dejaria la cuenta en negativo, borraria la
+        # entrada mientras otro hilo la esta usando y volveria a romper
+        # la exclusion mutua. Mejor que salte aqui, ruidoso, que dos
+        # hilos dentro del mismo token en silencio.
+        if self._usado:
+            raise RuntimeError(
+                f"candado de {self._mint[:8]}… reutilizado: pide uno "
+                f"nuevo con _lock_mint() en vez de reusar el objeto")
+        self._usado = True
+        self._entrada[0].acquire()
+        return self
+
+    def __exit__(self, *_exc):
+        self._entrada[0].release()
+        with _MINT_LOCKS_GUARD:
+            self._entrada[1] -= 1
+            # La comprobacion `is` es un cinturon de seguridad: con el
+            # `with` usado como toca no hay forma de llegar aqui con una
+            # entrada que ya no es la del diccionario (la reserva se
+            # cuenta al pedir el candado, asi que la entrada no se puede
+            # borrar mientras alguien la tenga). No tiene prueba porque el
+            # estado que evita no es alcanzable; se deja porque cuesta una
+            # comparacion y protege del unico fallo que este candado ha
+            # tenido tres veces: borrar la entrada de otro.
+            if (self._entrada[1] <= 0
+                    and _MINT_LOCKS.get(self._mint) is self._entrada):
+                _MINT_LOCKS.pop(self._mint, None)
+        return False
+
+
+def _lock_mint(mint: str) -> "_CandadoMint":
     """Candado por token. Serializa el leer-modificar-escribir de
     `positions`, de la copia simulada y (Ola 18-G) del registro de
     llegadas del motor predictivo.
 
-    (Ola 18-G) Antes, al pasar de 4096 se hacia `clear()` del diccionario
-    entero. Si en ese momento un hilo TENIA TOMADO el candado de un mint,
-    la siguiente peticion de ese mismo mint devolvia un candado NUEVO y
-    distinto: los dos hilos entraban a la vez y volvia la perdida de
-    llegadas, sin una linea de log. Ahora se sueltan solo los que NADIE
-    tiene tomados, y de los mas antiguos: el diccionario sigue acotado y
-    la exclusion mutua no se rompe.
+    (Ola 18-H, 4ª vuelta y la que cierra el asunto.) Las tres versiones
+    anteriores intentaban decidir DESDE FUERA si un candado se podia
+    tirar, y las tres se equivocaban:
+
+      1ª  `_MINT_LOCKS.clear()` al pasar de 4096. Si un hilo tenia tomado
+          el candado de un mint, el siguiente que pidiera ESE mint
+          recibia un objeto NUEVO: dos hilos dentro a la vez.
+      2ª  Purgar solo los que `not c.locked()`. Pero el candado se
+          ENTREGA aqui y el llamador lo toma unos bytecodes despues: en
+          esa ventana figura libre. Y `Lock.locked()` en CPython es un
+          intento de toma + suelta, asi que sobre un candado libre CON un
+          hilo esperandolo devuelve False y ademas le roba el turno.
+      3ª  Proteger ademas los 256 ultimos entregados. Pero la cola se
+          alimenta en CADA llamada, repeticiones incluidas: con dos mints
+          calientes los "256 protegidos" se quedan en 2. Un auditor
+          reprodujo 136 violaciones de exclusion mutua con el diccionario
+          cargado.
+
+    Adivinar quien lo esta usando no funciona, asi que ahora se CUENTA.
+    Cada peticion suma una reserva bajo el guard —antes de que el objeto
+    salga de aqui, o sea sin ventana— y cada salida del `with` la resta.
+    La entrada se borra cuando la cuenta llega a cero, que es la
+    definicion de "no lo usa nadie". El diccionario no necesita purga
+    porque no acumula: solo contiene los mints que se estan usando AHORA,
+    como mucho tantos como hilos haya vivos.
     """
     with _MINT_LOCKS_GUARD:
-        if len(_MINT_LOCKS) > 4096:
-            # (Ola 18-G, 3ª vuelta) `c.locked()` no basta: el candado se
-            # ENTREGA aqui y el llamador lo toma unos bytecodes despues,
-            # asi que en esa ventana figura como libre y la purga podia
-            # sacarlo — el siguiente que pidiera ese mint recibiria un
-            # objeto DISTINTO y entrarian los dos a la vez. Por eso se
-            # protegen ademas los ULTIMOS entregados. La ventana entre
-            # entregar y tomar dura unos bytecodes, y en ese rato como
-            # mucho pasan por aqui tantos mints como hilos haya: 256 de
-            # margen sobra. El tope es fijo, asi que no crece.
-            protegidos = set(_MINT_RECIENTES)
-            for k in [k for k, c in list(_MINT_LOCKS.items())
-                      if not c.locked() and k not in protegidos][:2048]:
-                _MINT_LOCKS.pop(k, None)
-        candado = _MINT_LOCKS.setdefault(mint, threading.Lock())
-        _MINT_RECIENTES.append(mint)
-        return candado
+        entrada = _MINT_LOCKS.get(mint)
+        if entrada is None:
+            entrada = _MINT_LOCKS[mint] = [threading.Lock(), 0]
+        entrada[1] += 1
+        return _CandadoMint(mint, entrada)
 
 HELIUS_WEBHOOKS = "https://api.helius.xyz/v0/webhooks"
 

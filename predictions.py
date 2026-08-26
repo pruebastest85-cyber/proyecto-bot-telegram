@@ -124,6 +124,22 @@ def _candado_mint(mint: str):
         return contextlib.nullcontext()
 
 
+def marca_medicion(conn) -> int:
+    """La marca, SIN ponerla si no existe. Para los paneles.
+
+    (Ola 18-H) `/metricas` y `/predicciones` solo leen; si llamaran a
+    `medicion_desde` serian ellos quienes fijaran la marca —"la medición
+    empieza cuando abriste el panel"— en vez de la primera compra que pasa
+    por el motor. Aquí, si aún no hay marca, se devuelve 0 y los paneles
+    miden como siempre.
+    """
+    try:
+        v = get_setting(conn, "pred_medicion_desde", None)
+        return int(float(v)) if v else 0
+    except Exception:
+        return 0
+
+
 def medicion_desde(conn) -> int:
     """Desde cuándo valen las mediciones del motor predictivo.
 
@@ -433,19 +449,59 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                     inf = influence(row["leader"], construir=False) or {}
                     _inf_sabida = bool(inf) or cache_lista()
                     health = _leader_health(conn, row["leader"])
-                    conf = confidence_score(inf, pred, token_ctx.get("liq"),
-                                            health, arrived=len(arrived))
                     stage = 1 + len(arrived)
-                    tier = _tier(conf, row["meta_score"] or 0, umbral,
-                                 token_ctx.get("liq"), _risk_pct(token_ctx),
-                                 u=_u_ef)
-                    conn.execute(
-                        "UPDATE predictions SET arrived=?, stage=?, "
-                        "confidence=?, tier=?, "
-                        "first_confirm_s=COALESCE(first_confirm_s,?) "
-                        "WHERE id=?",
-                        (json.dumps(sorted(arrived)), stage, conf, tier,
-                         first, row["id"]))
+                    # (Ola 18-H) Si el grafo NO esta, no se recalcula.
+                    #
+                    # De todo lo que entra en `confidence_score`, lo unico
+                    # que sale del grafo es la fuerza del lider: 15 de los
+                    # 100 puntos. Con la cache fria `inf` queda vacio, ese
+                    # factor cae a 0 y la confianza baja hasta 15 puntos
+                    # de golpe — y hasta ahora esa cifra se ESCRIBIA en la
+                    # fila, sin ninguna marca de que no se habia medido, y
+                    # el `tier` degradado se llevaba por delante la alerta
+                    # ALPHA. Comprobado ejecutandolo: la misma
+                    # confirmacion daba 89/alpha con la cache caliente y
+                    # 75/watchlist en frio.
+                    #
+                    # No es un caso raro: `_CACHE["g"]` arranca vacio,
+                    # `warmup_job` no entra hasta los 40 s y `_build()`
+                    # tarda ~37 s, o sea ~77 s ciegos DESPUES DE CADA
+                    # REINICIO — y el supervisor reinicia en cada
+                    # despliegue.
+                    #
+                    # La prediccion solo se pudo ABRIR con el grafo
+                    # delante, asi que `confidence` y `tier` de la fila ya
+                    # se midieron con el. Cuando el dato falta se conserva
+                    # lo medido y se apunta la llegada igual: la confianza
+                    # se queda corta durante ese minuto (no sube por esta
+                    # confirmacion), que es el error seguro. Inventar el
+                    # liderazgo a 0 era el error peligroso.
+                    if _inf_sabida:
+                        conf = confidence_score(inf, pred,
+                                                token_ctx.get("liq"), health,
+                                                arrived=len(arrived))
+                        tier = _tier(conf, row["meta_score"] or 0, umbral,
+                                     token_ctx.get("liq"),
+                                     _risk_pct(token_ctx), u=_u_ef)
+                        conn.execute(
+                            "UPDATE predictions SET arrived=?, stage=?, "
+                            "confidence=?, tier=?, "
+                            "first_confirm_s=COALESCE(first_confirm_s,?) "
+                            "WHERE id=?",
+                            (json.dumps(sorted(arrived)), stage, conf, tier,
+                             first, row["id"]))
+                    else:
+                        conf = row["confidence"] or 0
+                        tier = row["tier"]
+                        print(f"· Predicción {row['id']}: grafo aún sin "
+                              f"construir; se apunta la llegada y se "
+                              f"conserva la confianza medida ({conf}).")
+                        conn.execute(
+                            "UPDATE predictions SET arrived=?, stage=?, "
+                            "first_confirm_s=COALESCE(first_confirm_s,?) "
+                            "WHERE id=?",
+                            (json.dumps(sorted(arrived)), stage,
+                             first, row["id"]))
                     conn.commit()
                     if (_should_push(tier, conn)
                             and stage > (row["alerted_stage"] or 0)):
@@ -457,15 +513,27 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                             "SELECT * FROM predictions WHERE id=?",
                             (row["id"],)).fetchone()
                         _ctx_al = dict(token_ctx)
-                        _ctx_al["_influencia_sabida"] = _inf_sabida
+                        # (Ola 18-H) Si la confianza que se envia es la
+                        # que se midio CON el grafo (porque ahora, con la
+                        # cache fria, no se recalcula), entonces los
+                        # puntos de liderazgo SI estan dentro y la nota de
+                        # "15 pts aun sin calcular" mentiria al reves.
+                        _ctx_al["_influencia_sabida"] = True
                         # (Ola 18-G) La nota de "hay N seguidores que no
                         # puedo ver" tambien vale en las confirmaciones;
                         # se recalcula desde la propia prediccion, que ya
                         # solo guarda observables.
+                        # (Ola 18-H) Se cuentan los mismos que en la
+                        # apertura: los que superan el umbral de fuerza.
+                        # Con TODOS los del grafo, el numero mezclaba "no
+                        # llega al umbral" con "no la puedo ver" y salia
+                        # mas alto de lo que es.
                         _ocultos_conf = 0
                         try:
-                            _tot = len((inf or {}).get("followers") or [])
-                            _ocultos_conf = max(0, _tot - len(pred))
+                            _f60 = [f for f in
+                                    ((inf or {}).get("followers") or [])
+                                    if _num(f.get("prob"), 0) >= 60]
+                            _ocultos_conf = max(0, len(_f60) - len(pred))
                         except Exception:
                             pass
                         _ctx_al["_seguidores_ocultos"] = _ocultos_conf
@@ -660,9 +728,17 @@ def predictions_text(limit: int = 10) -> str:
         rows = conn.execute(
             "SELECT * FROM predictions ORDER BY created_ts DESC LIMIT ?",
             (limit,)).fetchall()
+        # (Ola 18-H) La precision global tambien se corta por la marca.
+        # La Ola 18-G movio la linea base en el MOTOR (`_leader_health`)
+        # pero no en los PANELES, asi que estos seguian promediando las
+        # 20.785 filas que la propia 18-G declaro incalculables: el panel
+        # podia decir "18% de precision" mientras el motor trabajaba con
+        # el 80% real de las nuevas.
+        _marca = marca_medicion(conn)
         ev = conn.execute(
             "SELECT COUNT(*) n, AVG(outcome_pct) a FROM predictions "
-            "WHERE status='evaluada'").fetchone()
+            "WHERE status='evaluada' AND created_ts>=?",
+            (_marca,)).fetchone()
         gmap = graph()["wallets"]
     finally:
         conn.close()
@@ -704,26 +780,34 @@ def metrics_text() -> str:
             "SELECT COUNT(*) c FROM predictions WHERE stage>=2").fetchone()["c"]
         n3 = conn.execute(
             "SELECT COUNT(*) c FROM predictions WHERE stage>=3").fetchone()["c"]
+        # (Ola 18-H) Todo lo que es CALIDAD (acierto, falsos positivos,
+        # ranking de lideres, calibracion) se mide desde la marca de la
+        # Ola 18-G; lo que es VOLUMEN (total, etapas, tiers) sigue
+        # contando la tabla entera, porque ahi el historico no estorba.
+        marca = marca_medicion(conn)
         ev = conn.execute(
             "SELECT COUNT(*) n, AVG(outcome_pct) acc, AVG(first_confirm_s) t, "
             "AVG(token_chg_pct) chg FROM predictions "
-            "WHERE status='evaluada'").fetchone()
+            "WHERE status='evaluada' AND created_ts>=?",
+            (marca,)).fetchone()
         fp = conn.execute(
             "SELECT COUNT(*) c FROM predictions "
-            "WHERE status='evaluada' AND alerted_stage>0 AND outcome_pct=0"
-        ).fetchone()["c"]
+            "WHERE status='evaluada' AND alerted_stage>0 AND outcome_pct=0 "
+            "AND created_ts>=?", (marca,)).fetchone()["c"]
         # (Ola 17-A) El denominador contaba TODAS las alertadas, incluidas
         # las que aun no se han evaluado, mientras el numerador solo cuenta
         # evaluadas: la tasa salia sistematicamente mejor de lo real
         # ("3/50" cuando quiza solo 6 de esas 50 estan evaluadas).
+        # Numerador y denominador de la MISMA poblacion: `fp` ya va
+        # cortado por la marca, asi que estos dos tambien.
         alerted = conn.execute(
             "SELECT COUNT(*) c FROM predictions "
-            "WHERE alerted_stage>0 AND status='evaluada'"
-        ).fetchone()["c"]
+            "WHERE alerted_stage>0 AND status='evaluada' AND created_ts>=?",
+            (marca,)).fetchone()["c"]
         alerted_abiertas = conn.execute(
             "SELECT COUNT(*) c FROM predictions "
-            "WHERE alerted_stage>0 AND status<>'evaluada'"
-        ).fetchone()["c"]
+            "WHERE alerted_stage>0 AND status<>'evaluada' AND created_ts>=?",
+            (marca,)).fetchone()["c"]
         tiers = {r["tier"]: r["c"] for r in conn.execute(
             "SELECT tier, COUNT(*) c FROM predictions GROUP BY tier").fetchall()}
         # (Ola 8, 21/8) "Mas fiables" exigia n>=1: un lider con 100% en
@@ -731,9 +815,9 @@ def metrics_text() -> str:
         # 5 evaluadas para entrar al ranking.
         leaders = conn.execute(
             """SELECT leader, COUNT(*) n, AVG(outcome_pct) acc
-               FROM predictions WHERE status='evaluada'
+               FROM predictions WHERE status='evaluada' AND created_ts>=?
                GROUP BY leader HAVING COUNT(*)>=5
-               ORDER BY acc DESC, n DESC LIMIT 5"""
+               ORDER BY acc DESC, n DESC LIMIT 5""", (marca,)
         ).fetchall()
         gmap = graph()["wallets"]
     finally:
@@ -756,10 +840,15 @@ def metrics_text() -> str:
         _c2 = get_conn()
         try:
             _u = _umbrales(_c2)
+            # (Ola 18-H) La calibracion mide lo que el motor PRODUCE
+            # hoy. Con la tabla entera, las 20.785 filas viejas —hechas
+            # con el denominador roto de antes de la Ola 18-G— marcaban un
+            # techo que ya no es el de ahora, y el panel podia seguir
+            # diciendo "el motor NO puede alertar" mientras alertaba.
             _mx = _c2.execute(
                 "SELECT MAX(confidence) c, MAX(meta_score) m, "
                 "COUNT(*) n, SUM(CASE WHEN alerted_stage>0 THEN 1 ELSE 0 END) a "
-                "FROM predictions").fetchone()
+                "FROM predictions WHERE created_ts>=?", (marca,)).fetchone()
         finally:
             _c2.close()
         _mc, _mm = _mx["c"] or 0, _mx["m"] or 0
@@ -791,6 +880,27 @@ def metrics_text() -> str:
            f"Creadas: {emit_1d} en 24h · {emit_7d} en 7d · {total} total "
            f"(incluye las que no llegaron a alertarse)",
            f"Alcanzan Nivel 2: {pct(n2, total)} · Nivel 3: {pct(n3, total)}"]
+    if marca:
+        # (Ola 18-H) Que se vea POR QUE el numero de evaluadas es pequeño:
+        # las de antes de la marca no se cuentan, y eso es a proposito.
+        _dias = max(0, (int(time.time()) - marca) // 86400)
+        _desde = ("hoy" if _dias == 0 else
+                  "ayer" if _dias == 1 else f"hace {_dias} días")
+        _viejas = 0
+        try:
+            _c3 = get_conn()
+            try:
+                _viejas = _c3.execute(
+                    "SELECT COUNT(*) c FROM predictions WHERE created_ts<?",
+                    (marca,)).fetchone()["c"]
+            finally:
+                _c3.close()
+        except Exception:
+            _viejas = 0
+        out.append(f"_Acierto medido desde {_desde}_ · "
+                   f"{_viejas:,} predicciones anteriores quedan fuera "
+                   f"(se puntuaron con el cálculo roto de antes de la "
+                   f"Ola 18-G)")
     if ev and ev["n"]:
         out.append(f"Precisión final: *{round(ev['acc'] or 0)}%* "
                    f"({ev['n']} evaluadas)")

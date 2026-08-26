@@ -123,20 +123,135 @@ def _largo_tg(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def _recortar_tg(text: str) -> str:
+def _cerrar_markdown(cuerpo: str) -> str:
+    """Quita los marcadores de Markdown que el recorte dejo sin cerrar.
+
+    (Ola 18-H) Recortar por el medio puede dejar un `*` abierto, y
+    entonces Telegram devuelve 400: el mensaje se salva por el reintento
+    en texto plano de `_send_md`, pero llega con todos los asteriscos y
+    guiones bajos a la vista — justo lo que el saneado de simbolos de la
+    Ola 18-E venia a evitar.
+
+    (2ª vuelta) La primera version contaba marcadores y miraba la
+    paridad, y eso NO es como lee Telegram. Dentro de un ``code span`` los
+    `_` son literales, asi que borrar el backtick huerfano los convertia
+    en delimitadores de verdad — y ya no se volvian a contar. Medido con
+    el texto real de `/metricas` (lleva `bot_local.env`, `PRED_ALPHA_META`
+    y una linea en cursiva): **547 de 558 longitudes de corte** salian
+    rotas, y con enlaces `[texto](url)`, que la paridad no mira siquiera,
+    473 de 558.
+
+    Ahora se recorre de izquierda a derecha como lo hace Telegram: al
+    encontrar un marcador se busca su pareja, y lo que hay entre medias
+    se salta entero (por eso los `_` de dentro de un backtick ya no
+    cuentan). Solo se borran los que se quedan sin pareja hasta el final.
+    """
+    huerfanos = []
+    i, n = 0, len(cuerpo)
+    while i < n:
+        c = cuerpo[i]
+        # (3ª vuelta) Los tres backticks son UN delimitador para Telegram
+        # (bloque de codigo), no tres sueltos. Si se emparejan de dos en
+        # dos, una racha impar deja uno colgando — y ademas el borrado
+        # puede CREAR una racha de tres que antes no existia.
+        if c == "`" and cuerpo[i:i + 3] == "```":
+            j = cuerpo.find("```", i + 3)
+            if j < 0:
+                huerfanos += [i, i + 1, i + 2]
+                i += 3
+            else:
+                i = j + 3
+            continue
+        # (4ª vuelta) Telegram des-escapa `\_ \* \` \[`: esos dos
+        # caracteres son texto, no marcador. Se saltan juntos.
+        if c == "\\" and cuerpo[i + 1:i + 2] in ("_", "*", "`", "["):
+            i += 2
+            continue
+        if c in ("`", "*", "_"):
+            j = cuerpo.find(c, i + 1)
+            if j < 0:
+                huerfanos.append(i)
+                i += 1
+            else:
+                i = j + 1
+            continue
+        if c == "[":
+            # (3ª vuelta) Telegram cierra el `[` en el PRIMER `]`, no en
+            # el primer `](`. Buscando `](` , un `[` suelto se ataba al
+            # enlace que viniera despues y se saltaba TODO lo de en medio:
+            # los marcadores de esa zona dejaban de contarse, su pareja de
+            # fuera parecia huerfana y se borraba un marcador que SI estaba
+            # cerrado. Medido con un fuzz de 200.000 cadenas: 11 mensajes
+            # que Telegram aceptaba pasaban a rechazarse. Caso real:
+            #   "El pool [1] estaba *fino: mira [Dex](https://d.io/x) y*"
+            # (4ª vuelta) Y con las reglas EXACTAS de Telegram, leidas de
+            # su propio codigo (`parse_markdown` de tdlib), no de lo que
+            # parece razonable. Telegram ACEPTA `[texto]` sin URL (usa el
+            # propio texto como enlace) y `[texto](url` sin cerrar. Exigir
+            # `](url)` hacia que se borrara el `[` de cosas tan normales
+            # como "el pool [A] quedo fino": medido, 3.355 de 40.000
+            # cadenas validas salian modificadas, y en el corpus de las
+            # pruebas 86 de 654 cortes perdian algun corchete. Un `[` solo
+            # sobra cuando NO hay ningun `]` detras.
+            j = cuerpo.find("]", i + 1)
+            if j < 0:
+                huerfanos.append(i)
+                i += 1
+            elif j == i + 1:
+                # `[]`: entidad vacia. Telegram no lee la URL, asi que el
+                # `(` de detras es texto llano y hay que seguir mirandolo.
+                i = j + 1
+            elif cuerpo[j + 1:j + 2] != "(":
+                i = j + 1
+            else:
+                k = cuerpo.find(")", j + 2)
+                if k < 0:
+                    # (5ª vuelta) `[texto](url` sin cerrar el parentesis
+                    # es VALIDO para Telegram… porque se traga todo lo que
+                    # venga detras. Y detras siempre va algo: `_recortar_tg`
+                    # pega "…\n\n_(mensaje recortado: N caracteres)_". Ese
+                    # barrido se comia el aviso hasta el `)` de
+                    # "caracteres)" y dejaba el `_` final huerfano → 400.
+                    # Medido con el corpus de enlaces de las pruebas: 205
+                    # de 572 cortes salian rechazados. Asi que aqui el `[`
+                    # SI sobra: no es que el mensaje sea invalido, es que
+                    # contamina lo que se le pegue detras.
+                    huerfanos.append(i)
+                    i += 1
+                else:
+                    i = k + 1
+            continue
+        i += 1
+    if not huerfanos:
+        return cuerpo
+    for pos in reversed(huerfanos):
+        cuerpo = cuerpo[:pos] + cuerpo[pos + 1:]
+    # (3ª vuelta) Se repite: borrar caracteres puede juntar backticks que
+    # antes estaban separados y formar una racha nueva. Converge siempre
+    # porque la cadena solo puede encoger.
+    return _cerrar_markdown(cuerpo)
+
+
+def _recortar_tg(text: str, tope: int | None = None) -> str:
     """Un mensaje mas largo que el tope de Telegram NO se envia — ni en
     Markdown ni en texto plano. Medido: la evidencia de la billetera mas
     activa del dueño ocupa 6.585 caracteres, o sea que hoy ese mensaje se
-    pierde entero. Mejor recortado y diciendolo que perdido en silencio."""
+    pierde entero. Mejor recortado y diciendolo que perdido en silencio.
+
+    (Ola 18-H) `tope` es solo para poder probarlo con textos cortos; en
+    produccion se usa siempre el de Telegram.
+    """
+    tope = TG_MAX_CHARS if tope is None else int(tope)
     largo = _largo_tg(text)
-    if largo <= TG_MAX_CHARS:
+    if largo <= tope:
         return text
     aviso = f"\n\n_(mensaje recortado: {largo} caracteres)_"
     # Se recorta a ojo y se comprueba de verdad: cortar por caracteres no
     # garantiza el largo en UTF-16, asi que se ajusta hasta que entra.
-    cuerpo = text[:TG_MAX_CHARS - 120]
-    while _largo_tg(cuerpo) + _largo_tg(aviso) + 1 > TG_MAX_CHARS and cuerpo:
+    cuerpo = text[:max(0, tope - 120)]
+    while _largo_tg(cuerpo) + _largo_tg(aviso) + 1 > tope and cuerpo:
         cuerpo = cuerpo[:-40] or ""
+    cuerpo = _cerrar_markdown(cuerpo.rstrip())
     return cuerpo.rstrip() + "…" + aviso
 
 
@@ -1465,6 +1580,34 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _send_md(update.message.chat, txt)
 
 
+def _nota_conteos(conn) -> dict:
+    """Cuántas ⭐ hay por nota, contadas como las cuenta quien QUITA la ⭐.
+
+    (Ola 18-H) `flojas` incluía las de nota NULL, pero
+    `ai_analyst.depurar_estrellas` exige `grade IS NOT NULL` para quitar
+    la estrella: a las que aún no tiene puntuadas el embudo NO se las
+    toca. Con 3 sin nota, el mensaje decía "hasta 6 la pierden" cuando
+    eran 3 — y el desvío es mayor justo después de un despliegue, que es
+    cuando más ⭐ están sin puntuar (el embudo repuntúa 20-25 cada 6 h).
+    Es el número que el dueño mira para decidir, así que tiene que ser el
+    de verdad.
+    """
+    fila = conn.execute(
+        """SELECT
+             SUM(CASE WHEN grade IN ('Elite','Seguimiento')
+                      THEN 1 ELSE 0 END) buenas,
+             SUM(CASE WHEN grade IS NOT NULL
+                       AND grade NOT IN ('Elite','Seguimiento')
+                      THEN 1 ELSE 0 END) flojas,
+             SUM(CASE WHEN grade IS NULL THEN 1 ELSE 0 END) sin_nota,
+             COUNT(*) total
+           FROM wallets WHERE is_tracked = 1""").fetchone()
+    return {"buenas": int(fila["buenas"] or 0),
+            "flojas": int(fila["flojas"] or 0),
+            "sin_nota": int(fila["sin_nota"] or 0),
+            "total": int(fila["total"] or 0)}
+
+
 @solo_admin
 async def cmd_nota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """¿La nota del embudo decide quién lleva ⭐?  /nota [on|off]
@@ -1481,23 +1624,19 @@ async def cmd_nota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             activo = (get_setting(conn, "grado_vinculante", "0")
                       or "0").strip() == "1"
-            fila = conn.execute(
-                """SELECT
-                     SUM(CASE WHEN grade IN ('Elite','Seguimiento')
-                              THEN 1 ELSE 0 END) buenas,
-                     SUM(CASE WHEN COALESCE(grade,'') NOT IN
-                              ('Elite','Seguimiento') THEN 1 ELSE 0 END) flojas,
-                     SUM(CASE WHEN grade IS NULL THEN 1 ELSE 0 END) sin_nota
-                   FROM wallets WHERE is_tracked = 1""").fetchone()
-            buenas = int(fila["buenas"] or 0)
-            flojas = int(fila["flojas"] or 0)
+            cuentas = _nota_conteos(conn)
+            buenas = cuentas["buenas"]
+            flojas = cuentas["flojas"]
+            sinnota = cuentas["sin_nota"]
             if accion == "on":
                 set_setting(conn, "grado_vinculante", "1")
                 return (f"⭐ *La nota del embudo MANDA*\n\n"
                         f"Solo llevan ⭐ las billeteras con nota *Elite* o "
                         f"*Seguimiento*.\n"
-                        f"Con las notas de ahora: *{buenas}* la conservan y "
-                        f"hasta *{flojas}* la pierden.\n\n"
+                        f"Con las notas de ahora la pierden *{flojas}*; se "
+                        f"quedan *{buenas}* de nota buena y *{sinnota}* que "
+                        f"aún no tienen nota (a las sin nota no se les "
+                        f"quita: hasta que el embudo las puntúe, siguen).\n\n"
                         f"_Las que la pierden NO se borran: siguen en la "
                         f"base y pueden recuperarla si su nota mejora._\n"
                         f"⚠️ _Apagar tarda: al perder la ⭐ pasan a la cola "
@@ -1515,14 +1654,14 @@ async def cmd_nota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         "\n\nEncender: `/nota on`")
             estado = ("🟢 *ENCENDIDA*" if activo
                       else "⚪ *apagada* (solo informativa)")
-            sinnota = int(fila["sin_nota"] or 0)
             return (f"⭐ *Nota del embudo:* {estado}\n\n"
-                    f"Tus ⭐ ahora: *{buenas + flojas}*\n"
+                    f"Tus ⭐ ahora: *{cuentas['total']}*\n"
                     f"  · con nota buena (Elite/Seguimiento): *{buenas}*\n"
-                    f"  · con nota floja: *{flojas - sinnota}*\n"
+                    f"  · con nota floja: *{flojas}*\n"
                     f"  · sin nota todavía: *{sinnota}*\n\n"
-                    + ("Con `/nota on` se quedarían solo las "
-                       f"*{buenas}* de nota buena.\n\n"
+                    + (f"Con `/nota on` se quedarían *{buenas}* de nota "
+                       f"buena y las *{sinnota}* que aún no tienen nota "
+                       f"(pierden la ⭐ las *{flojas}* de nota floja).\n\n"
                        "_Dos avisos antes de encenderlo:_\n"
                        "_1) Las que hoy no son ⭐ y tienen nota buena NO "
                        "la recuperan — están fuera por otros motivos "
@@ -1640,8 +1779,11 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "· /paper reset")
         return
     txt = await asyncio.to_thread(resumen_text)
-    await update.message.reply_text(txt, parse_mode="Markdown",
-                                    reply_markup=kb_paper())
+    # (Ola 18-H) Por `_send_md`, no por `reply_text` a pelo: asi el
+    # mensaje se recorta si pasa de 4.096 (con 15 posiciones listadas
+    # cabe) y, si el Markdown se rompe igualmente, se reintenta en texto
+    # plano en vez de quedarse MUDO.
+    await _send_md(update.message.chat, txt, reply_markup=kb_paper())
 
 
 # SIN @solo_admin (Ola 6, auditoria 19/8 - C5): esto es un helper de
