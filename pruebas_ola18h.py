@@ -39,6 +39,67 @@ def comprobar(nombre, condicion, detalle=""):
         print(f"  ✗ {nombre} — {detalle}")
 
 
+# ── Oráculo: puerto FIEL de `parse_markdown()` de tdlib ──────────
+# (https://github.com/tdlib/td, td/telegram/MessageEntity.cpp).
+# Es el código que de verdad decide si Telegram devuelve 400. NO se
+# escribe "las reglas que parecen razonables": eso ya se hizo dos
+# veces en esta ola y las dos veces la prueba acabó premiando el
+# error de la implementación en vez de cazarlo.
+def _ch(b, k):
+    return b[k] if 0 <= k < len(b) else 0     # fuera de rango → '\0'
+
+def _es_espacio(c):
+    return c in (0x20, 0x09, 0x0d, 0x0a, 0x00, 0x0b)
+
+def _valido(t):
+    b = t.encode("utf-8")
+    size = len(b)
+    i = 0
+    while i < size:
+        c = _ch(b, i)
+        if c == 0x5c and _ch(b, i + 1) in (0x5f, 0x2a, 0x60, 0x5b):
+            i += 2                            # \_ \* \` \[  → texto
+            continue
+        if c not in (0x5f, 0x2a, 0x60, 0x5b):
+            i += 1
+            continue
+        begin = i
+        fin_car = 0x5d if c == 0x5b else c    # '[' cierra con ']'
+        es_pre = False
+        i += 1
+        if c == 0x60 and _ch(b, i) == 0x60 and _ch(b, i + 1) == 0x60:
+            i += 2
+            es_pre = True
+            fin_leng = i
+            while (not _es_espacio(_ch(b, fin_leng))
+                   and _ch(b, fin_leng) != 0x60):
+                fin_leng += 1
+            if i != fin_leng and fin_leng < size \
+                    and _ch(b, fin_leng) != 0x60:
+                i = fin_leng
+            if _ch(b, i) in (0x0a, 0x0d):
+                if (_ch(b, i + 1) in (0x0a, 0x0d)
+                        and _ch(b, i) != _ch(b, i + 1)):
+                    i += 2
+                else:
+                    i += 1
+        ini = i
+        while i < size and (_ch(b, i) != fin_car
+                            or (es_pre and not (_ch(b, i + 1) == 0x60
+                                                and _ch(b, i + 2) == 0x60))):
+            i += 1
+        if i == size:
+            return f"entidad sin cerrar en el byte {begin}"
+        if i != ini and c == 0x5b and _ch(b, i + 1) == 0x28:
+            i += 2
+            while i < size and _ch(b, i) != 0x29:
+                i += 1
+        if es_pre:
+            i += 2
+        i += 1
+    return None
+
+
 def bloque(titulo):
     print(f"\n── {titulo}")
 
@@ -768,66 +829,6 @@ def prueba_recorte():
     bloque("MENOR · el recorte no deja Markdown a medias")
     import telegram_bot as tb
 
-    # ── Oráculo: puerto FIEL de `parse_markdown()` de tdlib ──────────
-    # (https://github.com/tdlib/td, td/telegram/MessageEntity.cpp).
-    # Es el código que de verdad decide si Telegram devuelve 400. NO se
-    # escribe "las reglas que parecen razonables": eso ya se hizo dos
-    # veces en esta ola y las dos veces la prueba acabó premiando el
-    # error de la implementación en vez de cazarlo.
-    def _ch(b, k):
-        return b[k] if 0 <= k < len(b) else 0     # fuera de rango → '\0'
-
-    def _es_espacio(c):
-        return c in (0x20, 0x09, 0x0d, 0x0a, 0x00, 0x0b)
-
-    def _valido(t):
-        b = t.encode("utf-8")
-        size = len(b)
-        i = 0
-        while i < size:
-            c = _ch(b, i)
-            if c == 0x5c and _ch(b, i + 1) in (0x5f, 0x2a, 0x60, 0x5b):
-                i += 2                            # \_ \* \` \[  → texto
-                continue
-            if c not in (0x5f, 0x2a, 0x60, 0x5b):
-                i += 1
-                continue
-            begin = i
-            fin_car = 0x5d if c == 0x5b else c    # '[' cierra con ']'
-            es_pre = False
-            i += 1
-            if c == 0x60 and _ch(b, i) == 0x60 and _ch(b, i + 1) == 0x60:
-                i += 2
-                es_pre = True
-                fin_leng = i
-                while (not _es_espacio(_ch(b, fin_leng))
-                       and _ch(b, fin_leng) != 0x60):
-                    fin_leng += 1
-                if i != fin_leng and fin_leng < size \
-                        and _ch(b, fin_leng) != 0x60:
-                    i = fin_leng
-                if _ch(b, i) in (0x0a, 0x0d):
-                    if (_ch(b, i + 1) in (0x0a, 0x0d)
-                            and _ch(b, i) != _ch(b, i + 1)):
-                        i += 2
-                    else:
-                        i += 1
-            ini = i
-            while i < size and (_ch(b, i) != fin_car
-                                or (es_pre and not (_ch(b, i + 1) == 0x60
-                                                    and _ch(b, i + 2) == 0x60))):
-                i += 1
-            if i == size:
-                return f"entidad sin cerrar en el byte {begin}"
-            if i != ini and c == 0x5b and _ch(b, i + 1) == 0x28:
-                i += 2
-                while i < size and _ch(b, i) != 0x29:
-                    i += 1
-            if es_pre:
-                i += 2
-            i += 1
-        return None
-
     # VA LO PRIMERO: el bucle NO puede quedarse quieto. Con una rama mal puesta, `i`
     # volvía a 0 y la función se colgaba: se vio al romperla a propósito,
     # y un cuelgue en el hilo de Telegram deja el bot mudo.
@@ -1357,6 +1358,334 @@ def prueba_ocultos():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# OLA 18-I · en un cierre por RUG manda el neto, no el -99%.
+# ─────────────────────────────────────────────────────────────────────
+def prueba_rug():
+    bloque("18-I · el cierre por rug enseña el dinero, no el precio")
+    import io
+    import contextlib
+    import paper_trading as pt
+    from db import get_conn
+
+    conn = get_conn()
+    enviados = []
+    tg_real = pt._tg
+    sol_real = pt._sol_a_usd
+    try:
+        pt._tg = lambda t: enviados.append(t)
+        pt._sol_a_usd = lambda *a, **k: 200.0
+
+        def cerrar(nombre, stake_usd, usd_salida, costos, frac):
+            conn.execute("DELETE FROM paper_trades WHERE mint=?", (nombre,))
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, fraccion_restante,
+                    usd_salida_real, costos_usd)
+                   VALUES (?,?,'W',1.0,1,0.5,?,'abierta',?,?,?)""",
+                (nombre, nombre, stake_usd, frac, usd_salida, costos))
+            conn.commit()
+            row = conn.execute("SELECT * FROM paper_trades WHERE mint=?",
+                               (nombre,)).fetchone()
+            enviados.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt._close(conn, row, row["entry_price"] * 0.01,
+                          "sin liquidez", "\U0001F480")
+            fila = conn.execute("SELECT * FROM paper_trades WHERE mint=?",
+                                (nombre,)).fetchone()
+            return (enviados[0] if enviados else ""), fila
+
+        # (a) Rug que acabó EN VERDE porque la ⭐ vendió antes (caso real
+        #     Obesity: papel -97,5%, neto +61,94 $).
+        txt, fila = cerrar("VERDE", 98.52, 160.56, 0.0984, 0.1)
+        comprobar("rug en verde: el titular es el resultado REAL",
+                  "Resultado real: *+$" in txt,
+                  f"titular: {[l for l in txt.splitlines() if 'Resultado' in l or 'PnL' in l]}")
+        comprobar("rug en verde: el icono del dinero es VERDE",
+                  "\U0001F7E2 Resultado real" in txt,
+                  f"salió: {[l for l in txt.splitlines() if 'Resultado' in l]}")
+        comprobar("rug en verde: se dice cuánto se recuperó de la bolsa",
+                  "recuperó" in txt, f"texto: {txt[:300]}")
+        comprobar("rug en verde: el importe recuperado es el REAL, no otra "
+                  "cifra cualquiera", "$160.56" in txt,
+                  f"{[l for l in txt.splitlines() if 'recuper' in l]}")
+        comprobar("rug en verde: el origen que se cita es el que hubo "
+                  "(parciales previos), no una frase fija",
+                  "(ventas parciales previas)" in txt,
+                  f"{[l for l in txt.splitlines() if 'recuper' in l]}")
+        comprobar("rug en verde: no se dice «de esa bolsa» cuando se "
+                  "recuperó más que lo invertido",
+                  "de esa bolsa" not in txt)
+        comprobar("rug en verde: se explica POR QUÉ no fue pérdida total",
+                  "no es una pérdida total" in txt,
+                  f"{[l for l in txt.splitlines() if 'recuper' in l]}")
+        comprobar("rug en verde: el % citado es el MISMO que la cabecera",
+                  "El -99% de arriba" in txt,
+                  f"{[l for l in txt.splitlines() if 'de arriba' in l]}")
+        comprobar("rug en verde: la línea del histórico dice el PnL de "
+                  "PAPEL, que es lo que se guarda",
+                  "histórico: -$9.75" in txt,
+                  f"{[l for l in txt.splitlines() if 'histórico' in l]}")
+        comprobar("rug en verde: el −99% se explica como precio del token, "
+                  "no como dinero", "no tu dinero" in txt)
+        comprobar("rug en verde: el PnL de papel se sigue diciendo",
+                  "PnL de papel" in txt)
+        comprobar("rug en verde: lo GUARDADO no cambia (sigue el −99% en "
+                  "pnl_pct, que es el precio)", round(fila["pnl_pct"]) == -99,
+                  f"pnl_pct = {fila['pnl_pct']}")
+        comprobar("rug en verde: el neto guardado es positivo",
+                  fila["pnl_usd_neto"] > 0, f"neto = {fila['pnl_usd_neto']}")
+        # Lo que de verdad hay que blindar: el cambio prometió NO tocar la
+        # base. `pnl_usd` y `pnl_sol` son los que deciden el win rate de
+        # `/paper` y el grading de billeteras. Escribir ahí el neto dejaba
+        # las 119 pruebas verdes.
+        comprobar("rug en verde: `pnl_usd` guardado sigue siendo el de "
+                  "PAPEL, no el neto",
+                  fila["pnl_usd"] < 0 and abs(fila["pnl_usd"] + 9.75) < 0.1,
+                  f"pnl_usd = {fila['pnl_usd']} (el neto es "
+                  f"{fila['pnl_usd_neto']})")
+        comprobar("rug en verde: `pnl_sol` guardado no cambia de signo por "
+                  "el neto", fila["pnl_sol"] < 0,
+                  f"pnl_sol = {fila['pnl_sol']}")
+        comprobar("rug en verde: el mensaje es Markdown válido para "
+                  "Telegram", _valido(txt) is None,
+                  f"{_valido(txt)} · {txt[-80:]!r}")
+        comprobar("rug en verde: «invertidos» es el importe INVERTIDO, no "
+                  "lo vendido", "$98.52 invertidos" in txt,
+                  f"{[l for l in txt.splitlines() if 'invertidos' in l]}")
+        comprobar("rug en verde: no se pierde el aviso de precio asumido",
+                  "precio de salida asumido" in txt)
+        comprobar("rug en verde: no se pierde el aviso de parciales",
+                  "incluye ventas parciales previas" in txt)
+
+        # (b) Rug con pérdida parcial.
+        txt, fila = cerrar("PARCIAL", 94.93, 32.43, 0.0951, 0.3)
+        comprobar("rug con pérdida: el titular es el resultado REAL y rojo",
+                  "\U0001F534 Resultado real: *-$" in txt,
+                  f"{[l for l in txt.splitlines() if 'Resultado' in l]}")
+        comprobar("rug con pérdida: sigue diciendo lo que se recuperó",
+                  "recuperó" in txt and "$32.43" in txt,
+                  f"{[l for l in txt.splitlines() if 'recuper' in l]}")
+        comprobar("rug con pérdida: Markdown válido", _valido(txt) is None,
+                  f"{_valido(txt)}")
+
+        # (c) Rug SIN ninguna venta: pérdida total y sin comisión de salida.
+        txt, fila = cerrar("TOTAL", 96.34, 0.0, 0.0482, 1.0)
+        comprobar("rug total: se dice que fue pérdida total",
+                  "pérdida total" in txt, f"texto: {txt[:300]}")
+        comprobar("rug total: se explica que NO se cobra comisión de salida",
+                  "no se vende" in txt and "perder más" in txt,
+                  f"texto: {txt[:400]}")
+        comprobar("rug total: el neto es lo invertido más el fee de "
+                  "ENTRADA, sin fee de venta",
+                  abs(fila["pnl_usd_neto"] + 96.34 + 0.0482) < 0.01,
+                  f"neto = {fila['pnl_usd_neto']}")
+        comprobar("rug total: Markdown válido", _valido(txt) is None,
+                  f"{_valido(txt)}")
+        comprobar("rug total: `pnl_usd` guardado sigue siendo el de PAPEL",
+                  abs(fila["pnl_usd"] + 95.38) < 0.1,
+                  f"pnl_usd = {fila['pnl_usd']}")
+
+        # (c2) Parciales SIN dólares de salida (Jupiter falló al abrir,
+        #      `tokens_raw` NULL): el titular NO puede decir "no se vendió
+        #      nada" sobre una operación con ventas apuntadas.
+        conn.execute("DELETE FROM paper_trades WHERE mint='SINCOT'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante, pnl_realizado_usd,
+                costos_usd)
+               VALUES ('SINCOT','SINCOT','W',1.0,1,0.5,100.0,'abierta',
+                       0.25,125.0,0.1)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='SINCOT'").fetchone()
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, row, 0.01, "sin liquidez", "\U0001F480")
+        txt = enviados[0] if enviados else ""
+        fila = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='SINCOT'").fetchone()
+        comprobar("parciales sin cotizar: NO se dice «no se vendió nada»",
+                  "No se vendió nada" not in txt,
+                  f"texto: {[l for l in txt.splitlines() if 'vendi' in l]}")
+        comprobar("parciales sin cotizar: NO se titula «Resultado real» "
+                  "con una cifra que contradice al PnL guardado",
+                  not ("Resultado real" in txt and fila["pnl_usd"] > 0
+                       and "-$" in txt.split("Resultado real")[-1][:20]),
+                  f"pnl_usd guardado = {fila['pnl_usd']}, texto: "
+                  f"{[l for l in txt.splitlines() if 'Resultado' in l]}")
+        comprobar("parciales sin cotizar: el mensaje no se contradice con "
+                  "la nota de parciales",
+                  not ("No se vendió nada" in txt
+                       and "ventas parciales previas" in txt))
+        comprobar("parciales sin cotizar: Markdown válido",
+                  _valido(txt) is None, f"{_valido(txt)}")
+
+        # (c3) La guarda, término a término. En (c2) `frac < 1` y
+        #      `realizado` son ciertos a la vez y cada uno tapa al otro.
+        #      Aquí solo lo es `frac`: una venta parcial al MISMO precio de
+        #      entrada deja un `pnl_realizado_usd` de 0 legítimo.
+        for etiqueta, f_rest, real_usd, real_frac in (
+                ("solo fraccion_restante", 0.5, 0.0, 0.0),
+                ("solo pnl_realizado_frac", 1.0, 0.0, 0.5)):
+            conn.execute("DELETE FROM paper_trades WHERE mint='TERM'")
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, fraccion_restante,
+                    pnl_realizado_usd, pnl_realizado_frac, costos_usd)
+                   VALUES ('TERM','TERM','W',1.0,1,0.5,100.0,'abierta',
+                           ?,?,?,0.1)""", (f_rest, real_usd, real_frac))
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM paper_trades WHERE mint='TERM'").fetchone()
+            enviados.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt._close(conn, row, 0.01, "sin liquidez", "\U0001F480")
+            txt = enviados[0] if enviados else ""
+            comprobar(f"guarda · {etiqueta}: NO se dice «no se vendió nada»",
+                      "No se vendió nada" not in txt,
+                      f"{[l for l in txt.splitlines() if 'vendi' in l]}")
+
+        # (c4) Rug SIN parciales pero con cotización de cierre: el texto
+        #      NO puede afirmar ventas previas que no existieron.
+        cot_real = None
+        try:
+            import ejecucion_simulada as es
+            cot_real = es.cotizar_venta
+            es.cotizar_venta = lambda m, t, su: {"usd_salida": 40.0}
+            conn.execute("DELETE FROM paper_trades WHERE mint='SOLOCIERRE'")
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, costos_usd, tokens_raw)
+                   VALUES ('SOLOCIERRE','SC','W',1.0,1,0.5,100.0,'abierta',
+                           0.05,1000)""")
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM paper_trades WHERE mint='SOLOCIERRE'"
+            ).fetchone()
+            enviados.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt._close(conn, row, 0.01, "sin liquidez", "\U0001F480")
+            txt = enviados[0] if enviados else ""
+        finally:
+            if cot_real is not None:
+                es.cotizar_venta = cot_real
+        comprobar("sin parciales: NO se afirman «ventas parciales previas»",
+                  "ventas parciales previas" not in txt,
+                  f"{[l for l in txt.splitlines() if 'recuper' in l]}")
+        comprobar("sin parciales: se dice que el dinero vino del cierre",
+                  "al cerrar" in txt,
+                  f"{[l for l in txt.splitlines() if 'recuper' in l]}")
+
+        # (c5) Polvo: recuperar menos de un céntimo NO es recuperar.
+        cot_real = None
+        try:
+            import ejecucion_simulada as es
+            cot_real = es.cotizar_venta
+            es.cotizar_venta = lambda m, t, su: {"usd_salida": 0.0000002}
+            conn.execute("DELETE FROM paper_trades WHERE mint='POLVO'")
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, costos_usd, tokens_raw)
+                   VALUES ('POLVO','POLVO','W',1.0,1,0.5,100.0,'abierta',
+                           0.05,1000)""")
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM paper_trades WHERE mint='POLVO'").fetchone()
+            enviados.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt._close(conn, row, 0.01, "sin liquidez", "\U0001F480")
+            txt = enviados[0] if enviados else ""
+        finally:
+            if cot_real is not None:
+                es.cotizar_venta = cot_real
+        comprobar("polvo: NO se dice «por eso no es una pérdida total»",
+                  "no es una pérdida total" not in txt,
+                  f"{[l for l in txt.splitlines() if 'total' in l or 'recuper' in l]}")
+        comprobar("polvo: y como SÍ se cobró fee de salida, no se promete "
+                  "lo contrario",
+                  "NO se descuenta comisión" not in txt,
+                  f"{[l for l in txt.splitlines() if 'comisión' in l]}")
+
+        # (d) Un cierre NORMAL no cambia en nada.
+        conn.execute("DELETE FROM paper_trades WHERE mint='NORMAL'")
+        # Con `usd_salida_real` y `fraccion_restante < 1` para que
+        # `pnl_neto` NO sea None: si no, la guarda `reason == "sin
+        # liquidez"` ni se evalúa y la prueba de regresión no prueba nada.
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante, costos_usd,
+                usd_salida_real)
+               VALUES ('NORMAL','NORMAL','W',1.0,1,0.5,100.0,'abierta',
+                       0.5,0.05,80.0)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='NORMAL'").fetchone()
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, row, 1.5, "venta de la \u2b50", "\U0001F7E2")
+        txt = enviados[0] if enviados else ""
+        comprobar("cierre normal: sigue diciendo «PnL:», no «Resultado real»",
+                  "PnL: *" in txt and "Resultado real" not in txt,
+                  f"{[l for l in txt.splitlines() if 'PnL' in l or 'Resultado' in l]}")
+        comprobar("cierre normal: no aparece nada del rug",
+                  "pérdida total" not in txt and "no tu dinero" not in txt
+                  and "de esa bolsa" not in txt)
+        comprobar("cierre normal: Markdown válido", _valido(txt) is None,
+                  f"{_valido(txt)}")
+
+        # Y con OTRO motivo distinto, para que ensanchar la guarda a
+        # `reason in (...)` no pase desapercibido.
+        conn.execute("DELETE FROM paper_trades WHERE mint='SL'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante, costos_usd,
+                usd_salida_real)
+               VALUES ('SL','SL','W',1.0,1,0.5,100.0,'abierta',0.5,0.05,
+                       80.0)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='SL'").fetchone()
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, row, 0.5, "stop-loss", "\U0001F534")
+        txt = enviados[0] if enviados else ""
+        comprobar("otro motivo (stop-loss): tampoco sale el texto del rug",
+                  "Resultado real" not in txt and "recuperó" not in txt,
+                  f"{[l for l in txt.splitlines() if 'Resultado' in l or 'recuper' in l]}")
+
+        # (e) Importe reconstruido: el aviso NO se puede perder al
+        #     reescribir el titular.
+        conn.execute("DELETE FROM paper_trades WHERE mint='APROX'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                status, fraccion_restante, costos_usd, usd_salida_real)
+               VALUES ('APROX','APROX','W',1.0,1,0.5,'abierta',1.0,0.05,
+                       10.0)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='APROX'").fetchone()
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, row, 0.01, "sin liquidez", "\U0001F480")
+        txt = enviados[0] if enviados else ""
+        comprobar("importe reconstruido: sigue avisando de que los dólares "
+                  "son al cambio de AHORA", "al cambio de AHORA" in txt,
+                  f"texto: {txt[:400]}")
+    finally:
+        pt._tg = tg_real
+        pt._sol_a_usd = sol_real
+        conn.close()
+
+
 def _vigilante(segundos=420):
     """Si la suite se cuelga, tiene que terminar en ROJO, no quedarse muda.
 
@@ -1392,6 +1721,7 @@ def main():
     prueba_recorte()
     prueba_menores()
     prueba_ocultos()
+    prueba_rug()
 
     print("\n" + "─" * 60)
     if _FALLOS:

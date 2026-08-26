@@ -614,6 +614,102 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     if pnl_neto is not None:
         linea_neto = (f"\n⚖️ Neto real (Jupiter, con slippage y fees): "
                       f"*{_usd_firmado(pnl_neto)}*")
+    # (Ola 18-I) En un cierre por RUG manda el NETO, no el -99%.
+    #
+    # El -99% es el precio del TOKEN; el neto es el DINERO del dueño, y en
+    # un rug son cosas muy distintas porque la ⭐ suele haber vendido por
+    # trozos antes de que aquello se hundiera. Medido sobre las 15 de la
+    # base: el papel suma -1.161 $ y el neto real -385 $; **11 de las 15**
+    # tuvieron ventas parciales y **4 acabaron EN VERDE** pese al rug
+    # (Obesity: papel -97,5%, neto +61,94 $). El mensaje enseñaba en
+    # grande el -99% en rojo y escondia el neto debajo: saltaba a la vista
+    # la cifra que asusta y no la que informa.
+    #
+    # Solo cambia el TEXTO. Lo que se guarda en la base no se toca.
+    # (3ª vuelta) Con suelo: un rug que Jupiter todavia enruta por un
+    # lamport da `usd_salida` = 0,0000002 $, y entonces el mensaje decia
+    # "recupero 0,0000 $ ... por eso no es una perdida total" sobre una
+    # perdida mayor que lo invertido. Menos de un centimo no es recuperar.
+    _vendio = bool(usd_salida and usd_salida >= 0.01)
+    # (2ª vuelta) `usd_salida_real` se queda en NULL PARA SIEMPRE cuando
+    # `tokens_raw` es NULL —o sea siempre que Jupiter fallo al abrir, o no
+    # habia `stake_usd`—, aunque la ⭐ haya vendido por trozos: esos
+    # parciales se apuntan en `pnl_realizado_usd`/`_frac`, sin dolares de
+    # salida. Sin mirar eso, el titular decia "no se vendio nada, perdida
+    # total" sobre una operacion que la simulacion registra en +100,25 $,
+    # contradiciendo a la linea de arriba ("incluye ventas parciales
+    # previas") y a la de abajo. Peor que el -99% que esto venia a
+    # corregir: el -99% al menos era el precio de verdad del token.
+    #
+    # Regla: el titular solo pasa al neto cuando se sabe lo que se
+    # recupero (`_vendio`) o cuando de verdad no hubo ninguna venta. Con
+    # parciales sin cotizar se deja el mensaje de siempre, que ya avisa.
+    _hubo_parciales = bool(frac < 1 or realizado or realizado_frac)
+    if reason == "sin liquidez" and pnl_neto is not None \
+            and (_vendio or not _hubo_parciales):
+        res = "🟢" if pnl_neto >= 0 else "🔴"
+        linea_pnl = (f"{res} Resultado real: *{_usd_firmado(pnl_neto)}*  "
+                     f"sobre {_usd(stake_usd)} invertidos")
+        # (2ª vuelta) El aviso del importe reconstruido se repone: al
+        # reescribir `linea_pnl` entera se perdia, y entonces tanto el
+        # "invertidos" como el "Resultado real" descansaban sobre una
+        # estimacion sin decirlo.
+        if stake_aprox:
+            linea_pnl += ("\n_(en dólares al cambio de AHORA: al abrir la "
+                          "posición no había precio de SOL)_")
+        if _vendio:
+            # (2ª vuelta) "la ⭐ vendió" era falso: el bot no sabe cuánto
+            # vendio la ⭐ en dolares. `usd_salida_real` es lo que habria
+            # vendido la COPIA simulada. Y no es "lo que queda" —eso es el
+            # neto—, es lo que se recupero en bruto.
+            #
+            # (3ª vuelta) Y tampoco es todo "de ANTES": unas lineas mas
+            # arriba a `usd_salida` se le suma la cotizacion de salida de
+            # ESTE cierre, si Jupiter aun enruta el token (DexScreener lo
+            # da por muerto cuando devuelve `pairs: []`, pero Jupiter es
+            # otro agregador y puede seguir cotizando). Un rug SIN una
+            # sola venta parcial podia acabar diciendo "ya habia vendido
+            # 40 $ antes de que el token muriera" con las tres columnas de
+            # parciales a NULL. Se dice "recuperó", que es cierto en los
+            # tres casos, sin afirmar cuándo.
+            # (3ª vuelta) Y se dice el origen que DE VERDAD hubo. Con un
+            # "ventas parciales previas y lo que aun se pudo cotizar" fijo,
+            # un rug sin un solo parcial afirmaba ventas previas que no
+            # existieron —el mismo vicio que ya cazaron las dos vueltas
+            # anteriores— y uno con parciales pero sin cotizacion de cierre
+            # decia "lo que aun se pudo cotizar" dos lineas debajo de "el
+            # par ya no cotiza". `row` es la fila PRE-cierre, asi que
+            # conserva lo que habia antes de esta pasada.
+            _antes = _campo(row, "usd_salida_real") or 0
+            if _antes > 0 and _usd_fill:
+                _origen = "ventas parciales previas y la cotización del cierre"
+            elif _antes > 0:
+                _origen = "ventas parciales previas"
+            else:
+                _origen = "lo que Jupiter aún pagó al cerrar"
+            # Sin "de esa bolsa": en el caso estrella se recuperan 160,56 $
+            # de una bolsa de 98,52 $, y "de esa bolsa" no se sostiene.
+            linea_neto = (f"\n_La posición simulada recuperó "
+                          f"{_usd(usd_salida)} ({_origen}); por eso no es "
+                          f"una pérdida total. El {pct:+.0f}% de arriba es "
+                          f"el precio del token, no tu dinero._")
+        else:
+            # (3ª vuelta) La promesa de "no se descuenta comisión de
+            # salida" solo vale si de verdad no se descontó. `_quote`
+            # acepta un `outAmount` de "0", asi que una cotizacion de
+            # cierre que devuelve 0 $ SI cobra el fee de salida: el
+            # mensaje decia lo contrario del numero que el mismo enseña.
+            linea_neto = ("\n_No se vendió nada: pérdida total._"
+                          if _fee_fill is not None else
+                          "\n_No se vendió nada: pérdida total. NO se "
+                          "descuenta comisión de salida, porque en un rug "
+                          "no se vende — pagarla sería perder más._")
+        # El PnL de papel se sigue diciendo, pero abajo y sin protagonismo:
+        # es la cifra con la que se compara el histórico.
+        if pnl_usd is not None:
+            linea_neto += (f"\n_(PnL de papel, el que va al histórico: "
+                           f"{_usd_firmado(pnl_usd)})_")
+
     # (Ola 8, 21/8) Al cerrar "sin liquidez" el precio de salida es un
     # SUPUESTO (par muerto, -99%), no una cotizacion: se dice.
     nota_precio = ("\n_(precio de salida asumido: el par ya no cotiza)_"
