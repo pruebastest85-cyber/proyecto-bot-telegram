@@ -55,13 +55,43 @@ _SIGNAL_LOCK = threading.Lock()
 # ambos sin frenar a los demas tokens.
 _MINT_LOCKS: dict = {}
 _MINT_LOCKS_GUARD = threading.Lock()
+# Los ultimos mints cuyo candado se ENTREGO. La purga no los toca: ver el
+# comentario de `_lock_mint`. Tope fijo, asi que no crece.
+from collections import deque as _deque
+_MINT_RECIENTES = _deque(maxlen=256)
 
 
 def _lock_mint(mint: str) -> threading.Lock:
+    """Candado por token. Serializa el leer-modificar-escribir de
+    `positions`, de la copia simulada y (Ola 18-G) del registro de
+    llegadas del motor predictivo.
+
+    (Ola 18-G) Antes, al pasar de 4096 se hacia `clear()` del diccionario
+    entero. Si en ese momento un hilo TENIA TOMADO el candado de un mint,
+    la siguiente peticion de ese mismo mint devolvia un candado NUEVO y
+    distinto: los dos hilos entraban a la vez y volvia la perdida de
+    llegadas, sin una linea de log. Ahora se sueltan solo los que NADIE
+    tiene tomados, y de los mas antiguos: el diccionario sigue acotado y
+    la exclusion mutua no se rompe.
+    """
     with _MINT_LOCKS_GUARD:
-        if len(_MINT_LOCKS) > 4096:        # que no crezca sin tope
-            _MINT_LOCKS.clear()
-        return _MINT_LOCKS.setdefault(mint, threading.Lock())
+        if len(_MINT_LOCKS) > 4096:
+            # (Ola 18-G, 3ª vuelta) `c.locked()` no basta: el candado se
+            # ENTREGA aqui y el llamador lo toma unos bytecodes despues,
+            # asi que en esa ventana figura como libre y la purga podia
+            # sacarlo — el siguiente que pidiera ese mint recibiria un
+            # objeto DISTINTO y entrarian los dos a la vez. Por eso se
+            # protegen ademas los ULTIMOS entregados. La ventana entre
+            # entregar y tomar dura unos bytecodes, y en ese rato como
+            # mucho pasan por aqui tantos mints como hilos haya: 256 de
+            # margen sobra. El tope es fijo, asi que no crece.
+            protegidos = set(_MINT_RECIENTES)
+            for k in [k for k, c in list(_MINT_LOCKS.items())
+                      if not c.locked() and k not in protegidos][:2048]:
+                _MINT_LOCKS.pop(k, None)
+        candado = _MINT_LOCKS.setdefault(mint, threading.Lock())
+        _MINT_RECIENTES.append(mint)
+        return candado
 
 HELIUS_WEBHOOKS = "https://api.helius.xyz/v0/webhooks"
 
@@ -913,16 +943,38 @@ def _proc(txs: list[dict], conn):
         conn.commit()
 
         # ── Motor predictivo: decide si emitir una señal PREDICTIVA ──
-        # Solo para ⭐ (Ola 5, auditoria 19/8 - M5): el docstring de
-        # on_buy dice "cuando una ⭐ compra", pero corria para CUALQUIER
-        # vigilada — candidatas quedaban como "lider" de prediccion y el
-        # grafo de influencia (el caro) se reconstruia dentro de los
-        # hilos de ingesta por compras que no alimentan ninguna decision.
-        if es_compra and trade["wallet"] in stars:
+        # (Ola 5) Esto estaba limitado a ⭐ por DOS motivos: que una
+        # candidata no quedara como "lider" de prediccion, y que el grafo
+        # de influencia (el caro) no se reconstruyera dentro del hilo de
+        # ingesta por compras que no alimentan ninguna decision.
+        # (Ola 18-G) El segundo motivo ya no existe: desde la 18-C el
+        # camino caliente pide el grafo con `construir=False` y no
+        # construye nada. Y el primero se resuelve mejor dentro de
+        # `on_buy`, que ahora solo ABRE predicciones si es ⭐.
+        #
+        # El cambio importa porque las llegadas SOLO se registraban con
+        # compras de ⭐: se predecian seguidores del grafo (25.000
+        # billeteras) y se confirmaban contra las ⭐ (125). Medido: 93% de
+        # las predicciones acababan con acierto 0 y NUNCA salio una
+        # alerta en 20.785. Ahora confirma cualquier vigilada, que es
+        # exactamente la poblacion que el bot puede ver.
+        if es_compra and trade["wallet"] in tracked:
             try:
                 from predictions import on_buy as _pred_on_buy
+                # `on_buy` lee la prediccion abierta del token, le suma
+                # este seguidor y la reescribe entera. Como cada peticion
+                # corre en su propio hilo con su propia conexion, dos
+                # seguidores del mismo token que llegan a la vez leian la
+                # misma lista y el segundo pisaba al primero: una llegada
+                # perdida, y con ella el acierto del lider a la baja. El
+                # candado que lo evita se pide DENTRO de `on_buy`
+                # (`_candado_mint`), y solo alrededor de esa escritura:
+                # aqui abarcaria tambien el envio a Telegram, que hace red
+                # y bloquearia la copia simulada de ese mismo token.
+                # `tracked` y `stars` son conjuntos, no listas.
                 _pred_on_buy(conn, trade["wallet"], trade["mint"],
-                             trade["ts"], t)
+                             trade["ts"], t, vigiladas=tracked,
+                             es_estrella=trade["wallet"] in stars)
             except Exception as e:
                 print(f"· Motor predictivo: {e}")
 

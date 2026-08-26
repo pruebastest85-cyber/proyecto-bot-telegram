@@ -106,13 +106,78 @@ def _should_push(tier: str, conn) -> bool:
 
 # ─────────────────────────── SCORING ────────────────────────────────
 
+def _candado_mint(mint: str):
+    """Candado por token, el MISMO que serializa `positions` y la copia
+    simulada en realtime. Se pide aqui —y no en el llamador— para poder
+    soltarlo antes de enviar la alerta.
+
+    Si por lo que sea no se puede importar, se sigue sin candado: perder
+    una llegada de vez en cuando es malo, pero dejar de registrar
+    llegadas del todo es peor.
+    """
+    try:
+        from realtime import _lock_mint
+        return _lock_mint(mint)
+    except Exception as e:
+        print(f"· Predicción: sin candado por token ({e})")
+        import contextlib
+        return contextlib.nullcontext()
+
+
+def medicion_desde(conn) -> int:
+    """Desde cuándo valen las mediciones del motor predictivo.
+
+    (Ola 18-G) Las 20.785 predicciones ya evaluadas se puntuaron con el
+    denominador equivocado: se predecian seguidores del grafo entero y se
+    confirmaban solo contra ⭐. 19.378 de ellas (93%) tienen acierto 0 sin
+    que eso diga nada del lider. Si se siguieran contando, todos los
+    lideres quedarian en factor 0,3 durante 30 dias MAS despues del
+    arreglo, y el motor seguiria sin poder alertar por una division que ya
+    no existe. La marca se pone la primera vez que corre el codigo nuevo:
+    a partir de ahi, se mide de verdad.
+    """
+    try:
+        v = get_setting(conn, "pred_medicion_desde", None)
+        if v:
+            return int(float(v))
+    except Exception:
+        # Incluye fallos de base (bloqueo de SQLite, Postgres caido): sin
+        # la marca se mide como antes, que es peor pero no rompe nada.
+        return 0
+    ahora = int(time.time())
+    try:
+        from db import set_setting
+        set_setting(conn, "pred_medicion_desde", str(ahora))
+        print("🔮 Motor predictivo: la medición del acierto empieza de "
+              "cero (las anteriores se calcularon con el denominador "
+              "equivocado; ver Ola 18-G)")
+        return ahora
+    except Exception as e:
+        # Si no se puede guardar, NO se devuelve `ahora`: eso dejaria la
+        # ventana clavada en "desde este instante" en CADA llamada y la
+        # salud del lider en n=0 para siempre. Mejor caer al
+        # comportamiento de antes y volver a intentarlo luego.
+        print(f"· No pude fijar pred_medicion_desde ({e}); mido como antes")
+        return 0
+
+
 def _leader_health(conn, leader: str) -> dict:
-    """Precisión de las predicciones del líder en los últimos 30 días."""
+    """Precisión de las predicciones del líder, hasta 30 días atrás y
+    nunca antes de que la medición empezara a ser correcta."""
     since = int(time.time()) - 30 * 86400
+    # (Ola 18-G) El corte va sobre `created_ts`, NO sobre `evaluated_ts`.
+    # Con `evaluated_ts` se colarian las predicciones que estaban ABIERTAS
+    # en el momento del despliegue: se crearon con el denominador
+    # equivocado y se cierran despues de la marca. Son ~15 (la ventana es
+    # de 30 min y el ritmo, 31/h), pero si a UNA sola ⭐ le tocan 5 o mas
+    # en mints distintos, arranca con acierto 0 y n>=5 → "en declive",
+    # factor 0,3 — exactamente el pozo del que esta ola la saca.
+    marca = medicion_desde(conn)
     rows = conn.execute(
         """SELECT outcome_pct FROM predictions
-           WHERE leader=? AND status='evaluada' AND evaluated_ts>=?""",
-        (leader, since)).fetchall()
+           WHERE leader=? AND status='evaluada'
+             AND evaluated_ts>=? AND created_ts>=?""",
+        (leader, since, marca)).fetchall()
     n = len(rows)
     if n == 0:
         return {"n": 0, "accuracy": None, "estado": "sin historial", "factor": 0.6}
@@ -269,8 +334,14 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
         _neutros.append(f"{CONF_PTS_NEUTROS} pts de Confianza (etapa 1: "
                         f"aún no ha confirmado ningún seguidor)")
     lines.append("_⚪ Neutros por falta de datos: " + " · ".join(_neutros) + "._")
+    # (Ola 18-G) Seguidores que el grafo ve pero el bot no puede observar.
+    _oc = token_ctx.get("_seguidores_ocultos") or 0
+    if _oc:
+        lines.append(f"_👁 Otras {_oc} billeteras suelen entrar detrás de "
+                     f"este líder, pero no están vigiladas: no puedo "
+                     f"confirmarlas, así que no cuentan en la nota._")
     if health.get("accuracy") is not None:
-        lines.append(f"Salud del líder (30d): {health['estado']} "
+        lines.append(f"Salud del líder: {health['estado']} "
                      f"({health['accuracy']}% en {health['n']})")
     prox = [f for f in followers if f["prob"] >= 60][:6]
     if prox:
@@ -285,8 +356,34 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
     _send("\n".join(lines))
 
 
-def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
-    """Punto de entrada desde realtime cuando una ⭐ compra."""
+def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
+           vigiladas=None, es_estrella: bool = True):
+    """Punto de entrada desde realtime cuando una billetera VIGILADA compra.
+
+    (Ola 18-G) `vigiladas` es el conjunto de billeteras cuyas compras el
+    bot puede VER, y `es_estrella` dice si esta en concreto es ⭐.
+
+    POR QUE HACEN FALTA. El motor predecia seguidores sacados del grafo de
+    co-compra —25.000 billeteras— pero solo registraba llegadas cuando el
+    comprador era ⭐. Numerador y denominador de poblaciones distintas:
+    medido sobre la base del dueño, de 22.862 seguidores predichos solo el
+    **21,3%** son observables hoy, y **0%** eran ⭐. Resultado:
+    `outcome_pct` = 0 en **19.378 de 20.785** predicciones (93%), todos los
+    lideres al factor de salud 0,3, techo de meta 72 contra un umbral de
+    90 y **cero alertas en 20.785 predicciones**. Los 28 dias sin alertas
+    no eran calibracion: era una division mal planteada.
+
+    Dos arreglos, los dos aqui:
+      · solo se PREDICEN seguidores observables (los demas se cuentan y se
+        dicen en la alerta, pero no entran en la nota);
+      · las LLEGADAS se registran para cualquier vigilada, no solo ⭐.
+        La puerta de "solo ⭐" se puso en la Ola 5 porque `on_buy`
+        reconstruia el grafo caro dentro del hilo de ingesta; desde la
+        Ola 18-C eso ya no pasa (`construir=False`), asi que el motivo de
+        aquella puerta ya no existe.
+    Abrir una prediccion NUEVA sigue siendo cosa de ⭐: son las que se
+    copian.
+    """
     try:
         evaluate_due(conn)          # cierra predicciones vencidas primero
     except Exception as e:
@@ -303,51 +400,88 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
         "ORDER BY created_ts DESC LIMIT 1", (mint,)).fetchone()
 
     if row:
-        # ¿Este comprador es un seguidor esperado? → sube de etapa
-        pred = json.loads(row["predicted"] or "[]")
-        pred_w = {p["wallet"] for p in pred}
-        if wallet in pred_w and wallet != row["leader"]:
-            arrived = set(json.loads(row["arrived"] or "[]"))
-            if wallet not in arrived:
-                first = None
-                if not arrived:      # primer seguidor en llegar
-                    first = max(0, int(ts) - int(row["created_ts"] or ts))
-                arrived.add(wallet)
-                # (Ola 18-C) camino caliente: solo cache, nunca
-                # construye. Si el grafo aún no está, `inf` queda vacío y
-                # `confidence_score` no suma los puntos de liderazgo: se
-                # avisa en el mensaje en vez de darlo por medido.
-                inf = influence(row["leader"], construir=False) or {}
-                _inf_sabida = bool(inf) or cache_lista()
-                health = _leader_health(conn, row["leader"])
-                conf = confidence_score(inf, pred, token_ctx.get("liq"),
-                                        health, arrived=len(arrived))
-                stage = 1 + len(arrived)
-                tier = _tier(conf, row["meta_score"] or 0, umbral,
-                             token_ctx.get("liq"), _risk_pct(token_ctx),
-                             u=_u_ef)
-                conn.execute(
-                    "UPDATE predictions SET arrived=?, stage=?, confidence=?, "
-                    "tier=?, first_confirm_s=COALESCE(first_confirm_s,?) "
-                    "WHERE id=?",
-                    (json.dumps(sorted(arrived)), stage, conf, tier,
-                     first, row["id"]))
-                conn.commit()
-                if _should_push(tier, conn) and stage > (row["alerted_stage"] or 0):
+        # ── Registrar la llegada: leer-modificar-escribir bajo candado ──
+        # (Ola 18-G) El candado va SOLO alrededor de esto, no del envio a
+        # Telegram: `_alert_stage` hace red y puede tardar hasta ~30 s
+        # (dos intentos de 15), y este es el MISMO candado por token que
+        # serializa `positions` y la copia simulada. Con el envio dentro,
+        # una alerta lenta retrasaba media minuto la copia de ese token en
+        # otro hilo. Se prepara todo dentro, se envia fuera.
+        aviso = None
+        with _candado_mint(mint):
+            # Se RELEE dentro del candado: la fila de fuera puede ser de
+            # hace un instante y otro hilo haber sumado ya su llegada.
+            row = conn.execute(
+                "SELECT * FROM predictions WHERE id=?",
+                (row["id"],)).fetchone()
+            if not row or row["status"] != "abierta":
+                return
+            pred = json.loads(row["predicted"] or "[]")
+            pred_w = {p["wallet"] for p in pred}
+            if wallet in pred_w and wallet != row["leader"]:
+                arrived = set(json.loads(row["arrived"] or "[]"))
+                if wallet not in arrived:
+                    first = None
+                    if not arrived:      # primer seguidor en llegar
+                        first = max(0, int(ts) - int(row["created_ts"] or ts))
+                    arrived.add(wallet)
+                    # (Ola 18-C) camino caliente: solo cache, nunca
+                    # construye. Si el grafo aún no está, `inf` queda
+                    # vacío y `confidence_score` no suma los puntos de
+                    # liderazgo: se avisa en el mensaje en vez de darlo
+                    # por medido.
+                    inf = influence(row["leader"], construir=False) or {}
+                    _inf_sabida = bool(inf) or cache_lista()
+                    health = _leader_health(conn, row["leader"])
+                    conf = confidence_score(inf, pred, token_ctx.get("liq"),
+                                            health, arrived=len(arrived))
+                    stage = 1 + len(arrived)
+                    tier = _tier(conf, row["meta_score"] or 0, umbral,
+                                 token_ctx.get("liq"), _risk_pct(token_ctx),
+                                 u=_u_ef)
                     conn.execute(
-                        "UPDATE predictions SET alerted_stage=? WHERE id=?",
-                        (stage, row["id"]))
+                        "UPDATE predictions SET arrived=?, stage=?, "
+                        "confidence=?, tier=?, "
+                        "first_confirm_s=COALESCE(first_confirm_s,?) "
+                        "WHERE id=?",
+                        (json.dumps(sorted(arrived)), stage, conf, tier,
+                         first, row["id"]))
                     conn.commit()
-                    fresh = conn.execute(
-                        "SELECT * FROM predictions WHERE id=?",
-                        (row["id"],)).fetchone()
-                    _ctx_al = dict(token_ctx)
-                    _ctx_al["_influencia_sabida"] = _inf_sabida
-                    _alert_stage(fresh, inf, conf,
-                                 row["meta_score"], pred, health, _ctx_al)
+                    if (_should_push(tier, conn)
+                            and stage > (row["alerted_stage"] or 0)):
+                        conn.execute(
+                            "UPDATE predictions SET alerted_stage=? "
+                            "WHERE id=?", (stage, row["id"]))
+                        conn.commit()
+                        fresh = conn.execute(
+                            "SELECT * FROM predictions WHERE id=?",
+                            (row["id"],)).fetchone()
+                        _ctx_al = dict(token_ctx)
+                        _ctx_al["_influencia_sabida"] = _inf_sabida
+                        # (Ola 18-G) La nota de "hay N seguidores que no
+                        # puedo ver" tambien vale en las confirmaciones;
+                        # se recalcula desde la propia prediccion, que ya
+                        # solo guarda observables.
+                        _ocultos_conf = 0
+                        try:
+                            _tot = len((inf or {}).get("followers") or [])
+                            _ocultos_conf = max(0, _tot - len(pred))
+                        except Exception:
+                            pass
+                        _ctx_al["_seguidores_ocultos"] = _ocultos_conf
+                        aviso = (fresh, inf, conf, row["meta_score"], pred,
+                                 health, _ctx_al)
+        if aviso:
+            # Fuera del candado: la red no bloquea a nadie.
+            _alert_stage(*aviso)
         return
 
     # No hay predicción abierta: ¿este comprador es LÍDER con seguidores?
+    # Abrir una predicción es cosa de ⭐: son las que se copian. Las demás
+    # vigiladas llegan hasta aquí solo para poder CONFIRMAR predicciones
+    # ajenas, que es lo que arriba se acaba de hacer.
+    if not es_estrella:
+        return
     # (Ola 18-C) camino caliente: solo cache, nunca construye.
     inf = influence(wallet, construir=False)
     if not inf or not inf.get("followers"):
@@ -361,6 +495,19 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                   f"no evalúo la compra de {wallet[:8]}")
         return
     followers = [f for f in inf["followers"] if f["prob"] >= 60]
+    # (Ola 18-G) Solo los que el bot puede VER operar. Predecir a alguien
+    # cuyas compras no llegan nunca no es una prediccion: es un numero que
+    # solo puede fallar, y ademas arrastra hacia abajo la nota del lider.
+    # Sin `vigiladas` (llamadas viejas o pruebas) no se filtra nada.
+    ocultos = 0
+    # `is not None`, no `if vigiladas`: un conjunto vacio significa "no
+    # puedo ver a nadie", y entonces lo correcto es no predecir — no
+    # desactivar el filtro en silencio. (Hoy `realtime` ya corta antes si
+    # no hay vigiladas; esto es para cualquier otro llamador.)
+    if vigiladas is not None:
+        _vis = [f for f in followers if f["wallet"] in vigiladas]
+        ocultos = len(followers) - len(_vis)
+        followers = _vis
     if len(followers) < 2:
         return
 
@@ -395,6 +542,10 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict):
                       token_ctx.get("liq"), _risk_pct(token_ctx))
     token_ctx = dict(token_ctx)
     token_ctx["_cluster_sabido"] = cluster_sabido
+    # (Ola 18-G) Los seguidores que el grafo ve pero el bot NO puede
+    # observar: no entran en la nota, pero se dicen, porque son
+    # informacion real sobre el token.
+    token_ctx["_seguidores_ocultos"] = ocultos
     # Aquí el grafo de influencia SÍ estaba: si no, `inf` habría sido None
     # y se habría vuelto antes. Se deja explícito para que no dependa de
     # esa cadena de razonamiento si alguien toca la guarda de arriba.
@@ -436,6 +587,12 @@ def evaluate_due(conn):
     for r in rows:
         pred = json.loads(r["predicted"] or "[]")
         arrived = set(json.loads(r["arrived"] or "[]"))
+        # (Ola 18-G) El denominador son los seguidores que el bot podia
+        # VER. Desde esta ola `predicted` ya solo trae observables, pero
+        # las 20.785 filas viejas traen el grafo entero: para esas se
+        # sigue calculando como siempre (no se puede reconstruir a
+        # posteriori quien estaba vigilado entonces) y por eso la salud
+        # del lider las ignora — ver `medicion_desde`.
         pred_w = [p["wallet"] for p in pred]
         outcome = round(100 * sum(1 for w in pred_w if w in arrived) /
                         len(pred_w)) if pred_w else 0
@@ -493,7 +650,7 @@ def leader_health_line(leader: str) -> str | None:
         conn.close()
     if h["accuracy"] is None:
         return None
-    return (f"Salud del líder (30d): {h['estado']} · "
+    return (f"Salud del líder: {h['estado']} · "
             f"{h['accuracy']}% de acierto en {h['n']} predicciones")
 
 

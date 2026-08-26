@@ -543,6 +543,43 @@ _ESQUEMA_LISTO = False
 _ESQUEMA_LOCK = threading.Lock()
 
 
+# (Ola 18-G) `predictions` no tenia NI UN indice mas alla de la PK, y es
+# de las que mas crecen: 20.785 filas en 28 dias, sin poda. Las dos
+# consultas que corren en el HILO DE INGESTA en cada compra vigilada
+# (`evaluate_due` por status, y la busqueda de la prediccion abierta del
+# token) eran recorridos completos de la tabla, con los JSON de
+# `predicted`/`arrived` dentro, y crecen mientras la tabla crezca.
+#
+# VAN AQUI Y NO EN EL ESQUEMA a proposito: uno de ellos nombra
+# `evaluated_ts`, que es una columna que se AÑADE por migracion. Los
+# scripts de esquema corren ANTES que los ALTER, asi que sobre una base
+# ya existente sin esa columna el CREATE INDEX reventaba el arranque —
+# y en Postgres, donde el script va en una sola sentencia, se llevaba por
+# delante el esquema entero. La migracion que lo cubre estaba puesta
+# DETRAS del agujero.
+_INDICES_TARDIOS = (
+    "CREATE INDEX IF NOT EXISTS idx_pred_status_ts "
+    "ON predictions(status, created_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pred_mint_status "
+    "ON predictions(mint, status)",
+    "CREATE INDEX IF NOT EXISTS idx_pred_leader_eval "
+    "ON predictions(leader, evaluated_ts)",
+)
+
+
+def _crear_indices_tardios(conn):
+    """Indices que dependen de columnas añadidas por migracion."""
+    for sql in _INDICES_TARDIOS:
+        try:
+            conn.execute(sql)
+        except Exception as e:
+            print(f"· Índice omitido ({str(e)[:80]})")
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
 def _preparar_pg(pg):
     """Crea el esquema y aplica las migraciones en Postgres. Una sola vez."""
     pg.executescript(PG_SCHEMA)
@@ -599,6 +636,11 @@ def _preparar_pg(pg):
             # perdia para siempre — una ganadora se publicaba como
             # perdedora. Aqui se guarda sin dolares y el cierre lo
             # convierte con el importe que tenga. Filas viejas: 0.
+            # (Ola 18-G) `evaluated_ts` estaba en la migracion de SQLite
+            # pero NO en la de Postgres: una base PG creada antes de esa
+            # columna reventaria en `_leader_health`, que desde esta ola
+            # se llama mas veces.
+            ("predictions", "evaluated_ts", "BIGINT"),
             ("paper_trades", "pnl_realizado_frac", "DOUBLE PRECISION"),
             # (Ola 18-E) Desde cuando esta posicion NO tiene precio
             # utilizable (DexScreener responde pero sin par con precio, o
@@ -648,6 +690,7 @@ def _preparar_pg(pg):
                        f"{col} {typ}")
         except Exception:
             pass
+    _crear_indices_tardios(pg)
     _dedupe_aliases(pg)
 
 
@@ -745,6 +788,7 @@ def _preparar_sqlite(conn):
         except sqlite3.OperationalError:
             pass
     conn.commit()
+    _crear_indices_tardios(conn)
     _dedupe_aliases(conn)
 
 
