@@ -10,9 +10,14 @@ first_sell_ts) calcula lo que un trader profesional miraría:
   - expectancy_sol : PnL esperado por operación cerrada,
   - sharpe         : media/desviación de los ROI por operación,
   - max_drawdown_sol / _pct : peor caída pico-a-valle de la curva
-    de resultados (operaciones cerradas en orden cronológico).
+    de resultados (posiciones cerradas en orden cronológico).
 
-Una posición "cerrada" es un token con al menos una venta.
+Una posición "cerrada" es un token con al menos una venta — y ese es el
+denominador de TODAS las métricas de arriba, que son por token.
+
+Aparte, y para no confundirlos nunca más, se cuentan también las
+OPERACIONES: `ventas` (salidas realizadas) y `compras`. Es lo que mide
+`MIN_CLOSED_TRADES` en el embudo desde la Ola 18-F.
 """
 
 from statistics import median, pstdev
@@ -25,9 +30,22 @@ def _roi(info: dict):
 
 def trade_metrics(tokens: dict) -> dict:
     """Devuelve el bloque de métricas quant (todo None si no hay cerradas)."""
-    m = {"closed": 0, "roi_avg": None, "roi_median": None, "roi_max": None,
+    m = {"closed": 0, "ventas": 0, "compras": 0,
+         "roi_avg": None, "roi_median": None, "roi_max": None,
          "profit_factor": None, "expectancy_sol": None, "sharpe": None,
          "max_drawdown_sol": None, "max_drawdown_pct": None}
+
+    # (Ola 18-F) `closed` son POSICIONES cerradas (tokens con al menos una
+    # venta) y asi tiene que seguir siendo: profit_factor, roi_median,
+    # expectancy y drawdown se calculan POR TOKEN y su denominador es
+    # este. Lo que faltaba era el numero de OPERACIONES, que es otra cosa
+    # y es lo que el dueño creia estar configurando en
+    # MIN_CLOSED_TRADES: con el umbral en 10, una billetera de +197 SOL y
+    # 60% de acierto salia "Descartada" por haber operado 5 TOKENS —
+    # aunque en esos 5 hubiera hecho 40 operaciones. Contradice al propio
+    # prompt de la IA, que dice "NO la castigues por acumular".
+    m["ventas"] = sum(int(i.get("sells", 0) or 0) for i in tokens.values())
+    m["compras"] = sum(int(i.get("buys", 0) or 0) for i in tokens.values())
 
     closed = [i for i in tokens.values() if i.get("sells", 0) > 0]
     if not closed:
@@ -72,7 +90,7 @@ def format_metrics(m: dict) -> list[str]:
     """Líneas legibles para Telegram (omite lo que no se pudo calcular)."""
     if not m or not m.get("closed"):
         return []
-    out = ["📊 *Métricas quant (operaciones cerradas):*"]
+    out = ["📊 *Métricas quant (posiciones cerradas):*"]
     if m.get("roi_avg") is not None:
         out.append(f"ROI prom/mediano/máx: {m['roi_avg']:+d}% / "
                    f"{m['roi_median']:+d}% / {m['roi_max']:+d}%")
@@ -85,9 +103,9 @@ def format_metrics(m: dict) -> list[str]:
         out.append("Profit Factor: " + ("∞ (sin pérdidas cerradas)"
                                         if _pf >= 99 else f"{_pf}"))
     if m.get("expectancy_sol") is not None:
-        out.append(f"Expectancy: {m['expectancy_sol']:+.3f} SOL/op")
+        out.append(f"Expectancy: {m['expectancy_sol']:+.3f} SOL/posición")
     if m.get("sharpe") is not None:
-        out.append(f"Sharpe (por op): {m['sharpe']}")
+        out.append(f"Sharpe (por posición): {m['sharpe']}")
     if m.get("max_drawdown_sol") is not None:
         dd = f"{m['max_drawdown_sol']:.2f} SOL"
         if m.get("max_drawdown_pct") is not None:

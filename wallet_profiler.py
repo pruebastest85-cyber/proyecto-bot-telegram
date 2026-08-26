@@ -214,6 +214,10 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
         "priced_tokens": 0,
         "metrics": {},        # métricas quant (ver wallet_metrics)
         "possible_bot": False,
+        # (Ola 18-F) Cuantas transacciones movieron mas de un token no
+        # estable. En esas, el SOL se le apunta a UNO solo: es una
+        # aproximacion, y conviene saber cuanto pesa en este perfil.
+        "tx_multi_token": 0,
         # (Ola 18-D) False = la descarga se corto por un fallo, asi que
         # "sin transacciones" NO significa "billetera sin actividad".
         "historial_entero": historial_entero,
@@ -280,9 +284,20 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
                 mint_in[mint] = mint_in.get(mint, 0.0) + amt
             elif t.get("fromUserAccount") == address:
                 mint_out[mint] = mint_out.get(mint, 0.0) + amt
+        # (Ola 18-F) Si la transaccion mueve VARIOS tokens no estables, a
+        # cual se le apunta el SOL es una aproximacion — pero tiene que ser
+        # SIEMPRE LA MISMA. `next(iter(...))` cogia el primero por orden de
+        # insercion, que venia del orden de `tokenTransfers`, que a su vez
+        # salia de iterar un conjunto: distinto en cada arranque del
+        # proceso. Resultado: el PnL por token de la misma billetera
+        # cambiaba entre ejecuciones y su nota con el, asi que la ⭐
+        # aparecia y desaparecia sola. Ordenar por direccion del mint no es
+        # mas "correcto", pero es ESTABLE, que es lo que aqui hace falta.
         # Compra: recibio token y su SOL bajo (una tx cuenta una vez)
         if delta < -0.001 and mint_in:
-            mint = next(iter(mint_in))
+            if len(mint_in) > 1:
+                result["tx_multi_token"] += 1
+            mint = min(mint_in)
             _ops.append({"signature": tx.get("signature"), "mint": mint,
                          "side": "compra", "sol": abs(delta),
                          "tokens": mint_in[mint], "ts": ts})
@@ -298,7 +313,9 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
                 result["pnl_30d_sol"] += delta
         # Venta: envio token y su SOL subio
         elif delta > 0.001 and mint_out:
-            mint = next(iter(mint_out))
+            if len(mint_out) > 1:
+                result["tx_multi_token"] += 1
+            mint = min(mint_out)          # (Ola 18-F) estable, ver arriba
             _ops.append({"signature": tx.get("signature"), "mint": mint,
                          "side": "venta", "sol": delta,
                          "tokens": mint_out[mint], "ts": ts})
@@ -457,6 +474,12 @@ def format_profile(p: dict) -> str:
                  f"{len(traded)}")
     if closed:
         lines.append(f"✅ Con ventas: {closed} · ganadores: {wins}")
+    # (Ola 18-F) Honestidad sobre la aproximacion: en las txs que mueven
+    # varios tokens a la vez, el SOL se le apunta a uno solo.
+    _multi = p.get("tx_multi_token") or 0
+    if _multi:
+        lines.append(f"_⚪ {_multi} txs movieron varios tokens a la vez; "
+                     f"el SOL de esas se le apunta a uno solo._")
     # (Ola 8, 21/8) Ambas cifras son FLUJO de caja de la muestra/ventana
     # (una venta de algo comprado antes cuenta entera; una compra sin
     # venta resta entera): etiquetarlas "PnL" a secas sobreclamaba.

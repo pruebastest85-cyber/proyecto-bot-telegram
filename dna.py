@@ -89,14 +89,14 @@ def wallet_dna_text(address: str) -> str | None:
         lines.append(f"ROI prom/máx: {m['roi_avg']:+d}% / {m['roi_max']:+d}%")
     if s.get("win_rate") is not None:
         lines.append(f"Win Rate: {s['win_rate']}% · "
-                     f"{m.get('closed', s.get('trades', 0))} ops cerradas")
+                     f"{m.get('closed', s.get('trades', 0))} posiciones cerradas")
     if m.get("profit_factor") is not None:
         # (Ola 8, 21/8) 99.99 es un CENTINELA interno ("sin perdidas
         # cerradas"), no una medicion: mostrarlo como dato era mentir.
         _pf = m["profit_factor"]
         _pf_txt = ("∞ (sin pérdidas cerradas)" if _pf >= 99 else f"{_pf}")
         lines.append(f"Profit Factor: {_pf_txt} · "
-                     f"Expectancy: {m.get('expectancy_sol', 0):+.3f} SOL/op")
+                     f"Expectancy: {m.get('expectancy_sol', 0):+.3f} SOL/posición")
     if m.get("sharpe") is not None or m.get("max_drawdown_sol") is not None:
         seg = []
         if m.get("sharpe") is not None:

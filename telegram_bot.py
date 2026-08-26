@@ -1466,6 +1466,87 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_nota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """¿La nota del embudo decide quién lleva ⭐?  /nota [on|off]
+
+    Sin argumento NO cambia nada: enseña cuántas ⭐ hay por nota y cuántas
+    perderían la estrella al encenderlo, con las cifras de la base de
+    ahora mismo. Encenderlo es una decisión con consecuencias (la lista se
+    hace mucho más corta), así que conviene mirar el número antes.
+    """
+    from db import get_setting, set_setting
+
+    def _trabajo(accion: str) -> str:
+        conn = get_conn()
+        try:
+            activo = (get_setting(conn, "grado_vinculante", "0")
+                      or "0").strip() == "1"
+            fila = conn.execute(
+                """SELECT
+                     SUM(CASE WHEN grade IN ('Elite','Seguimiento')
+                              THEN 1 ELSE 0 END) buenas,
+                     SUM(CASE WHEN COALESCE(grade,'') NOT IN
+                              ('Elite','Seguimiento') THEN 1 ELSE 0 END) flojas,
+                     SUM(CASE WHEN grade IS NULL THEN 1 ELSE 0 END) sin_nota
+                   FROM wallets WHERE is_tracked = 1""").fetchone()
+            buenas = int(fila["buenas"] or 0)
+            flojas = int(fila["flojas"] or 0)
+            if accion == "on":
+                set_setting(conn, "grado_vinculante", "1")
+                return (f"⭐ *La nota del embudo MANDA*\n\n"
+                        f"Solo llevan ⭐ las billeteras con nota *Elite* o "
+                        f"*Seguimiento*.\n"
+                        f"Con las notas de ahora: *{buenas}* la conservan y "
+                        f"hasta *{flojas}* la pierden.\n\n"
+                        f"_Las que la pierden NO se borran: siguen en la "
+                        f"base y pueden recuperarla si su nota mejora._\n"
+                        f"⚠️ _Apagar tarda: al perder la ⭐ pasan a la cola "
+                        f"de re-evaluación de rechazadas, que es de 14 días. "
+                        f"Encender es inmediato; volver atrás, no._\n"
+                        f"Volver atrás: `/nota off`")
+            if accion == "off":
+                set_setting(conn, "grado_vinculante", "0")
+                return ("⭐ *La nota del embudo es solo informativa*\n\n"
+                        "Se vuelve al criterio de siempre: la ⭐ la decide "
+                        "la IA, y solo se quita a las *Descartada*.\n\n"
+                        "⚠️ _Las que ya la perdieron NO vuelven al momento: "
+                        "entran en la cola de re-evaluación de rechazadas "
+                        "(hasta 14 días) y recuperan la ⭐ cuando les toque._"
+                        "\n\nEncender: `/nota on`")
+            estado = ("🟢 *ENCENDIDA*" if activo
+                      else "⚪ *apagada* (solo informativa)")
+            sinnota = int(fila["sin_nota"] or 0)
+            return (f"⭐ *Nota del embudo:* {estado}\n\n"
+                    f"Tus ⭐ ahora: *{buenas + flojas}*\n"
+                    f"  · con nota buena (Elite/Seguimiento): *{buenas}*\n"
+                    f"  · con nota floja: *{flojas - sinnota}*\n"
+                    f"  · sin nota todavía: *{sinnota}*\n\n"
+                    + ("Con `/nota on` se quedarían solo las "
+                       f"*{buenas}* de nota buena.\n\n"
+                       "_Dos avisos antes de encenderlo:_\n"
+                       "_1) Las que hoy no son ⭐ y tienen nota buena NO "
+                       "la recuperan — están fuera por otros motivos "
+                       "(insider, pérdidas medidas, misma familia de "
+                       "fondos), y eso la nota no lo ve._\n"
+                       "_2) Estas cuentas salen de la nota que cada "
+                       "billetera tiene GUARDADA, y esa nota se recalcula "
+                       "poco a poco (unas 20-25 cada 6 h). Si acabas de "
+                       "actualizar el bot, el reparto real cambiará según "
+                       "se vayan re-evaluando._"
+                       if not activo else
+                       "Con `/nota off` vuelve a mandar solo la IA."))
+        finally:
+            conn.close()
+
+    accion = (ctx.args[0].lower().strip() if ctx.args else "")
+    if accion not in ("", "on", "off"):
+        await update.message.reply_text("Uso: /nota [on|off]")
+        return
+    txt = await asyncio.to_thread(_trabajo, accion)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
 async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Cuántas billeteras del ranking pueden alertar. /topalertas [n]
 
@@ -2345,6 +2426,7 @@ def main():
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("topalertas", cmd_top_alertas))
     app.add_handler(CommandHandler("copiapura", cmd_copia_pura))
+    app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
     # Chat libre: cualquier texto sin comando activa al agente

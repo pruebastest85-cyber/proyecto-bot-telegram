@@ -27,8 +27,35 @@ def _env(name, default):
         return default
 
 
+# (Ola 18-F) OPERACIONES cerradas (ventas), no tokens. Hasta la 18-E esto
+# se comparaba contra `closed`, que son POSICIONES (tokens con al menos
+# una venta): una billetera de +197 SOL y 60% de acierto salia
+# "Descartada" por haber operado 5 tokens, aunque dentro de esos 5
+# hubiera hecho decenas de operaciones. El nombre del ajuste siempre dijo
+# "trades"; ahora cuenta trades de verdad. `MIN_TOKENS` sigue guardando
+# la diversidad por separado, que es la otra mitad de la pregunta.
 MIN_TRADES = int(_env("MIN_CLOSED_TRADES", 20))    # ops cerradas mínimas
 MIN_TOKENS = int(_env("MIN_TOKENS", 3))            # tokens distintos mínimos
+# (Ola 18-F) SUELO DE MUESTRA, aparte del de operaciones y del de
+# variedad. Hace falta porque profit_factor, roi_median, expectancy,
+# sharpe y max_drawdown se calculan POR TOKEN: su denominador es `closed`
+# (tokens con al menos una venta), no las operaciones. Al pasar la puerta
+# de entrada a contar operaciones, ese denominador se quedaba sin ningun
+# minimo: una billetera con 4 tokens y 7 ventas parciales en cada uno
+# daba 28 "operaciones", metricas preciosas calculadas sobre n=4 y
+# llegaba a Elite por la via de "rendimiento excepcional". Y el descuento
+# por muestra corta no lo frena: solo se aplica a los centinelas
+# (profit_factor 99.99 o drawdown 0), no a un profit_factor normal
+# calculado sobre cuatro datos.
+MIN_POSICIONES = int(_env("MIN_CLOSED_POSITIONS", 5))
+# El suelo de muestra NUNCA puede ser mas exigente que el de operaciones:
+# si lo fuera, bajar MIN_CLOSED_TRADES —algo natural ahora que ese ajuste
+# cuenta operaciones y no tokens— empezaria a descartar billeteras que
+# antes pasaban, y el motivo diria "historial insuficiente" sin que nadie
+# pudiera relacionarlo con lo que cambio. Con este tope, el criterio nuevo
+# NUNCA es mas duro que el viejo: pasar el viejo exigia closed >= T, y
+# como ops >= closed siempre, quien pasaba pasa.
+MIN_POSICIONES = min(MIN_POSICIONES, MIN_TRADES)
 MAX_INACTIVE_DAYS = int(_env("MAX_INACTIVE_DAYS", 45))
 # Retención mínima para dar la ⭐: no es una cuestión de rentabilidad sino
 # de SEGUIBILIDAD. Medido sobre datos reales: las billeteras con retención
@@ -124,6 +151,12 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
     """Aplica la cascada y devuelve el grado + consistency + razones."""
     m = p.get("metrics") or {}
     closed = m.get("closed") or p.get("closed_positions", 0)
+    # Operaciones cerradas de verdad. Si el perfil viene de una version
+    # anterior y no trae `ventas`, se cae a `closed` (el comportamiento de
+    # siempre) en vez de dar 0 y descartarla por sorpresa.
+    ops = m.get("ventas")
+    if not ops:
+        ops = closed
     ntokens = len(p.get("tokens") or {})
     net = p.get("net_pnl_sol", p.get("pnl_total_sol", 0.0))
     wr = p.get("win_rate_pct")
@@ -137,10 +170,10 @@ def grade_wallet(p, inf=None, ai_class=None) -> dict:
     days = ((time.time() - p["last_tx_ts"]) / 86400) if p.get("last_tx_ts") else 999
 
     # ── Nivel 1: supervivencia ──
-    if closed < MIN_TRADES or ntokens < MIN_TOKENS:
+    if ops < MIN_TRADES or closed < MIN_POSICIONES or ntokens < MIN_TOKENS:
         return _res("🔴", "Descartada", cons,
-                    [f"historial insuficiente ({closed} cerradas, "
-                     f"{ntokens} tokens)"])
+                    [f"historial insuficiente ({ops} operaciones cerradas "
+                     f"en {closed} posiciones y {ntokens} tokens)"])
     if days > MAX_INACTIVE_DAYS:
         return _res("🔴", "Descartada", cons, [f"inactiva ({days:.0f} días)"])
 
@@ -254,6 +287,9 @@ def elite_gap(p, inf=None) -> list[str]:
     """
     m = p.get("metrics") or {}
     closed = m.get("closed") or p.get("closed_positions", 0)
+    # (Ola 18-F) La MISMA cuenta que usa la puerta de entrada, o el "qué
+    # te falta" pediria una cosa y el filtro miraria otra.
+    ops = m.get("ventas") or closed
     net = p.get("net_pnl_sol", p.get("pnl_total_sol", 0.0))
     wr = p.get("win_rate_pct")
     pf = m.get("profit_factor")
@@ -264,8 +300,12 @@ def elite_gap(p, inf=None) -> list[str]:
                           or inf.get("followers_count", 0) >= 2))
 
     faltan = []
-    if closed < MIN_TRADES:
-        faltan.append(f"{MIN_TRADES - closed} operaciones cerradas más")
+    if ops < MIN_TRADES:
+        faltan.append(f"{MIN_TRADES - ops} operaciones cerradas más")
+    if closed < MIN_POSICIONES:
+        faltan.append(f"{MIN_POSICIONES - closed} posiciones cerradas más "
+                      f"(tokens distintos con venta; es la muestra sobre la "
+                      f"que se calculan las métricas)")
     if net < ELITE_NET:
         faltan.append(f"+{ELITE_NET - net:.0f} SOL de PnL neto "
                       f"(ahora {net:+.0f})")

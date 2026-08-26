@@ -96,7 +96,7 @@ def format_ficha(address: str, s: dict, alias: str | None = None,
              (f"ROI (muestra): {s['roi_pct']:+d}%"
               if s.get("roi_pct") is not None else "ROI (muestra): ?"),
              f"Win Rate: {wr}",
-             f"Trades cerrados: {s['trades']}",
+             f"Posiciones cerradas: {s['trades']}",
              f"PnL realizado: {s['pnl_sol']:+.1f} SOL (30d: {s['pnl_30d']:+.1f})"]
     if s.get("held_tokens"):
         lines.append(f"En cartera: {s.get('pnl_unreal', 0.0):+.1f} SOL")

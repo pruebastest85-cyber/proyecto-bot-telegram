@@ -75,7 +75,14 @@ def _token_transfers(meta) -> list[dict]:
             dest[(dueno, mint)] = dest.get((dueno, mint), 0.0) + cant
 
     out = []
-    for clave in set(pre) | set(post):
+    # (Ola 18-F) `sorted`, no `set`. Iterar un conjunto de cadenas da un
+    # orden que cambia ENTRE PROCESOS (Python aleatoriza el hash de las
+    # cadenas en cada arranque). Ese orden llegaba tal cual a
+    # `tokenTransfers`, y `wallet_profiler` cogia el PRIMER mint de la
+    # lista para atribuirle el SOL de la transaccion: la misma billetera,
+    # con las mismas transacciones, daba un PnL por token distinto en cada
+    # ejecucion. De ahi que una ⭐ apareciera y desapareciera sola.
+    for clave in sorted(set(pre) | set(post)):
         dueno, mint = clave
         delta = post.get(clave, 0.0) - pre.get(clave, 0.0)
         if abs(delta) < 1e-12:

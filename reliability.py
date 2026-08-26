@@ -6,7 +6,7 @@ dos medidas hacen al sistema honesto sobre CUÁNTO fiarse de cada
 conclusión, sin cambiar los scores en sí (observabilidad, no más reglas).
 
   · stat_confidence(perfil): 0-100 según el tamaño de muestra (nº de
-    operaciones cerradas). Con pocas ops, aunque el score sea alto, la
+    posiciones cerradas). Con pocas posiciones, aunque el score sea alto, la
     confianza es baja.
   · data_quality(perfil): 0-100 de completitud: ¿hay historial suficiente,
     muestra amplia, diversificación, precios conocidos? La IA/grading
@@ -15,7 +15,7 @@ conclusión, sin cambiar los scores en sí (observabilidad, no más reglas).
 
 
 def stat_confidence(p) -> int:
-    """Confianza estadística por tamaño de muestra (operaciones cerradas)."""
+    """Confianza estadística por tamaño de muestra (posiciones cerradas)."""
     m = p.get("metrics") or {}
     n = m.get("closed") or p.get("closed_positions", 0) or 0
     # n/(n+11): 8→42%, 30→73%, 100→90%, 312→97%. Sube rápido y satura.
@@ -50,5 +50,9 @@ def format_reliability(p) -> str | None:
     aviso = ""
     if conf < 50:
         aviso = " ⚠️ muestra pequeña: tómalo con pinzas"
-    return (f"🔎 Confianza estadística: *{conf}%* ({n} ops) · "
+    # (Ola 18-F) "posiciones", no "ops": `n` son tokens con venta, que es
+    # la muestra de las metricas. Las OPERACIONES son otra cuenta y desde
+    # la 18-F el embudo las mira por separado; tres pantallas contiguas
+    # diciendo tres numeros distintos para "lo mismo" confunden.
+    return (f"🔎 Confianza estadística: *{conf}%* ({n} posiciones) · "
             f"Calidad de datos: {dq}/100{aviso}")
