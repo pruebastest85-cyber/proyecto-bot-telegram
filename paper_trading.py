@@ -28,6 +28,15 @@ Settings (tabla settings, editables con /paper o desde el chat):
   paper_tp_pct        take-profit % (default 100 = x2)
   paper_sl_pct        stop-loss % positivo (default 50 → -50%)
   paper_timeout_h     horas máximas de una posición (default 48)
+  paper_polvo_usd     (Ola 18-J) por debajo de cuánto vale lo que queda
+                      vivo de una posición se cierra ENTERA en vez de
+                      seguir vendiendo trocitos (default 0.01 = 1 céntimo).
+                      El espejo vende un PORCENTAJE de lo que queda, así
+                      que la fracción decae en geométrica y nunca llega a
+                      cero: sin este suelo la posición se queda abierta
+                      para siempre, manda avisos de $0,00 y —lo peor—
+                      bloquea volver a copiar ese token, porque solo se
+                      abre una posición por mint.
 """
 
 import time
@@ -491,7 +500,7 @@ def _fill_resultado(conn, trade_id: int, firma, tipo: str, motivo: str,
 
 
 def _close(conn, row, price: float, reason: str, icon: str, firma=None,
-           liq_salida=None):
+           liq_salida=None, nota=""):
     pct = (price / row["entry_price"] - 1) * 100
 
     # PnL en dólares sobre el importe que se guardó al entrar. Si la fila
@@ -576,14 +585,29 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
             and reason == "sin liquidez":
         pnl_neto = (usd_salida or 0) - stake_usd - (costos or 0)
 
-    conn.execute(
+    # (Ola 18-J) `AND status='abierta'`: el cierre solo se escribe si la
+    # fila SEGUIA abierta. Dos ventas del mismo token llegan como dos
+    # hilos y la via normal no pasa por el candado por mint, asi que la
+    # `row` de arriba puede ser de hace un instante. Sin esta condicion se
+    # cerraba dos veces —dos mensajes y dos fills 'total'— y, peor, un
+    # parcial podia escribir encima de una fila ya cerrada dejando en el
+    # historico un `pnl_usd` que no incluia lo ya realizado. Es una sola
+    # sentencia, asi que la comprobacion y la escritura son atomicas en
+    # los dos motores.
+    # `fraccion_restante=0` (Ola 18-J): la fila cerrada dejaba la cola
+    # geometrica puesta (1e-4), que confunde al leerla.
+    cur_cierre = conn.execute(
         """UPDATE paper_trades SET status='cerrada', exit_price=?,
            exit_ts=?, exit_reason=?, pnl_pct=?, pnl_sol=?, pnl_usd=?,
-           stake_usd=?, costos_usd=?, usd_salida_real=?, pnl_usd_neto=?
-           WHERE id=?""",
+           stake_usd=?, costos_usd=?, usd_salida_real=?, pnl_usd_neto=?,
+           fraccion_restante=0 WHERE id=? AND status='abierta'""",
         (price, int(time.time()), reason, pct, pnl, pnl_usd,
          stake_usd, costos, usd_salida, pnl_neto, row["id"]))
     conn.commit()
+    if getattr(cur_cierre, "rowcount", 1) == 0:
+        print(f"· Paper: {row['symbol']} ya estaba cerrada; no se cierra "
+              f"dos veces")
+        return
     _fill_resultado(conn, row["id"], firma, "total", reason,
                     round(frac, 4), price, _usd_fill, _fee_fill)
 
@@ -735,10 +759,67 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     _tg(f"{icon} *Paper cerrada* ({reason}): *{_md(row['symbol'])}*\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
         f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}{nota_parciales}\n"
-        f"{linea_pnl}{linea_neto}{nota_liq}\n"
+        f"{linea_pnl}{linea_neto}{nota_liq}{nota}\n"
         f"Resumen: /paper")
     print(f"🧪 Paper cerrada {row['symbol']} por {reason}: "
           f"{_usd_firmado(pnl_usd) if pnl_usd is not None else f'{pnl:+.3f} SOL'}")
+
+
+def _resto_es_polvo(conn, row, nueva_frac: float, price: float) -> bool:
+    """¿Lo que quedaría de la posición ya no vale ni un céntimo?
+
+    (Ola 18-J) El espejo vende un PORCENTAJE de lo que queda, asi que la
+    fraccion viva decae en geometrica y NUNCA llega a cero: 0,48 × 0,60 ×
+    0,41 … Con `/copiapura on` —que pone `paper_parcial_min_pct` a 0 y
+    `paper_total_pct` a 100 a proposito, para copiarlo TODO— no hay nada
+    que corte esa cola, y la posicion se queda abierta para siempre.
+
+    Medido en la base del dueño, posicion 308 (GASSPAS): **8 horas
+    abierta**, `fraccion_restante` = 6,1 × 10⁻¹¹, **31 ventas parciales**
+    apuntadas, cada una con "PnL del trozo -$0.0000" y un mensaje de
+    Telegram. Y lo peor no es el ruido: `open_trade` no abre una segunda
+    posicion del mismo token, asi que esa fila muerta **bloqueo 72
+    compras** de ese mint (16 alertadas) durante esas 8 horas. La
+    simulacion dejo de copiar lo que existe para medir.
+
+    El criterio es el mismo que el dueño aplico a los rugs: por debajo de
+    un centimo no se vende, porque la comision se come lo que sacas. Si
+    lo que queda no llega a `paper_polvo_usd` (1 centimo), la posicion
+    esta terminada y se cierra entera con esta misma venta.
+    """
+    if nueva_frac <= 0:
+        return True
+    # (2ª vuelta) Una fraccion GRANDE nunca es polvo, valga lo que valga.
+    # Sin esto, un precio glitcheado —el pool residual de pump.fun que
+    # imprime un precio 1.000 veces menor, el caso que documenta la Ola
+    # 18-H— cerraba de golpe media posicion viva, y cerrar es
+    # irreversible. La cola geometrica que este suelo persigue llega a
+    # valores de 10⁻⁴; el 5% deja un margen de sobra.
+    if nueva_frac >= 0.05:
+        return False
+    suelo = _f(conn, "paper_polvo_usd", 0.01)
+    # (2ª vuelta) `_f` no protege de "inf"/"nan"/negativos: `float()` los
+    # acepta. Con "inf" TODA venta parcial se convertia en cierre total, y
+    # con un negativo el arreglo se apagaba en silencio.
+    if not (0 <= suelo < 1e6):
+        suelo = 0.01
+    stake_usd = _campo(row, "stake_usd")
+    if stake_usd is None:
+        # (2ª vuelta) Igual que `_close` y `_venta_parcial`: si la fila no
+        # trae el importe se reconstruye al cambio de ahora. Era el unico
+        # de los tres sitios que no lo hacia, y sin el se caia a un suelo
+        # de fraccion CIEGO AL PRECIO que cerraba posiciones de 9 $.
+        _su = _sol_a_usd()
+        stake_usd = ((row["stake_sol"] or 0) * _su
+                     if _su and _su > 0 else None)
+    entrada = row["entry_price"] or 0
+    if stake_usd and entrada > 0 and price and price > 0:
+        # Lo que valdria HOY el trozo que quedaria vivo.
+        valor = stake_usd * nueva_frac * (price / entrada)
+        return valor < suelo
+    # Sin dolares no se puede valorar de ninguna manera: suelo de
+    # fraccion. 1 diezmilesimo de una posicion de ~100 $ es un centimo.
+    return nueva_frac < 1e-4
 
 
 def _venta_parcial(conn, row, price: float, pct: float, firma=None):
@@ -813,14 +894,23 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
             print(f"· Paper: cotización parcial falló ({e}); el trozo "
                   "queda para el cierre")
 
-    conn.execute(
+    # (Ola 18-J) Mismo `AND status='abierta'` que el cierre: si otro hilo
+    # cerro la posicion entre la lectura y esta escritura, el parcial NO
+    # se apunta encima. Antes dejaba una fila cerrada con un
+    # `pnl_realizado_usd` posterior al cierre — dinero realizado que el
+    # `pnl_usd` del historico ya no contaba.
+    cur_parcial = conn.execute(
         """UPDATE paper_trades SET fraccion_restante=?, pnl_realizado_usd=?,
            pnl_realizado_frac=?, tokens_raw=?, usd_salida_real=?,
-           costos_usd=?, stake_usd=? WHERE id=?""",
+           costos_usd=?, stake_usd=? WHERE id=? AND status='abierta'""",
         (nueva, realizado, realizado_frac, nuevos_tokens, usd_real, costos,
          stake_usd if stake_usd is not None else _campo(row, "stake_usd"),
          row["id"]))
     conn.commit()
+    if getattr(cur_parcial, "rowcount", 1) == 0:
+        print(f"· Paper: {row['symbol']} se cerró mientras copiaba el "
+              f"parcial; no lo apunto encima")
+        return
     _fill_resultado(conn, row["id"], firma, "parcial",
                     f"espejo {pct:.0f}% de la ⭐", round(vendida, 4),
                     price, _usd_fill, _fee_fill)
@@ -946,6 +1036,21 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         if pct_v < min_parcial:
             return                      # venta de polvo: no se copia
         if pct_v < tope_total and row["status"] == "abierta":
+            # (Ola 18-J) ¿Que quedaria vivo despues de este espejo?
+            _frac = _campo(row, "fraccion_restante")
+            _frac = 1.0 if _frac is None else _frac
+            _nueva = max(0.0, _frac - _frac * pct_v / 100.0)
+            if _resto_es_polvo(conn, row, _nueva, price):
+                _icono = "🟢" if price >= row["entry_price"] else "🔴"
+                print(f"🧹 Paper: lo que quedaba de {row['symbol']} ya no "
+                      f"llega a un céntimo; se cierra entera con esta venta")
+                _close(conn, row, price, "venta de la ⭐", _icono,
+                       firma=_firma,
+                       nota="\n_Se cierra ENTERA: lo que quedaba vivo ya no "
+                            "llegaba a un céntimo. Dejarla abierta solo "
+                            "generaba avisos de $0,00 y bloqueaba volver a "
+                            "copiar este token._")
+                return
             _venta_parcial(conn, row, price, pct_v, firma=_firma)
             return
 
@@ -1256,6 +1361,53 @@ def update_open_trades() -> int:
                 fallaron.append((row, _fallo_px))
                 continue
             hubo_respuesta = True
+            # (Ola 18-J) Barrido de posiciones ZOMBI. El corte por polvo
+            # del espejo actua cuando llega una venta nueva; si no llega
+            # ninguna, la fila muerta se queda ahi para siempre — y con
+            # `/copiapura on` no hay TP, ni SL, ni reloj que la recojan
+            # (los tres valen 999999 a proposito). Medido: una posicion
+            # con `fraccion_restante` = 6,1e-11 llevaba 8 HORAS abierta,
+            # ocupando plaza de las 50 y bloqueando 72 compras de ese
+            # mint, porque `open_trade` no abre una segunda posicion del
+            # mismo token. Aqui ya hay precio fresco, asi que se valora y
+            # se cierra con el mismo criterio.
+            _fr = _campo(row, "fraccion_restante")
+            # (2ª vuelta) `price and price > 0` VA PRIMERO. `_price_mc_ex`
+            # devuelve `price=None` SIN marcar fallo en tres casos reales
+            # —rug (`pairs: []`), liquidez de polvo, y pares vivos sin
+            # precio usable—, asi que el `continue` de arriba no salta y
+            # la comparacion `price >= row["entry_price"]` reventaba con
+            # un TypeError. Y ese `try` solo tiene `finally`, o sea que la
+            # excepcion salia de `update_open_trades` y se perdia la
+            # pasada ENTERA: ni TP, ni SL, ni reloj, ni confirmacion de
+            # muerte, para TODAS las posiciones, cada 15 minutos. Ademas
+            # la zombi es vieja, asi que el `ORDER BY entry_ts` la ponia
+            # la PRIMERA: moria desde la primera fila. Peor que el bug que
+            # esto viene a curar. Sin precio no se puede valorar nada, y
+            # la zombi rugueada ya la recoge la rama de muerte de abajo,
+            # que ademas le pone el motivo correcto.
+            #
+            # `_fr < 1e-3`: el barrido cierra EN FIRME con una sola
+            # lectura, sin la confirmacion en dos pasadas que el resto del
+            # archivo exige. La guarda del 5% de `_resto_es_polvo` protege
+            # del precio glitcheado en el espejo —que reacciona a una
+            # venta de verdad— pero aqui no basta: con el 3% vivo (2,87 $)
+            # y el pool residual de pump.fun mil veces mas barato, UNA
+            # lectura mala cerraba la copia viva y grababa un -99,9%. La
+            # cola geometrica que se persigue llega a 10⁻⁴, asi que 10⁻³
+            # deja margen de sobra.
+            if (_fr is not None and price and price > 0 and _fr < 1e-3
+                    and _resto_es_polvo(conn, row, _fr, price)):
+                _ic = "🟢" if price >= row["entry_price"] else "🔴"
+                print(f"🧹 Paper: {row['symbol']} llevaba abierta con "
+                      f"polvo ({_fr:.2e}); se cierra")
+                _close(conn, row, price, "venta de la ⭐", _ic,
+                       nota="\n_Se cierra ENTERA: lo que quedaba vivo ya no "
+                            "llegaba a un céntimo. Dejarla abierta solo "
+                            "ocupaba plaza y bloqueaba volver a copiar "
+                            "este token._")
+                cerradas += 1
+                continue
             if not price:
                 # (Ola 15/16, y desde la 18-E ya ni existe la segunda
                 # llamada a la red: el precio y el estado de muerte salen del

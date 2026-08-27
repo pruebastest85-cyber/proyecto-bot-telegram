@@ -1686,6 +1686,554 @@ def prueba_rug():
         conn.close()
 
 
+# ─────────────────────────────────────────────────────────────────────
+# OLA 18-J · el espejo no puede dejar una posición de polvo abierta.
+# ─────────────────────────────────────────────────────────────────────
+def prueba_polvo():
+    bloque("18-J · la posición de polvo se cierra, no se queda en bucle")
+    import io
+    import contextlib
+    import paper_trading as pt
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    enviados = []
+    tg_real = pt._tg
+    sol_real = pt._sol_a_usd
+    try:
+        pt._tg = lambda t: enviados.append(t)
+        pt._sol_a_usd = lambda *a, **k: 200.0
+        # Modo copia pura, que es el que tiene el dueño: sin suelo en el
+        # porcentaje que vende la ⭐ y solo el 100% cuenta como total.
+        set_setting(conn, "paper_parcial_min_pct", "0")
+        set_setting(conn, "paper_total_pct", "100")
+        set_setting(conn, "paper_polvo_usd", "0.01")
+        # Copia pura de verdad: sin TP, sin SL y sin reloj. Si no, el
+        # barrido de zombis parecía funcionar cuando en realidad lo que
+        # cerraba la fila era el reloj de 48 h — quitar el barrido dejaba
+        # la suite verde. Lo destapó la mutación.
+        set_setting(conn, "paper_tp_pct", "999999")
+        set_setting(conn, "paper_sl_pct", "999999")
+        set_setting(conn, "paper_timeout_h", "999999")
+
+        def nueva_posicion(mint, stake_usd=95.61, entrada=0.00156):
+            conn.execute("DELETE FROM paper_trades WHERE mint=?", (mint,))
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, fraccion_restante)
+                   VALUES (?,?,'W',?,1,1.0,?,'abierta',1.0)""",
+                (mint, mint, entrada, stake_usd))
+            conn.commit()
+
+        # SE LLAMA A LA FUNCIÓN DE PRODUCCIÓN, no a una copia de su
+        # decisión: la primera versión de esta prueba reimplementaba el
+        # `if polvo → cerrar` dentro del propio test, así que revertir el
+        # arreglo entero dejaba la suite en verde. Lo detectó la auditoría.
+        _n = [0]
+        # Espía del parcial: tras cerrar por polvo NO se puede seguir y
+        # llamar además a `_venta_parcial` sobre una fila ya cerrada. Hoy
+        # la guarda `AND status='abierta'` lo haría inofensivo, pero
+        # gastaría una cotización de Jupiter por nada y deja el código
+        # diciendo una cosa y haciendo otra.
+        parcial_real = pt._venta_parcial
+        parciales = [0]
+
+        def _espia_parcial(*a, **k):
+            parciales[0] += 1
+            return parcial_real(*a, **k)
+
+        pt._venta_parcial = _espia_parcial
+
+        def vender(mint, pct, price=0.00156):
+            _n[0] += 1
+            enviados.clear()
+            parciales[0] = 0
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt.close_on_wallet_sell(
+                    conn,
+                    {"mint": mint, "wallet": "W", "side": "venta",
+                     "ts": 1, "signature": f"sig-{mint}-{_n[0]}"},
+                    {"price": price, "symbol": mint, "liq": 50000},
+                    {"known": True, "fully_sold": False, "pct_sold": pct})
+            return conn.execute("SELECT * FROM paper_trades WHERE mint=?",
+                                (mint,)).fetchone()
+
+        # (a) La secuencia REAL de la posición 308 del dueño.
+        nueva_posicion("BUCLE")
+        secuencia = [57, 52, 40, 59, 42, 45, 48, 55, 51, 47, 53, 44, 58,
+                     41, 50, 46, 54, 43, 56, 49, 52, 40, 59, 42, 45, 48,
+                     55, 51, 47, 53, 44]
+        cerrada_en = None
+        fila = None
+        for i, pct in enumerate(secuencia, 1):
+            fila = vender("BUCLE", pct)
+            if fila["status"] != "abierta":
+                cerrada_en = i
+                break
+        comprobar("la posición se cierra sola en vez de encadenar 31 "
+                  "parciales de $0,00", cerrada_en is not None,
+                  f"sigue abierta, fracción {fila['fraccion_restante']}")
+        comprobar("y se cierra pronto, no tras decenas de avisos",
+                  cerrada_en is not None and cerrada_en <= 20,
+                  f"tardó {cerrada_en} ventas")
+        comprobar("el token vuelve a poder copiarse",
+                  conn.execute(
+                      "SELECT COUNT(*) c FROM paper_trades WHERE mint='BUCLE'"
+                      " AND status='abierta'").fetchone()["c"] == 0)
+        comprobar("el cierre se apunta como venta de la ⭐, no con un "
+                  "motivo nuevo que descuadre el histórico",
+                  fila["exit_reason"] == "venta de la ⭐",
+                  f"motivo = {fila['exit_reason']!r}")
+        comprobar("el PnL ya realizado por los trozos NO se pierde al "
+                  "cerrar", fila["pnl_usd"] is not None,
+                  f"pnl_usd = {fila['pnl_usd']}")
+        comprobar("la fracción queda a 0 en la fila cerrada",
+                  fila["fraccion_restante"] == 0,
+                  f"fracción = {fila['fraccion_restante']}")
+        comprobar("el mensaje de cierre explica por qué se cerró entera",
+                  enviados and "no llegaba a un céntimo" in enviados[0],
+                  f"mensaje: {enviados[0][:200] if enviados else 'nada'}")
+        comprobar("el mensaje de cierre es Markdown válido",
+                  enviados and _valido(enviados[0]) is None,
+                  f"{_valido(enviados[0]) if enviados else 'sin mensaje'}")
+        comprobar("se registró UN fill total, no dos",
+                  conn.execute(
+                      "SELECT COUNT(*) c FROM paper_fills WHERE trade_id=? "
+                      "AND tipo='total'", (fila["id"],)).fetchone()["c"] == 1)
+        comprobar("el fill del cierre lleva la firma de la transacción "
+                  "(sin ella se pierde la idempotencia)",
+                  conn.execute(
+                      "SELECT firma FROM paper_fills WHERE trade_id=? AND "
+                      "tipo='total'", (fila["id"],)).fetchone()["firma"],
+                  "el fill se guardó sin firma")
+        comprobar("el cierre manda UN solo mensaje, no el de cierre y "
+                  "además el del parcial", len(enviados) == 1,
+                  f"{len(enviados)} mensajes: "
+                  f"{[m[:45] for m in enviados]}")
+        comprobar("al cerrar por polvo NO se intenta además el parcial",
+                  parciales[0] == 0,
+                  f"se llamó a _venta_parcial {parciales[0]} veces")
+        comprobar("el icono sigue al precio: token a la par → verde",
+                  enviados and enviados[0].startswith("🟢"),
+                  f"empieza por {enviados[0][:4] if enviados else ''!r}")
+
+        # Y con el token por debajo de la entrada, rojo.
+        nueva_posicion("ROJO")
+        conn.execute("UPDATE paper_trades SET fraccion_restante=1e-4 "
+                     "WHERE mint='ROJO'")
+        conn.commit()
+        fila = vender("ROJO", 50, price=0.0000156)
+        comprobar("el icono sigue al precio: token caído → rojo",
+                  fila["status"] == "cerrada" and enviados
+                  and enviados[0].startswith("🔴"),
+                  f"status={fila['status']}, "
+                  f"empieza por {enviados[0][:4] if enviados else ''!r}")
+
+        # (a2) TODA posición recién abierta tiene `fraccion_restante`
+        #      NULL: `open_trade` no la escribe en el INSERT. El defecto
+        #      de 1.0 está en el camino más caliente de la función y no lo
+        #      tocaba ninguna prueba: cambiarlo por 0 cerraba enteras las
+        #      posiciones vivas apuntando `pnl_usd = 0`, y la suite seguía
+        #      en verde.
+        conn.execute("DELETE FROM paper_trades WHERE mint='VIRGEN'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status)
+               VALUES ('VIRGEN','VIRGEN','W',0.00156,1,1.0,100.0,
+                       'abierta')""")
+        conn.commit()
+        fila = vender("VIRGEN", 10)
+        comprobar("posición virgen (fracción NULL): una venta del 10% NO "
+                  "la cierra", fila["status"] == "abierta",
+                  f"status={fila['status']}, pnl_usd={fila['pnl_usd']}")
+        comprobar("posición virgen: queda el 90% vivo",
+                  abs((fila["fraccion_restante"] or 0) - 0.9) < 1e-9,
+                  f"fracción = {fila['fraccion_restante']}")
+
+        # (b) Una venta normal NO se convierte en cierre.
+        nueva_posicion("NORMAL2")
+        fila = vender("NORMAL2", 50)
+        comprobar("venta del 50%: sigue siendo parcial y queda la mitad",
+                  fila["status"] == "abierta"
+                  and abs(fila["fraccion_restante"] - 0.5) < 1e-9,
+                  f"status={fila['status']}, frac={fila['fraccion_restante']}")
+        fila = vender("NORMAL2", 90)
+        comprobar("venta del 90% sobre la mitad: queda un 5% que vale más "
+                  "de un céntimo, sigue viva", fila["status"] == "abierta",
+                  f"status={fila['status']}, frac={fila['fraccion_restante']}")
+
+        # (c) EL PRECIO IMPORTA. La primera versión usaba siempre el mismo
+        #     precio de entrada, así que el factor `price / entry_price`
+        #     valía 1 y el corazón del criterio no se probaba: borrarlo
+        #     dejaba la suite verde.
+        nueva_posicion("CAIDO")
+        fila = vender("CAIDO", 99)          # queda 1% = 0,96 $ a la par
+        comprobar("token a la par: un resto de 0,96 $ sigue vivo",
+                  fila["status"] == "abierta",
+                  f"status={fila['status']}, frac={fila['fraccion_restante']}")
+        nueva_posicion("CAIDO2")
+        # Token caído 1.000×: ese mismo 1% vale 0,00096 $ → polvo.
+        fila = vender("CAIDO2", 99, price=0.00000156)
+        comprobar("token caído 1.000×: ese mismo 1% ya no llega a un "
+                  "céntimo y se cierra", fila["status"] == "cerrada",
+                  f"status={fila['status']}")
+        nueva_posicion("SUBIDO")
+        # Token multiplicado por 1.000: una fracción de 1e-4 vale 9,56 $.
+        conn.execute("UPDATE paper_trades SET fraccion_restante=2e-4 "
+                     "WHERE mint='SUBIDO'")
+        conn.commit()
+        fila = vender("SUBIDO", 50, price=1.56)
+        comprobar("token subido 1.000×: una fracción de 1e-4 vale 9,56 $ "
+                  "y NO es polvo", fila["status"] == "abierta",
+                  f"status={fila['status']}, frac={fila['fraccion_restante']}")
+
+        # (d) Fracción grande: nunca es polvo, aunque el precio se
+        #     desplome. Cerrar es irreversible.
+        nueva_posicion("GLITCH")
+        fila = vender("GLITCH", 50, price=0.00000000156)
+        comprobar("media posición NO se cierra por un precio glitcheado",
+                  fila["status"] == "abierta",
+                  f"status={fila['status']}")
+        # La guarda está en el 5%, y eso importa en las dos direcciones.
+        # Con un 10% vivo, un precio a cero NO puede cerrar la posición:
+        # subir la guarda al 50% dejaría cerrable ese 10%.
+        nueva_posicion("G10")
+        fila = vender("G10", 90, price=0.00000000156)   # queda 10%
+        comprobar("con un 10% vivo, un precio a cero NO cierra la "
+                  "posición", fila["status"] == "abierta",
+                  f"status={fila['status']}")
+        # Y con un 4% vivo (por debajo de la guarda) el criterio de valor
+        # sí manda: bajar la guarda a 0 no cambiaría esto, pero subirla sí.
+        nueva_posicion("G4")
+        fila = vender("G4", 96, price=0.00000000156)    # queda 4%
+        comprobar("con un 4% vivo y el token a cero, sí se cierra",
+                  fila["status"] == "cerrada", f"status={fila['status']}")
+        # Y el suelo de fracción sin dólares no puede ser un «siempre sí».
+        conn.execute("DELETE FROM paper_trades WHERE mint='SF'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                status, fraccion_restante)
+               VALUES ('SF','SF','W',0.00156,1,1.0,'abierta',0.02)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='SF'").fetchone()
+        sol_bak = pt._sol_a_usd
+        pt._sol_a_usd = lambda *a, **k: None
+        comprobar("sin dólares, una fracción del 1% NO es polvo por "
+                  "sistema", not pt._resto_es_polvo(conn, row, 0.01, 0.00156),
+                  "el suelo de fracción cerró un 1% vivo")
+        pt._sol_a_usd = sol_bak
+
+        # (e) El suelo es configurable y se acota contra basura.
+        set_setting(conn, "paper_polvo_usd", "5.0")
+        nueva_posicion("SUELO")
+        fila = vender("SUELO", 96)          # queda 4% = 3,82 $
+        comprobar("con el suelo en 5 $, un resto de 3,82 $ ya es polvo",
+                  fila["status"] == "cerrada", f"status={fila['status']}")
+        # Con una fracción del 50% la guarda del 5% corta antes y el
+        # saneo del suelo no llega a evaluarse: la prueba parecía cubrirlo
+        # y no cubría nada (quitar el saneo dejaba la suite verde). Se
+        # vende el 96%, así que queda un 4% —por debajo del 5%— y el
+        # camino pasa de verdad por el suelo.
+        for basura in ("inf", "nan", "-3", "hola"):
+            set_setting(conn, "paper_polvo_usd", basura)
+            nueva_posicion("BASURA")
+            fila = vender("BASURA", 96)     # queda 4% = 3,82 $ vivos
+            comprobar(f"con `paper_polvo_usd` = {basura!r} no se cierra "
+                      f"una posición de 3,82 $", fila["status"] == "abierta",
+                      f"status={fila['status']}")
+        # Y acotar la basura no puede APAGAR el corte: con el suelo
+        # saneado a 1 céntimo, el polvo de verdad sigue siendo polvo.
+        # (Sanearlo a 0 dejaba la suite verde y el bug de vuelta.)
+        set_setting(conn, "paper_polvo_usd", "inf")
+        nueva_posicion("BASURA2")
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='BASURA2'").fetchone()
+        comprobar("con `paper_polvo_usd` = 'inf' saneado, el polvo de "
+                  "verdad SIGUE siendo polvo",
+                  pt._resto_es_polvo(conn, row, 1e-9, 0.00156),
+                  "el saneo apagó el corte en vez de acotarlo")
+
+        # Y si el ajuste NO existe, el defecto tiene que seguir cortando.
+        conn.execute("DELETE FROM settings WHERE key='paper_polvo_usd'")
+        conn.commit()
+        nueva_posicion("DEFECTO")
+        fila = vender("DEFECTO", 99.999)   # queda menos de un céntimo
+        comprobar("sin el ajuste puesto, el defecto de 1 céntimo sigue "
+                  "cortando la cola", fila["status"] == "cerrada",
+                  f"status={fila['status']}")
+        nueva_posicion("DEFECTO2")
+        fila = vender("DEFECTO2", 96)      # quedan 3,82 $
+        comprobar("…y con el defecto, 3,82 $ NO son polvo",
+                  fila["status"] == "abierta", f"status={fila['status']}")
+        set_setting(conn, "paper_polvo_usd", "0.01")
+
+        # (f) Sin importe en dólares, se reconstruye desde SOL.
+        conn.execute("DELETE FROM paper_trades WHERE mint='SINUSD'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                status, fraccion_restante)
+               VALUES ('SINUSD','SINUSD','W',0.00156,1,5.0,'abierta',
+                       2e-4)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='SINUSD'").fetchone()
+        # 5 SOL × 200 $ = 1.000 $; el 1e-4 restante vale 9,5 $ con el
+        # token ×100. Sin reconstruir el importe se cerraba igualmente.
+        comprobar("sin `stake_usd`, el importe se reconstruye desde SOL y "
+                  "un resto de 9,5 $ NO es polvo",
+                  not pt._resto_es_polvo(conn, row, 9.5e-5, 0.156),
+                  "cerró una posición de 9,5 $")
+        pt._sol_a_usd = lambda *a, **k: None
+        comprobar("y si tampoco hay precio de SOL, se cae al suelo de "
+                  "fracción sin reventar",
+                  pt._resto_es_polvo(conn, row, 1e-9, 0.00156))
+        pt._sol_a_usd = lambda *a, **k: 200.0
+
+        # (g) El barrido del job periódico limpia las zombis que ya
+        #     existen, aunque no llegue ninguna venta nueva.
+        conn.execute("DELETE FROM paper_trades WHERE mint='ZOMBI'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante)
+               VALUES ('ZOMBI','ZOMBI','W',0.00156,1,1.0,95.61,'abierta',
+                       6.1e-11)""")
+        conn.commit()
+        st_real = None
+        try:
+            import signal_tracker as st
+            st_real = st._price_mc_ex
+
+            def _pmx_bueno(m):
+                # El doble tiene que limpiar la bandera por hilo, igual
+                # que hace `_price_mc_ex` de verdad en su primera línea.
+                # Sin esto arrastra el "dato: simulado" que dejó otra
+                # prueba y `update_open_trades` se salta la fila.
+                st._set_fallo_precio(None)
+                return (0.00156, 1000.0, False, 50000.0)
+
+            st._price_mc_ex = _pmx_bueno
+            enviados.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt.update_open_trades()
+        finally:
+            if st_real is not None:
+                st._price_mc_ex = st_real
+        fila = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='ZOMBI'").fetchone()
+        comprobar("el job periódico cierra las posiciones zombi que ya "
+                  "estaban abiertas", fila["status"] == "cerrada",
+                  f"status = {fila['status']}, "
+                  f"frac = {fila['fraccion_restante']}")
+        comprobar("el barrido apunta el cierre como venta de la ⭐, no "
+                  "con un motivo nuevo que descuadre el histórico",
+                  fila["exit_reason"] == "venta de la ⭐",
+                  f"motivo = {fila['exit_reason']!r}")
+        comprobar("el barrido manda UN solo mensaje por posición",
+                  len([m for m in enviados if "ZOMBI" in m]) == 1,
+                  f"{len([m for m in enviados if 'ZOMBI' in m])} mensajes "
+                  f"de ZOMBI: {[m[:40] for m in enviados]}")
+        comprobar("la zombi cerrada por el barrido queda con fracción 0 y "
+                  "un solo fill total",
+                  fila["fraccion_restante"] == 0
+                  and conn.execute(
+                      "SELECT COUNT(*) c FROM paper_fills WHERE trade_id=? "
+                      "AND tipo='total'",
+                      (fila["id"],)).fetchone()["c"] == 1,
+                  f"frac={fila['fraccion_restante']}")
+
+        # (g1b) El barrido NO puede cerrar una posición del 3% por una
+        #       lectura de precio mala: cierra en firme, con una sola
+        #       lectura, sin la confirmación en dos pasadas que el resto
+        #       del archivo exige. Por eso pide además `_fr < 1e-3`.
+        conn.execute("DELETE FROM paper_trades WHERE mint='TRESPC'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante)
+               VALUES ('TRESPC','TRESPC','W',0.00156,1,1.0,95.61,'abierta',
+                       0.03)""")
+        conn.commit()
+        st_real3 = None
+        try:
+            import signal_tracker as st3
+            st_real3 = st3._price_mc_ex
+
+            def _pmx_glitch(m):
+                st3._set_fallo_precio(None)
+                return (0.00000156, 1000.0, False, 50000.0)
+
+            st3._price_mc_ex = _pmx_glitch
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt.update_open_trades()
+        finally:
+            if st_real3 is not None:
+                st3._price_mc_ex = st_real3
+        fila = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='TRESPC'").fetchone()
+        comprobar("el barrido NO cierra un 3% vivo por una sola lectura de "
+                  "precio mala", fila["status"] == "abierta",
+                  f"status = {fila['status']}")
+
+        # Y con una fracción DENTRO del rango del barrido (5e-4 < 1e-3),
+        # lo que decide es el dinero: 5 $ vivos de una posición de 10.000
+        # no son polvo. Sin esta prueba, sustituir el criterio de valor
+        # por `True` dejaba la suite verde.
+        conn.execute("DELETE FROM paper_trades WHERE mint='GRANDE'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante)
+               VALUES ('GRANDE','GRANDE','W',0.00156,1,50.0,10000.0,
+                       'abierta',5e-4)""")
+        conn.commit()
+        st_real4 = None
+        try:
+            import signal_tracker as st4
+            st_real4 = st4._price_mc_ex
+
+            def _pmx_par(m):
+                st4._set_fallo_precio(None)
+                return (0.00156, 1000.0, False, 50000.0)
+
+            st4._price_mc_ex = _pmx_par
+            with contextlib.redirect_stdout(io.StringIO()):
+                pt.update_open_trades()
+        finally:
+            if st_real4 is not None:
+                st4._price_mc_ex = st_real4
+        fila = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='GRANDE'").fetchone()
+        comprobar("el barrido NO cierra 5 $ vivos aunque la fracción sea "
+                  "diminuta: lo que manda es el dinero",
+                  fila["status"] == "abierta", f"status = {fila['status']}")
+
+        # (g1c) El borde exacto del suelo: valer JUSTO un céntimo no es
+        #       ser polvo.
+        conn.execute("DELETE FROM paper_trades WHERE mint='BORDE'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante)
+               VALUES ('BORDE','BORDE','W',1.0,1,1.0,100.0,'abierta',1.0)""")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='BORDE'").fetchone()
+        comprobar("un resto que vale EXACTAMENTE el suelo no es polvo",
+                  not pt._resto_es_polvo(conn, row, 1e-4, 1.0),
+                  "cerró un resto que valía justo el céntimo del suelo")
+        comprobar("y un céntimo menos sí lo es",
+                  pt._resto_es_polvo(conn, row, 0.99e-4, 1.0))
+
+        # (g2) SIN PRECIO el barrido no puede tocar nada, y sobre todo no
+        #      puede reventar: `_price_mc_ex` devuelve `price=None` sin
+        #      marcar fallo en el rug, en la liquidez de polvo y en «hay
+        #      pares pero ninguno con precio usable». La comparación del
+        #      icono lanzaba un TypeError que se llevaba la pasada ENTERA
+        #      —ni TP, ni SL, ni reloj, para todas las posiciones—, y la
+        #      zombi es la fila más vieja, así que moría en la primera.
+        for etiqueta, retorno in (
+                ("rug (sin pares)", (None, None, True, 0.0)),
+                ("liquidez de polvo", (None, None, True, 50.0)),
+                ("pares vivos sin precio usable", (None, None, False, 0.0))):
+            conn.execute("DELETE FROM paper_trades WHERE mint IN "
+                         "('ZOMBI2','VIVA')")
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, fraccion_restante)
+                   VALUES ('ZOMBI2','ZOMBI2','W',0.00156,1,1.0,95.61,
+                           'abierta',6.1e-11)""")
+            conn.commit()
+            st_real2 = None
+            revento = None
+            try:
+                import signal_tracker as st2
+                st_real2 = st2._price_mc_ex
+
+                def _pmx_sin_precio(m, _r=retorno):
+                    st2._set_fallo_precio(None)
+                    return _r
+
+                st2._price_mc_ex = _pmx_sin_precio
+                with contextlib.redirect_stdout(io.StringIO()):
+                    pt.update_open_trades()
+            except Exception as e:
+                revento = f"{type(e).__name__}: {e}"
+            finally:
+                if st_real2 is not None:
+                    st2._price_mc_ex = st_real2
+            comprobar(f"barrido sin precio ({etiqueta}): NO revienta la "
+                      f"pasada", revento is None, f"reventó con {revento}")
+        # (h) La carrera: un hilo cierra la posición mientras otro trae
+        #     un parcial con la fila de hace un instante. El parcial NO
+        #     puede escribirse encima de una fila ya cerrada: dejaría en
+        #     el histórico un `pnl_realizado_usd` posterior al cierre, o
+        #     sea dinero realizado que el `pnl_usd` guardado ya no cuenta.
+        conn.execute("DELETE FROM paper_trades WHERE mint='CARRERA'")
+        conn.execute(
+            """INSERT INTO paper_trades
+               (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                stake_usd, status, fraccion_restante, pnl_realizado_usd)
+               VALUES ('CARRERA','CARRERA','W',0.00156,1,1.0,95.61,
+                       'abierta',0.5,3.56)""")
+        conn.commit()
+        vieja = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='CARRERA'").fetchone()
+        # El "otro hilo" cierra primero.
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, vieja, 0.002, "venta de la ⭐", "🟢")
+        cerrada = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='CARRERA'").fetchone()
+        # Y ahora llega el parcial con la fila VIEJA.
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._venta_parcial(conn, vieja, 0.002, 50)
+        despues = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='CARRERA'").fetchone()
+        comprobar("carrera: el parcial NO pisa la fila ya cerrada",
+                  despues["pnl_realizado_usd"] == cerrada["pnl_realizado_usd"]
+                  and despues["fraccion_restante"] ==
+                  cerrada["fraccion_restante"],
+                  f"realizado {cerrada['pnl_realizado_usd']} → "
+                  f"{despues['pnl_realizado_usd']}, frac "
+                  f"{cerrada['fraccion_restante']} → "
+                  f"{despues['fraccion_restante']}")
+        comprobar("carrera: tampoco manda el aviso del parcial",
+                  not enviados, f"mandó {len(enviados)}")
+        # Y al revés: cerrar dos veces no puede duplicar el cierre.
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, vieja, 0.003, "tiempo", "⏰")
+        recerrada = conn.execute(
+            "SELECT * FROM paper_trades WHERE mint='CARRERA'").fetchone()
+        comprobar("carrera: no se cierra dos veces",
+                  recerrada["exit_reason"] == "venta de la ⭐"
+                  and recerrada["exit_price"] == cerrada["exit_price"],
+                  f"motivo {recerrada['exit_reason']!r}, "
+                  f"precio {recerrada['exit_price']}")
+        comprobar("carrera: el segundo cierre no manda mensaje",
+                  not enviados, f"mandó {len(enviados)}")
+        comprobar("carrera: no se apunta un segundo fill total",
+                  conn.execute(
+                      "SELECT COUNT(*) c FROM paper_fills WHERE trade_id=? "
+                      "AND tipo='total'",
+                      (cerrada["id"],)).fetchone()["c"] == 1)
+    finally:
+        pt._tg = tg_real
+        pt._sol_a_usd = sol_real
+        try:
+            pt._venta_parcial = parcial_real
+        except NameError:
+            pass
+        conn.close()
+
+
 def _vigilante(segundos=420):
     """Si la suite se cuelga, tiene que terminar en ROJO, no quedarse muda.
 
@@ -1722,6 +2270,7 @@ def main():
     prueba_menores()
     prueba_ocultos()
     prueba_rug()
+    prueba_polvo()
 
     print("\n" + "─" * 60)
     if _FALLOS:
