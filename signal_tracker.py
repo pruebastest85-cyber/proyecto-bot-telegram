@@ -628,8 +628,8 @@ def _check_streaks(conn):
         if pnl30 and (pnl30["pnl_30d"] or 0) > 0:
             continue
         conn.execute(
-            "UPDATE wallets SET is_tracked=0, ai_follow=0, ai_reason=? "
-            "WHERE address=?",
+            "UPDATE wallets SET is_tracked=0, ai_follow=0, confirmada=0, "
+            "prueba_desde=NULL, ai_reason=? WHERE address=?",
             (f"Racha perdedora: últimas {STREAK_N} señales en negativo", w))
         conn.commit()
         alias = (info["alias"] or w[:8]).replace("*", "").replace("_", " ")

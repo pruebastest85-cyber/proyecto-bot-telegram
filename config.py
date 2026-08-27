@@ -137,6 +137,26 @@ BOT_TX_PER_HOUR_LIMIT = 60        # más de esto por hora = probable bot
 MM_VUELTAS_MAX = _int("MM_VUELTAS_MAX", 5)
 MM_VENTANA_DIAS = _int("MM_VENTANA_DIAS", 30)
 
+# ── Filtro de tres puertas (27/8/2026, ver filtro_calidad.py) ────────────
+# La estrella se GANA: historial real (WR y cerradas), estrategia
+# copiable (retención y diversificación) y confirmación con señales
+# medidas por ESTE bot. FILTRO_TRES_PUERTAS=0 vuelve al comportamiento
+# anterior (todas las ⭐ alertan).
+FILTRO_TRES_PUERTAS = _int("FILTRO_TRES_PUERTAS", 1)
+FILTRO_WR_MIN = _float("FILTRO_WR_MIN", 60.0)
+FILTRO_MIN_CERRADAS = _int("FILTRO_MIN_CERRADAS", 10)
+FILTRO_VENTANA_DIAS = _int("FILTRO_VENTANA_DIAS", 90)
+FILTRO_HOLD_MIN_MIN = _float("FILTRO_HOLD_MIN_MIN", 30.0)
+FILTRO_MIN_TOKENS = _int("FILTRO_MIN_TOKENS", 8)
+FILTRO_MIN_MEDIDAS = _int("FILTRO_MIN_MEDIDAS", 5)
+FILTRO_ACIERTO_MIN = _float("FILTRO_ACIERTO_MIN", 40.0)
+FILTRO_PRUEBA_DIAS = _int("FILTRO_PRUEBA_DIAS", 14)
+# Arranque elegido por el dueño (27/8): la que pasa historial+copiable
+# alerta y se copia YA como "confirmada provisional", y pierde la
+# confirmación si sus primeras FILTRO_MIN_MEDIDAS medidas salen malas.
+# FILTRO_PROVISIONAL=0 = modo estricto (nadie alerta sin medidas buenas).
+FILTRO_PROVISIONAL = _int("FILTRO_PROVISIONAL", 1)
+
 # ── Base de datos ─────────────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "wallets.db")
 

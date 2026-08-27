@@ -883,10 +883,15 @@ def _proc(txs: list[dict], conn):
                             # hilo del webhook no esta para escaneos
                             # dobles): compradores ⭐ ordenados por su
                             # primera entrada — el primero es la lider.
+                            # (18-L) Solo cuentan las CONFIRMADAS: una
+                            # manada de billeteras en prueba no es señal,
+                            # y "medir en silencio" significa que el
+                            # paper no las toca ni via consenso.
                             _mana = conn.execute(
                                 "SELECT s.wallet, MIN(s.ts) t0 "
                                 "FROM signals s JOIN wallets w "
                                 "ON w.address=s.wallet AND w.is_tracked=1 "
+                                "AND COALESCE(w.confirmada, 0) = 1 "
                                 "WHERE s.mint=? AND s.ts>=? "
                                 "AND s.side='compra' "
                                 "GROUP BY s.wallet ORDER BY t0 ASC",

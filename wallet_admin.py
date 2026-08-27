@@ -25,7 +25,8 @@ def discard_wallet(address: str) -> str:
         if not row:
             return "No existe esa dirección en la base."
         conn.execute(
-            """UPDATE wallets SET is_bot=1, is_tracked=0,
+            """UPDATE wallets SET is_bot=1, is_tracked=0, confirmada=0,
+               prueba_desde=NULL,
                ai_class='descartada', ai_follow=0,
                ai_reason='Descartada manualmente por el admin'
                WHERE address=?""", (address,))
@@ -61,11 +62,15 @@ def restore_wallet(address: str) -> str:
         # ai_follow=1: sin esto, recompute_scores retiraba la ⭐ restaurada
         # en el siguiente ciclo antes de que la IA la reevaluara.
         # ai_class=NULL fuerza la reevaluacion igualmente.
+        # (18-L) confirmada=0 + reloj de prueba: restaurar da la estrella,
+        # no el altavoz — las puertas deciden si alerta, como a todas.
+        import time as _t
         conn.execute(
             """UPDATE wallets SET is_bot=0, is_tracked=1,
+               confirmada=0, prueba_desde=?,
                ai_class=NULL, ai_follow=1,
                ai_reason='Restaurada manualmente por el admin'
-               WHERE address=?""", (address,))
+               WHERE address=?""", (int(_t.time()), address))
         conn.commit()
     finally:
         conn.close()

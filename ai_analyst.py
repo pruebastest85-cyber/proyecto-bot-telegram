@@ -14,6 +14,7 @@ Requiere la variable de entorno ANTHROPIC_API_KEY.
 """
 
 import json
+import time as _time_mod
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -90,7 +91,11 @@ def _ensure_columns(conn):
                      ("ai_reason", "TEXT"), ("alias", "TEXT"),
                      ("pnl_30d", "REAL"), ("pnl_total", "REAL"),
                      ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
-                     ("pnl_updated", "TEXT")]:
+                     ("pnl_updated", "TEXT"),
+                     # Ola 18-L: fase de la estrella (0 = en prueba,
+                     # 1 = confirmada) y cuando empezo la prueba.
+                     ("confirmada", "INTEGER"),
+                     ("prueba_desde", "BIGINT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {ine}{col} {typ}")
         except Exception:
@@ -349,6 +354,7 @@ def evaluate_tracked(conn) -> int:
                 if motivo:
                     conn.execute(
                         """UPDATE wallets SET is_bot=1, is_tracked=0,
+                           confirmada=0, prueba_desde=NULL,
                            ai_follow=0, ai_class='entidad', ai_reason=?
                            WHERE address=?""",
                         (f"Excluida por identidad: {motivo}", a))
@@ -392,7 +398,8 @@ def evaluate_tracked(conn) -> int:
         razon_bot = _hard_bot_reason(profile)
         if razon_bot:
             conn.execute(
-                """UPDATE wallets SET is_bot=1, is_tracked=0, ai_class='bot',
+                """UPDATE wallets SET is_bot=1, is_tracked=0, confirmada=0,
+                   prueba_desde=NULL, ai_class='bot',
                    ai_follow=0, ai_reason=?, alias=COALESCE(alias,'Bot Descartado'),
                    grade='Descartada',
                    pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?, pnl_updated=?
@@ -596,6 +603,20 @@ def evaluate_tracked(conn) -> int:
              now_iso(), wscore,
              seguir, verdict["clasificacion"], addr),
         )
+        # (18-L) Fase de la estrella. Una promocion NUNCA confirma por si
+        # sola: la nueva ⭐ entra EN PRUEBA (el reloj de la prueba arranca
+        # aqui si no estaba ya corriendo) y solo la clasificacion de las
+        # tres puertas la confirma. Una degradacion si retira la
+        # confirmacion: sin estrella no hay fase que conservar.
+        if seguir:
+            conn.execute(
+                """UPDATE wallets SET prueba_desde = COALESCE(prueba_desde, ?)
+                   WHERE address = ? AND COALESCE(confirmada, 0) = 0""",
+                (int(_time_mod.time()), addr))
+        else:
+            conn.execute(
+                """UPDATE wallets SET confirmada = 0, prueba_desde = NULL
+                   WHERE address = ?""", (addr,))
         conn.commit()
         evaluated += 1
         _bump(conn, "funnel_profiled")
@@ -655,6 +676,7 @@ def depurar_estrellas(conn) -> dict:
                       f"{r['grade'] or 'sin nota'}")
             conn.execute(
                 """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
+                   confirmada = 0, prueba_desde = NULL,
                    ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ?""", (motivo, r["address"]))
             fuera_grade.append(r["address"])
@@ -676,7 +698,8 @@ def depurar_estrellas(conn) -> dict:
                       f"(mínimo {MIN_HOLD_MIN:.0f})")
             conn.execute(
                 """UPDATE wallets
-                   SET is_tracked = 0, ai_follow = 0, grade = 'Observación',
+                   SET is_tracked = 0, ai_follow = 0, confirmada = 0,
+                       prueba_desde = NULL, grade = 'Observación',
                        ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ?""", (motivo, r["address"]))
             fuera_hold.append(r["address"])
@@ -697,7 +720,8 @@ def depurar_estrellas(conn) -> dict:
             # rowcount para no apuntar dos veces a la misma billetera.
             cur_mm = conn.execute(
                 """UPDATE wallets
-                   SET is_tracked = 0, ai_follow = 0, grade = 'Observación',
+                   SET is_tracked = 0, ai_follow = 0, confirmada = 0,
+                       prueba_desde = NULL, grade = 'Observación',
                        ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ? AND is_tracked = 1""",
                 (f" · 🔁 sin ⭐: {motivo}", addr))
@@ -730,7 +754,8 @@ def depurar_estrellas(conn) -> dict:
                           "representa a la familia")
                 conn.execute(
                     """UPDATE wallets
-                       SET is_tracked = 0, ai_follow = 0,
+                       SET is_tracked = 0, ai_follow = 0, confirmada = 0,
+                           prueba_desde = NULL,
                            ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?,
                                               1, 500)
                        WHERE address = ?""", (motivo, h))
@@ -740,14 +765,30 @@ def depurar_estrellas(conn) -> dict:
     except Exception as e:
         print(f"· depuración por familias omitida: {e}")
 
+    # 3) Las TRES PUERTAS (Ola 18-L): clasifica cada ⭐ como confirmada
+    # (alerta y se copia) o en prueba (se mide en silencio), y retira a
+    # las que agotan la prueba sin operar. Va al FINAL a propósito: asi
+    # clasifica solo a las que sobrevivieron a los bloques anteriores.
+    _resumen_puertas = None
+    try:
+        from filtro_calidad import clasificar
+        _resumen_puertas = clasificar(conn)
+        print(f"🚪 Tres puertas: {_resumen_puertas['confirmadas']} "
+              f"confirmadas, {_resumen_puertas['en_prueba']} en prueba, "
+              f"{_resumen_puertas['retiradas']} retiradas por inactividad "
+              f"(interruptor {_resumen_puertas['interruptor']})")
+    except Exception as e:
+        print(f"· clasificación por puertas omitida: {e}")
+
     if fuera_hold or fuera_fam or fuera_grade or fuera_mm:
         print(f"🧹 Depuración de ⭐: {len(fuera_hold)} no seguibles, "
               f"{len(fuera_fam)} hermanas duplicadas, "
               f"{len(fuera_grade)} descartadas por grading, "
               f"{len(fuera_mm)} creadoras de mercado")
     # El conjunto operativo (alertas/copia) se refresca ya, sin esperar el
-    # TTL de 60 s: esta pasada acaba de quitar ⭐.
-    if fuera_hold or fuera_fam or fuera_grade or fuera_mm:
+    # TTL de 60 s: esta pasada pudo quitar ⭐ o cambiar su fase.
+    if fuera_hold or fuera_fam or fuera_grade or fuera_mm \
+            or _resumen_puertas is not None:
         try:
             from db import invalidar_copiables
             invalidar_copiables()
@@ -755,4 +796,5 @@ def depurar_estrellas(conn) -> dict:
             pass
     return {"no_seguibles": len(fuera_hold), "hermanas": len(fuera_fam),
             "descartadas": len(fuera_grade),
-            "creadoras_mercado": len(fuera_mm)}
+            "creadoras_mercado": len(fuera_mm),
+            "puertas": _resumen_puertas}

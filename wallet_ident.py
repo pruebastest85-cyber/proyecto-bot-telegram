@@ -50,6 +50,7 @@ def posicion(conn, address: str, tope: int = 200):
                     ON actividad.wallet = w.address
                WHERE w.is_bot = 0
                ORDER BY w.is_tracked DESC,
+                        COALESCE(w.confirmada, 0) DESC,
                         -- Debe ser IDENTICO al de db.top_wallets (ver alli
                         -- el porque): si divergen, /top y la posicion que
                         -- se muestra en las tarjetas dejan de coincidir.

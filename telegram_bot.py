@@ -1755,6 +1755,22 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_filtro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Estado del filtro de tres puertas: umbrales y quién los pasa hoy."""
+    from filtro_calidad import resumen
+
+    def _texto() -> str:
+        conn = get_conn()
+        try:
+            return resumen(conn)
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_texto)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
 async def cmd_reentrada(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Enfriamiento por token del paper trading. /reentrada [horas]
 
@@ -2034,6 +2050,7 @@ async def _post_init(app: Application):
             BotCommand("paper", "Paper trading simulado"),
             BotCommand("topalertas", "Cuántas billeteras pueden alertar"),
             BotCommand("reentrada", "Horas antes de repetir un token"),
+            BotCommand("filtro", "Las tres puertas de la estrella"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -2658,6 +2675,7 @@ def main():
     app.add_handler(CommandHandler("topalertas", cmd_top_alertas))
     app.add_handler(CommandHandler("copiapura", cmd_copia_pura))
     app.add_handler(CommandHandler("reentrada", cmd_reentrada))
+    app.add_handler(CommandHandler("filtro", cmd_filtro))
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))

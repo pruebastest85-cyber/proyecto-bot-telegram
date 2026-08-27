@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS wallets (
     label           TEXT,
     is_bot          INTEGER DEFAULT 0,
     is_tracked      INTEGER DEFAULT 0,
+    confirmada      INTEGER DEFAULT 0,
+    prueba_desde    INTEGER,
     score           REAL DEFAULT 0
 );
 
@@ -222,6 +224,8 @@ CREATE TABLE IF NOT EXISTS wallets (
     label            TEXT,
     is_bot           INTEGER DEFAULT 0,
     is_tracked       INTEGER DEFAULT 0,
+    confirmada       INTEGER DEFAULT 0,
+    prueba_desde     BIGINT,
     score            DOUBLE PRECISION DEFAULT 0,
     ai_class         TEXT,
     ai_follow        INTEGER,
@@ -595,6 +599,15 @@ def _preparar_pg(pg):
             ("wallets", "consistency", "DOUBLE PRECISION"),
             ("wallets", "hold_median_min", "DOUBLE PRECISION"),
             ("wallets", "roi_median", "DOUBLE PRECISION"),
+            # (18-L) Fase de la estrella. La migracion tiene que correr AL
+            # ARRANCAR: si solo corriera con la evaluacion de la IA (cada
+            # ciclo), entre el deploy y ese momento `_operativas` fallaria
+            # por columna inexistente y el contrato de tres estados
+            # devolveria None = "sin filtro" — alertarian TODAS las ⭐,
+            # justo lo contrario de lo que la ola persigue (fail-open
+            # cazado por la auditoria antes de subir).
+            ("wallets", "confirmada", "INTEGER"),
+            ("wallets", "prueba_desde", "BIGINT"),
             ("appearances", "delay_s", "INTEGER"),
             ("appearances", "price_at_buy", "DOUBLE PRECISION"),
             ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
@@ -692,6 +705,17 @@ def _preparar_pg(pg):
             pass
     _crear_indices_tardios(pg)
     _dedupe_aliases(pg)
+    # (18-L, auditoria ronda 2) Clasificar YA, no dentro de horas: la
+    # migracion deja `confirmada` en NULL para todas las ⭐ y el unico
+    # escritor era la depuracion del auto_cycle — hasta ese momento el
+    # conjunto operativo quedaba VACIO y el bot mudo, incluso con
+    # FILTRO_TRES_PUERTAS=0. La clasificacion tarda <1 s.
+    try:
+        from filtro_calidad import clasificar
+        clasificar(pg)
+    except Exception as _e:
+        print(f"· clasificacion inicial omitida: {_e}")
+
 
 
 def _preparar_sqlite(conn):
@@ -711,7 +735,10 @@ def _preparar_sqlite(conn):
                      ("pnl_unreal", "REAL"), ("pnl_net", "REAL"),
                      ("grade", "TEXT"), ("consistency", "REAL"),
                      ("pnl_updated", "TEXT"), ("wallet_score", "REAL"),
-                     ("hold_median_min", "REAL"), ("roi_median", "REAL")]:
+                     ("hold_median_min", "REAL"), ("roi_median", "REAL"),
+                     # (18-L) ver el comentario gemelo en _preparar_pg.
+                     ("confirmada", "INTEGER"),
+                     ("prueba_desde", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -790,6 +817,17 @@ def _preparar_sqlite(conn):
     conn.commit()
     _crear_indices_tardios(conn)
     _dedupe_aliases(conn)
+    # (18-L, auditoria ronda 2) Clasificar YA, no dentro de horas: la
+    # migracion deja `confirmada` en NULL para todas las ⭐ y el unico
+    # escritor era la depuracion del auto_cycle — hasta ese momento el
+    # conjunto operativo quedaba VACIO y el bot mudo, incluso con
+    # FILTRO_TRES_PUERTAS=0. La clasificacion tarda <1 s.
+    try:
+        from filtro_calidad import clasificar
+        clasificar(conn)
+    except Exception as _e:
+        print(f"· clasificacion inicial omitida: {_e}")
+
 
 
 def get_conn():
@@ -1119,7 +1157,8 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     # se perfilan en silencio y NO alertan hasta estar aprobadas — así el
     # feed no se llena de decenas de wallets sin verificar comprando/vendiendo.
     conn.execute(
-        "UPDATE wallets SET is_tracked = 0 "
+        "UPDATE wallets SET is_tracked = 0, confirmada = 0, "
+        "prueba_desde = NULL "
         "WHERE is_tracked = 1 AND COALESCE(ai_follow, 0) <> 1")
     conn.commit()
     # Presupuesto de atención: si hay más ⭐ que el tope, las de menor
@@ -1165,6 +1204,14 @@ def top_wallets(conn, limit=20):
                 ON actividad.wallet = w.address
            WHERE w.is_bot = 0
            ORDER BY w.is_tracked DESC,
+                    -- (18-L) Las CONFIRMADAS por las tres puertas van por
+                    -- delante de las que estan en prueba: sin esto, con
+                    -- casi toda la poblacion en prueba, las confirmadas
+                    -- podian caer fuera del corte del top y el bot
+                    -- quedarse mudo teniendo calidad disponible. El
+                    -- puesto sigue siendo POSICIONAL y /top, el conjunto
+                    -- operativo y las tarjetas siguen espejados.
+                    COALESCE(w.confirmada, 0) DESC,
                     -- Una ⭐ que PIERDE dinero no puede ocupar sitio en el
                     -- top que alimenta las alertas y el copytrading. El
                     -- wallet_score solo da 30 de 100 puntos al PnL, asi que
@@ -1234,7 +1281,7 @@ def _operativas(conn, limit: int) -> set:
     _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
     corte = int(_t.time()) - int(_horas * 3600)
     rows = conn.execute(
-        """SELECT w.address, w.is_tracked,
+        """SELECT w.address, w.is_tracked, w.confirmada,
                   COALESCE(actividad.ult, 0) AS ult
            FROM wallets w
            LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
@@ -1242,6 +1289,14 @@ def _operativas(conn, limit: int) -> set:
                 ON actividad.wallet = w.address
            WHERE w.is_bot = 0
            ORDER BY w.is_tracked DESC,
+                    -- (18-L) Las CONFIRMADAS por las tres puertas van por
+                    -- delante de las que estan en prueba: sin esto, con
+                    -- casi toda la poblacion en prueba, las confirmadas
+                    -- podian caer fuera del corte del top y el bot
+                    -- quedarse mudo teniendo calidad disponible. El
+                    -- puesto sigue siendo POSICIONAL y /top, el conjunto
+                    -- operativo y las tarjetas siguen espejados.
+                    COALESCE(w.confirmada, 0) DESC,
                     CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
                          THEN 1 ELSE 0 END,
                     CASE WHEN COALESCE(actividad.ult, 0) < ?
@@ -1253,12 +1308,18 @@ def _operativas(conn, limit: int) -> set:
                     w.address
            LIMIT ?""",
         (corte, limit)).fetchall()
-    # Se comprueba por verdad y no por `== 1`: la columna es INTEGER en
-    # los dos motores, pero cualquier driver que devolviera booleano
-    # rompería una comparación estricta sin que ninguna prueba (que corren
+    # Se comprueba por verdad y no por `== 1`: las columnas son INTEGER
+    # en los dos motores, pero cualquier driver que devolviera booleano
+    # romperia una comparacion estricta sin que ninguna prueba (que corren
     # sobre SQLite) pudiera avisarlo.
+    # `confirmada` (Ola 18-L): solo alerta y se copia la ⭐ que paso las
+    # TRES puertas del filtro de calidad (filtro_calidad.py). Las que
+    # estan EN PRUEBA se miden en silencio — eleccion del dueño. Con el
+    # interruptor FILTRO_TRES_PUERTAS apagado, la clasificacion marca a
+    # todas como confirmadas, asi que este filtro no necesita leerlo.
     return {r["address"] for r in rows
-            if r["is_tracked"] and (r["ult"] or 0) >= corte}
+            if r["is_tracked"] and r["confirmada"]
+            and (r["ult"] or 0) >= corte}
 
 
 def invalidar_copiables() -> None:
@@ -1271,7 +1332,8 @@ def top_addresses(conn, limit: int | None = None):
     """Conjunto OPERATIVO: las billeteras que alertan y disparan la copia.
 
     Las N primeras de /top (mismo orden y misma poblacion que
-    db.top_wallets) que ademas son ⭐ y estan ACTIVAS (operaron dentro de
+    db.top_wallets) que ademas son ⭐ CONFIRMADAS por el filtro de tres
+    puertas (Ola 18-L) y estan ACTIVAS (operaron dentro de
     TOP_ACTIVITY_HOURS, 48 h por defecto). Cache de 60 s compartida por
     todos los consumidores (alertas, camino caliente, consenso): un solo
     conjunto, una sola definicion.

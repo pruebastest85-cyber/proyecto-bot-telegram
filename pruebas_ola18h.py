@@ -2277,7 +2277,8 @@ def prueba_top50():
         for i in range(6):
             conn.execute(
                 "INSERT INTO wallets (address, is_tracked, is_bot, "
-                "wallet_score, pnl_total, score) VALUES (?,1,0,?,?,0)",
+                "confirmada, wallet_score, pnl_total, score) "
+                "VALUES (?,1,0,1,?,?,0)",
                 (f"BUENA{i}", 90 - i, 10.0))
             conn.execute(
                 "INSERT INTO positions (wallet, mint, tokens, last_ts) "
@@ -2287,7 +2288,8 @@ def prueba_top50():
         for i in range(4):
             conn.execute(
                 "INSERT INTO wallets (address, is_tracked, is_bot, "
-                "wallet_score, pnl_total, score) VALUES (?,1,0,?,?,0)",
+                "confirmada, wallet_score, pnl_total, score) "
+                "VALUES (?,1,0,1,?,?,0)",
                 (f"DORMIDA{i}", 99, 10.0))
             conn.execute(
                 "INSERT INTO positions (wallet, mint, tokens, last_ts) "
@@ -2295,8 +2297,9 @@ def prueba_top50():
         # La del caso real: estrella ACTIVA pero en perdidas. En /top cae
         # por debajo de TODAS las que no pierden -> puesto 11.
         conn.execute(
-            "INSERT INTO wallets (address, is_tracked, is_bot, "
-            "wallet_score, pnl_total, score) VALUES ('PERDEDORA',1,0,44,?,0)",
+            "INSERT INTO wallets (address, is_tracked, is_bot, confirmada, "
+            "wallet_score, pnl_total, score) "
+            "VALUES ('PERDEDORA',1,0,1,44,?,0)",
             (-3.41,))
         conn.execute(
             "INSERT INTO positions (wallet, mint, tokens, last_ts) "
@@ -2312,8 +2315,9 @@ def prueba_top50():
         # Un bot con estrella, activo y con la mejor nota de todas: ni
         # sale en /top ni puede alertar.
         conn.execute(
-            "INSERT INTO wallets (address, is_tracked, is_bot, "
-            "wallet_score, pnl_total, score) VALUES ('BOT1',1,1,100,99,0)")
+            "INSERT INTO wallets (address, is_tracked, is_bot, confirmada, "
+            "wallet_score, pnl_total, score) "
+            "VALUES ('BOT1',1,1,1,100,99,0)")
         conn.execute(
             "INSERT INTO positions (wallet, mint, tokens, last_ts) "
             "VALUES ('BOT1','MB',0,?)", (reciente,))
@@ -2338,6 +2342,53 @@ def prueba_top50():
         comprobar("las 6 buenas si alertan", len(op) == 6, f"{sorted(op)}")
         comprobar("un bot nunca alerta, por buena nota que tenga",
                   "BOT1" not in op, f"conjunto = {sorted(op)}")
+
+        # 18-L: una ⭐ EN PRUEBA (confirmada=0), activa, ganadora y dentro
+        # del top, NO alerta: se mide en silencio hasta confirmarse.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, confirmada, "
+            "wallet_score, pnl_total, score) "
+            "VALUES ('ENPRUEBA',1,0,0,95,60,0)")
+        conn.execute(
+            "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+            "VALUES ('ENPRUEBA','ME',0,?)", (reciente,))
+        conn.commit()
+        db.invalidar_copiables()
+        op2 = db.top_addresses(conn, 10)
+        comprobar("una estrella EN PRUEBA no alerta aunque este en el top",
+                  "ENPRUEBA" not in op2, f"conjunto = {sorted(op2)}")
+
+        # Ronda 3: las confirmadas van POR DELANTE de las que estan en
+        # prueba en el ranking. Sin eso, 60 en-prueba de nota alta
+        # empujaban a la unica confirmada fuera del corte y el bot
+        # quedaba mudo teniendo calidad disponible.
+        for i in range(60):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "confirmada, wallet_score, pnl_total, score) "
+                "VALUES (?,1,0,0,99,50,0)", (f"PRUEBA{i:02d}",))
+            conn.execute(
+                "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+                "VALUES (?,?,0,?)", (f"PRUEBA{i:02d}", f"MP{i}", reciente))
+        conn.commit()
+        db.invalidar_copiables()
+        op3 = db.top_addresses(conn, 10)
+        comprobar("60 en-prueba de nota alta NO desplazan a las "
+                  "confirmadas del corte",
+                  all(f"BUENA{i}" in op3 for i in range(6)),
+                  f"conjunto = {sorted(op3)}")
+        primeros3 = [r["address"] for r in db.top_wallets(conn, 10)]
+        comprobar("y /top enseña a las confirmadas primero (espejo)",
+                  all(f"BUENA{i}" in primeros3 for i in range(6)),
+                  f"top10 = {primeros3}")
+        conn.execute("DELETE FROM wallets WHERE address LIKE 'PRUEBA%'")
+        conn.execute("DELETE FROM positions WHERE wallet LIKE 'PRUEBA%'")
+        conn.commit()
+        db.invalidar_copiables()
+        conn.execute("DELETE FROM wallets WHERE address='ENPRUEBA'")
+        conn.execute("DELETE FROM positions WHERE wallet='ENPRUEBA'")
+        conn.commit()
+        db.invalidar_copiables()
 
         # Con un tope AMPLIO la candidata sin estrella si cabe dentro de
         # los N primeros de /top. Aqui es donde se ve que el filtro de la
@@ -2423,6 +2474,10 @@ def prueba_top50():
             comprobar(f"{dueno}: el ORDER BY desempata por address",
                       0 <= i_orden < i_addr < i_limit,
                       "no hay w.address entre ORDER BY y LIMIT")
+            i_conf = fuente.find("confirmada", i_orden)
+            comprobar(f"{dueno}: las confirmadas van primero en el orden",
+                      0 <= i_orden < i_conf < i_limit,
+                      "no hay confirmada entre ORDER BY y LIMIT")
 
         # El contrato, en el unico sitio donde se decide.
         comprobar("en_top(None, x) deja pasar (sin filtro)",
@@ -2580,7 +2635,13 @@ def prueba_creador_mercado():
                   and pv.creadoras_de_mercado(conn) == {})
         cfg.MM_VUELTAS_MAX = tope_previo
 
-        # Y la depuracion le quita la estrella de verdad.
+        # Y la depuracion le quita la estrella de verdad. MM6 entra
+        # CONFIRMADA para comprobar que la democion tambien limpia la
+        # fase: sin eso, una re-promocion futura alertaria al instante
+        # con la confirmacion rancia (auditoria 18-L, M1).
+        conn.execute("UPDATE wallets SET confirmada=1, prueba_desde=1000 "
+                     "WHERE address='MM6'")
+        conn.commit()
         import ai_analyst as aa
         res = aa.depurar_estrellas(conn)
         fila = conn.execute(
@@ -2588,6 +2649,12 @@ def prueba_creador_mercado():
             "WHERE address='MM6'").fetchone()
         comprobar("depurar_estrellas le quita la estrella",
                   fila["is_tracked"] == 0, f"is_tracked = {fila['is_tracked']}")
+        _fmm = conn.execute("SELECT confirmada, prueba_desde FROM wallets "
+                            "WHERE address='MM6'").fetchone()
+        comprobar("y le limpia la confirmacion (sin fase rancia)",
+                  not _fmm["confirmada"], str(_fmm["confirmada"]))
+        comprobar("y el reloj de la prueba (si volviera, ventana fresca)",
+                  _fmm["prueba_desde"] is None, str(_fmm["prueba_desde"]))
         comprobar("y deja de seguirla", not fila["ai_follow"])
         comprobar("y escribe el motivo en la ficha",
                   "creadora de mercado" in (fila["ai_reason"] or ""),
@@ -2735,6 +2802,437 @@ def prueba_reentrada():
         conn.close()
 
 
+
+# ---------------------------------------------------------------------
+# OLA 18-L - las tres puertas: la estrella se GANA, no se regala.
+# ---------------------------------------------------------------------
+def prueba_filtro():
+    bloque("18-L - filtro de tres puertas")
+    import time as _t
+    import config as cfg
+    import filtro_calidad as fc
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    act_previo = cfg.FILTRO_TRES_PUERTAS
+    prov_previo = cfg.FILTRO_PROVISIONAL
+    cfg.FILTRO_PROVISIONAL = 0        # el grueso se prueba en modo estricto
+    try:
+        # La tabla `trades` la crea trades_store bajo demanda; en esta
+        # base temporal aun no existe.
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+
+        def op(w, m, side, sol, ts, tokens=100):
+            conn.execute(
+                "INSERT INTO trades (wallet, signature, mint, side, sol, "
+                "tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                (w, f"{w}{m}{side}{ts}{sol}", m, side, sol, tokens, ts))
+
+        def posicion(w, m, gana, hold_min=60, hace_dias=10):
+            t0 = ahora - hace_dias * 86400
+            op(w, m, "compra", 1.0, t0)
+            op(w, m, "venta", 1.5 if gana else 0.5,
+               t0 + int(hold_min * 60))
+
+        def estrella(w, confirmada=0, prueba_desde=None):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "confirmada, prueba_desde, grade) "
+                "VALUES (?,1,0,?,?,'Seguimiento')",
+                (w, confirmada, prueba_desde))
+
+        def senal(w, k, chg):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?,?,?,1,?,'compra',?)",
+                (f"s{w}{k}", w, f"MINT{k}", ahora - 3600 - k, chg))
+
+        # COMPLETA: 12 cerradas, 9 ganadas (75%), hold 60 min, 12 tokens,
+        # 6 señales medidas con 4 en positivo (67%). Pasa TODO.
+        estrella("COMPLETA")
+        for i in range(12):
+            posicion("COMPLETA", f"TA{i}", gana=(i < 9), hace_dias=10 + i)
+        for i in range(6):
+            senal("COMPLETA", i, 50 if i < 4 else -50)
+
+        # SIN_MEDIDAS: mismo historial impecable, pero solo 2 señales
+        # medidas -> en prueba (puerta 3).
+        estrella("SIN_MEDIDAS")
+        for i in range(12):
+            posicion("SIN_MEDIDAS", f"TB{i}", gana=(i < 9), hace_dias=10 + i)
+        for i in range(2):
+            senal("SIN_MEDIDAS", i, 50)
+
+        # WR_BAJO: 12 cerradas pero 5 ganadas (42%) -> puerta 1.
+        estrella("WR_BAJO")
+        for i in range(12):
+            posicion("WR_BAJO", f"TC{i}", gana=(i < 5), hace_dias=10 + i)
+
+        # POCAS: 4 cerradas al 100% -> puerta 1 (historial corto).
+        estrella("POCAS")
+        for i in range(4):
+            posicion("POCAS", f"TD{i}", gana=True, hace_dias=10 + i)
+
+        # SCALPER: WR 75% en 12 cerradas pero hold de 5 min -> puerta 2.
+        estrella("SCALPER")
+        for i in range(12):
+            posicion("SCALPER", f"TE{i}", gana=(i < 9), hold_min=5,
+                     hace_dias=10 + i)
+
+        # CONCENTRADA: WR alto, hold 60 min, pero solo 4 tokens (varias
+        # vueltas ganadoras a cada uno) -> con el minimo bajado cae por
+        # diversificacion.
+        estrella("CONCENTRADA")
+        for i in range(12):
+            posicion("CONCENTRADA", f"TF{i % 4}", gana=(i < 9),
+                     hace_dias=10 + i)
+
+        # VENTA_PARCIAL: vende solo el 10% de lo comprado -> NO cuenta
+        # como cerrada -> historial corto.
+        estrella("VENTA_PARCIAL")
+        for i in range(12):
+            t0 = ahora - (10 + i) * 86400
+            op("VENTA_PARCIAL", f"TG{i}", "compra", 1.0, t0, tokens=100)
+            op("VENTA_PARCIAL", f"TG{i}", "venta", 1.5,
+               t0 + 3600, tokens=10)
+
+        # ANTIGUA: historial perfecto pero de hace 200 dias (fuera de la
+        # ventana de 90) -> historial corto.
+        estrella("ANTIGUA")
+        for i in range(12):
+            posicion("ANTIGUA", f"TH{i}", gana=True, hace_dias=200 + i)
+
+        # MEDIDAS_MALAS: historial perfecto pero sus señales medidas
+        # pierden (acierto 17%, mediana negativa) -> puerta 3.
+        estrella("MEDIDAS_MALAS")
+        for i in range(12):
+            posicion("MEDIDAS_MALAS", f"TI{i}", gana=(i < 9),
+                     hace_dias=10 + i)
+        for i in range(6):
+            senal("MEDIDAS_MALAS", i, 50 if i < 1 else -60)
+        conn.commit()
+
+        # -- puertas() sobre cada caso --
+        hist = fc.historial(conn)
+        med = fc.medidas(conn)
+        casos = {
+            "COMPLETA": True, "SIN_MEDIDAS": False, "WR_BAJO": False,
+            "POCAS": False, "SCALPER": False, "CONCENTRADA": False,
+            "VENTA_PARCIAL": False, "ANTIGUA": False,
+            "MEDIDAS_MALAS": False,
+        }
+        for w, esperado in casos.items():
+            ok, motivo = fc.puertas(hist.get(w), med.get(w))
+            comprobar(f"puertas({w}) = {'pasa' if esperado else 'NO pasa'}",
+                      ok is esperado, f"motivo: {motivo}")
+        # los motivos señalan la puerta correcta
+        comprobar("el motivo de POCAS es el historial corto",
+                  "historial corto" in fc.puertas(hist.get("POCAS"),
+                                                  None)[1])
+        # Estos dos motivos cazan mutaciones que el veredicto global no ve
+        # (sin señales medidas, la puerta 3 tapaba el resultado final):
+        comprobar("VENTA_PARCIAL cae por historial corto (vender el 10% "
+                  "no cierra la posicion)",
+                  "historial corto" in fc.puertas(hist.get("VENTA_PARCIAL"),
+                                                  None)[1],
+                  fc.puertas(hist.get("VENTA_PARCIAL"), None)[1])
+        comprobar("ANTIGUA cae por historial corto (fuera de la ventana "
+                  "de 90 dias)",
+                  "historial corto" in fc.puertas(hist.get("ANTIGUA"),
+                                                  None)[1],
+                  fc.puertas(hist.get("ANTIGUA"), None)[1])
+
+        # Ronda 2 de la auditoria — los sesgos de la retencion y las
+        # transferencias:
+        # Su UNICA posicion: acumula 6 dias y vende TODO en 5 minutos.
+        estrella("ACUMULADORA")
+        base = ahora - 6 * 86400
+        for d in range(6):
+            op("ACUMULADORA", "TJX", "compra", 1.0, base + d * 86400,
+               tokens=100)
+        op("ACUMULADORA", "TJX", "venta", 9.0,
+           base + 5 * 86400 + 300, tokens=600)
+        conn.commit()
+        h_ac = fc.historial(conn, "ACUMULADORA").get("ACUMULADORA")
+        comprobar("acumular 6 dias y soltar en 5 min cuenta como "
+                  "retencion de 5 min, no de dias",
+                  h_ac and h_ac["hold_min"] is not None
+                  and h_ac["hold_min"] < 10,
+                  str(h_ac))
+        h_ac2 = fc.historial(conn).get("ACUMULADORA")
+        comprobar("y el calculo en LOTE dice lo mismo (misma consulta "
+                  "en las dos ramas)",
+                  h_ac2 and h_ac2["hold_min"] is not None
+                  and h_ac2["hold_min"] < 10,
+                  str(h_ac2))
+
+        # TRANSFERIDA: compra 100 fichas con 1 SOL, recibe 400 por
+        # transferencia y vende 500 por 3 SOL. Eso NO es un trade
+        # medible: no cuenta como cerrada (ni ganada).
+        estrella("TRANSFERIDA")
+        for i in range(10):
+            posicion("TRANSFERIDA", f"TK{i}", gana=True, hace_dias=30 + i)
+        t0 = ahora - 5 * 86400
+        op("TRANSFERIDA", "TKX", "compra", 1.0, t0, tokens=100)
+        op("TRANSFERIDA", "TKX", "venta", 3.0, t0 + 3600, tokens=500)
+        conn.commit()
+        h_tr = fc.historial(conn, "TRANSFERIDA").get("TRANSFERIDA")
+        comprobar("vender 5x lo comprado (transferencias) no cuenta "
+                  "como posicion cerrada",
+                  h_tr["cerradas"] == 10, str(h_tr))
+
+        # SOLO_VENTAS: un mint sin ninguna compra (airdrop vendido) no
+        # cuenta para la diversificacion.
+        estrella("SOLO_VENTAS")
+        for i in range(3):
+            posicion("SOLO_VENTAS", f"TL{i}", gana=True, hace_dias=30 + i)
+        for i in range(9):      # 9 airdrops vendidos, sin compra
+            op("SOLO_VENTAS", f"TLA{i}", "venta", 0.5,
+               ahora - 10 * 86400 + i, tokens=100)
+        conn.commit()
+        h_sv = fc.historial(conn, "SOLO_VENTAS").get("SOLO_VENTAS")
+        comprobar("los airdrops vendidos no cuentan como diversificacion",
+                  h_sv["tokens"] == 3, str(h_sv))
+
+        comprobar("el motivo de WR_BAJO es el winrate",
+                  "winrate" in fc.puertas(hist.get("WR_BAJO"), None)[1])
+        comprobar("el motivo de SCALPER es la retencion",
+                  "retención" in fc.puertas(hist.get("SCALPER"), None)[1])
+        # Las posiciones cerradas se cuentan POR TOKEN, asi que con el
+        # minimo por defecto (10 cerradas) la puerta de diversificacion
+        # solo puede hablar si el dueño baja ese minimo: 10 tokens
+        # cerrados ya son mas de 8 distintos. Con los valores por defecto
+        # CONCENTRADA cae por historial corto (4 tokens = 4 cerradas), y
+        # con el minimo bajado cae por diversificacion. Se prueban los dos.
+        comprobar("CONCENTRADA con umbral por defecto cae por historial",
+                  "historial corto" in fc.puertas(hist.get("CONCENTRADA"),
+                                                  None)[1],
+                  fc.puertas(hist.get("CONCENTRADA"), None)[1])
+        _cer_previo = cfg.FILTRO_MIN_CERRADAS
+        cfg.FILTRO_MIN_CERRADAS = 3
+        comprobar("CONCENTRADA con minimo bajado cae por diversificacion",
+                  "tokens operados" in fc.puertas(hist.get("CONCENTRADA"),
+                                                  None)[1],
+                  fc.puertas(hist.get("CONCENTRADA"), None)[1])
+        cfg.FILTRO_MIN_CERRADAS = _cer_previo
+        comprobar("el motivo de SIN_MEDIDAS es la prueba",
+                  "en prueba" in fc.puertas(hist.get("SIN_MEDIDAS"),
+                                            med.get("SIN_MEDIDAS"))[1])
+        comprobar("el motivo de MEDIDAS_MALAS son las señales",
+                  "señales medidas malas" in fc.puertas(
+                      hist.get("MEDIDAS_MALAS"),
+                      med.get("MEDIDAS_MALAS"))[1])
+        # historial(conn, wallet) coincide con el lote
+        comprobar("historial de una en una = lote",
+                  fc.historial(conn, "COMPLETA").get("COMPLETA")
+                  == hist.get("COMPLETA"),
+                  f"{fc.historial(conn, 'COMPLETA')}")
+
+        # -- clasificar() escribe la fase --
+        res = fc.clasificar(conn)
+        f = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, confirmada, prueba_desde, "
+            "ai_reason FROM wallets").fetchall()}
+        comprobar("clasificar confirma SOLO a la completa",
+                  res["confirmadas"] == 1
+                  and f["COMPLETA"]["confirmada"] == 1,
+                  f"resumen = {res}")
+        comprobar("y escribe el motivo de la confirmacion",
+                  "confirmada" in (f["COMPLETA"]["ai_reason"] or ""),
+                  str(f["COMPLETA"]["ai_reason"])[:80])
+        # Con la ficha LLENA (500 caracteres) el motivo nuevo tiene que
+        # seguir siendo visible: va al principio, no al final (ronda 2).
+        conn.execute("UPDATE wallets SET confirmada=0, ai_reason=? "
+                     "WHERE address='COMPLETA'", ("x" * 500,))
+        conn.commit()
+        fc.clasificar(conn)
+        _lleno = conn.execute("SELECT ai_reason FROM wallets "
+                              "WHERE address='COMPLETA'").fetchone()
+        comprobar("el motivo nuevo es visible aunque la ficha este llena",
+                  (_lleno["ai_reason"] or "").startswith("✅ confirmada"),
+                  (_lleno["ai_reason"] or "")[:60])
+        f = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, confirmada, prueba_desde "
+            "FROM wallets").fetchall()}
+        comprobar("las demas quedan en prueba con el reloj corriendo",
+                  all(f[w]["confirmada"] == 0
+                      and f[w]["prueba_desde"] is not None
+                      for w in casos if w != "COMPLETA"),
+                  str({w: (f[w]["confirmada"], f[w]["prueba_desde"])
+                       for w in casos if w != "COMPLETA"}))
+        comprobar("ninguna pierde la estrella el primer dia de prueba",
+                  all(f[w]["is_tracked"] == 1 for w in casos))
+
+        # -- una confirmada que deja de cumplir vuelve a prueba --
+        conn.execute("DELETE FROM signals WHERE wallet='COMPLETA'")
+        conn.commit()
+        fc.clasificar(conn)
+        f2 = conn.execute(
+            "SELECT confirmada, ai_reason FROM wallets "
+            "WHERE address='COMPLETA'").fetchone()
+        comprobar("una confirmada que pierde sus medidas vuelve a prueba",
+                  f2["confirmada"] == 0,
+                  str(f2["ai_reason"])[:80])
+        comprobar("y el motivo queda en la ficha",
+                  "vuelve a prueba" in (f2["ai_reason"] or ""),
+                  str(f2["ai_reason"])[:80])
+
+        # -- retiro por inactividad: prueba vieja y sin señales --
+        estrella("DORMIDA_PRUEBA", confirmada=0,
+                 prueba_desde=ahora - 20 * 86400)
+        estrella("VIVA_PRUEBA", confirmada=0,
+                 prueba_desde=ahora - 20 * 86400)
+        senal("VIVA_PRUEBA", 99, 10)     # opero ayer: se queda
+        conn.commit()
+        fc.clasificar(conn)
+        f3 = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, ai_reason FROM wallets "
+            "WHERE address IN ('DORMIDA_PRUEBA','VIVA_PRUEBA')").fetchall()}
+        comprobar("en prueba 20 dias sin operar: pierde la estrella",
+                  f3["DORMIDA_PRUEBA"]["is_tracked"] == 0,
+                  str(f3["DORMIDA_PRUEBA"]["ai_reason"])[:70])
+        _rd = conn.execute("SELECT prueba_desde FROM wallets "
+                           "WHERE address='DORMIDA_PRUEBA'").fetchone()
+        comprobar("y el retiro limpia el reloj (si vuelve, ventana fresca)",
+                  _rd["prueba_desde"] is None, str(_rd["prueba_desde"]))
+        comprobar("en prueba pero operando: conserva la estrella",
+                  f3["VIVA_PRUEBA"]["is_tracked"] == 1)
+
+        # -- interruptor maestro --
+        cfg.FILTRO_TRES_PUERTAS = 0
+        res_off = fc.clasificar(conn)
+        n_conf = conn.execute(
+            "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1 "
+            "AND confirmada=1").fetchone()["c"]
+        n_est = conn.execute(
+            "SELECT COUNT(*) c FROM wallets WHERE is_tracked=1"
+        ).fetchone()["c"]
+        comprobar("interruptor apagado: TODAS las estrellas confirman",
+                  n_conf == n_est and res_off["interruptor"] == "apagado",
+                  f"{n_conf}/{n_est}")
+        cfg.FILTRO_TRES_PUERTAS = act_previo
+
+        # -- /filtro no revienta y dice los numeros --
+        txt = fc.resumen(conn)
+        comprobar("el resumen de /filtro menciona las tres puertas",
+                  "1️⃣" in txt and "2️⃣" in txt and "3️⃣" in txt,
+                  txt[:80])
+
+        # -- el consenso del camino caliente exige confirmada --
+        import inspect, realtime
+        fuente = inspect.getsource(realtime._proc)
+        comprobar("el consenso solo cuenta billeteras confirmadas",
+                  "COALESCE(w.confirmada, 0) = 1" in fuente,
+                  "falta el filtro en la consulta del consenso")
+
+        # -- modo PROVISIONAL (el arranque que eligio el dueño) --
+        cfg.FILTRO_PROVISIONAL = 1
+        ok_p, m_p = fc.puertas(hist.get("SIN_MEDIDAS"),
+                               med.get("SIN_MEDIDAS"))
+        comprobar("provisional: historial+copiable sin medidas CONFIRMA",
+                  ok_p is True and m_p.startswith("provisional"),
+                  f"{ok_p} / {m_p}")
+        comprobar("provisional: las medidas MALAS siguen tumbando",
+                  fc.puertas(hist.get("MEDIDAS_MALAS"),
+                             med.get("MEDIDAS_MALAS"))[0] is False)
+        comprobar("provisional: el historial flojo NO confirma",
+                  fc.puertas(hist.get("WR_BAJO"),
+                             med.get("WR_BAJO"))[0] is False)
+        comprobar("provisional: el scalper NO confirma",
+                  fc.puertas(hist.get("SCALPER"),
+                             med.get("SCALPER"))[0] is False)
+        # Y el historial CORTO tampoco, aunque lo demas parezca perfecto:
+        # 4 cerradas al 100% con buen hold y 9 tokens comprados. El
+        # provisional solo salta la puerta 3 — nunca la 1 ni la 2.
+        estrella("CORTA_PROV")
+        for i in range(4):
+            posicion("CORTA_PROV", f"TM{i}", gana=True, hace_dias=20 + i)
+        for i in range(5):      # 5 compras abiertas: diversifica sin cerrar
+            op("CORTA_PROV", f"TMA{i}", "compra", 1.0,
+               ahora - 8 * 86400 + i)
+        conn.commit()
+        _h_cp = fc.historial(conn, "CORTA_PROV").get("CORTA_PROV")
+        ok_cp, m_cp = fc.puertas(_h_cp, None)
+        comprobar("provisional: el historial corto NO confirma "
+                  "(la puerta 1 no se salta)",
+                  ok_cp is False and "historial corto" in m_cp,
+                  f"{ok_cp} / {m_cp} / {_h_cp}")
+        # El bloque del interruptor maestro acaba de confirmar a TODAS en
+        # bloque; se resetea SIN_MEDIDAS para ver la transicion con motivo.
+        conn.execute("UPDATE wallets SET confirmada=0, ai_reason=NULL "
+                     "WHERE address='SIN_MEDIDAS'")
+        conn.commit()
+        fc.clasificar(conn)
+        f4 = conn.execute(
+            "SELECT confirmada, ai_reason FROM wallets "
+            "WHERE address='SIN_MEDIDAS'").fetchone()
+        comprobar("provisional: clasificar la marca confirmada",
+                  f4["confirmada"] == 1, str(f4["ai_reason"])[:70])
+        comprobar("provisional: el motivo dice que es provisional",
+                  "provisional" in (f4["ai_reason"] or ""),
+                  str(f4["ai_reason"])[:70])
+        # y cuando llegan las medidas y son malas, la pierde
+        for i in range(6):
+            senal("SIN_MEDIDAS", 100 + i, -60)
+        conn.commit()
+        fc.clasificar(conn)
+        f5 = conn.execute(
+            "SELECT confirmada FROM wallets "
+            "WHERE address='SIN_MEDIDAS'").fetchone()
+        comprobar("provisional: 6 medidas malas le quitan la confirmacion",
+                  f5["confirmada"] == 0, str(f5["confirmada"]))
+
+        # -- base sin la tabla `trades` (recien nacida): nada revienta --
+        conn.execute("DROP TABLE trades")
+        conn.commit()
+        try:
+            h_frio = fc.historial(conn, "COMPLETA")
+            r_frio = fc.resumen(conn)
+            c_frio = fc.clasificar(conn)
+            ok_frio = isinstance(h_frio, dict) and "🚪" in r_frio \
+                and isinstance(c_frio, dict)
+        except Exception as e:
+            ok_frio = False
+            r_frio = str(e)
+        comprobar("sin tabla trades: historial/resumen/clasificar "
+                  "funcionan (la crean ellos)",
+                  ok_frio, str(r_frio)[:80])
+
+        # -- contrato: la migracion de `confirmada` corre AL ARRANCAR --
+        # No se puede re-arrancar db.py dentro de la suite (la conexion
+        # global ya esta preparada), asi que se mira la fuente: si la
+        # columna sale de las listas de migracion, una base ya desplegada
+        # se quedaria sin ella hasta el primer ciclo de la IA y
+        # `top_addresses` devolveria None = ALERTAN TODAS (fail-open que
+        # cazo la auditoria).
+        import inspect
+        import db as _dbm
+        _f_sq = inspect.getsource(_dbm._preparar_sqlite)
+        _f_pg = inspect.getsource(_dbm._preparar_pg)
+        comprobar("la migracion de arranque de SQLite incluye confirmada "
+                  "y prueba_desde",
+                  '"confirmada"' in _f_sq and '"prueba_desde"' in _f_sq)
+        comprobar("la de Postgres tambien",
+                  '"confirmada"' in _f_pg and '"prueba_desde"' in _f_pg)
+        # Y la clasificacion inicial corre AL ARRANCAR en los dos
+        # motores: sin ella, entre el deploy y el primer ciclo todas las
+        # ⭐ tienen confirmada NULL y el bot queda MUDO (ronda 2).
+        comprobar("el arranque de SQLite clasifica al preparar la base",
+                  "clasificar(conn)" in _f_sq)
+        comprobar("el de Postgres tambien",
+                  "clasificar(pg)" in _f_pg)
+    finally:
+        cfg.FILTRO_TRES_PUERTAS = act_previo
+        cfg.FILTRO_PROVISIONAL = prov_previo
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -2753,6 +3251,7 @@ def main():
     prueba_top50()
     prueba_creador_mercado()
     prueba_reentrada()
+    prueba_filtro()
 
     print("\n" + "─" * 60)
     if _FALLOS:

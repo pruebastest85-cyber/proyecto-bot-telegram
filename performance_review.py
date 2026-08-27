@@ -258,6 +258,7 @@ def review_tracked(notify: bool = True) -> dict:
                          f"{st['horizonte']}")
                 conn.execute(
                     """UPDATE wallets SET is_tracked=0, ai_follow=0,
+                       confirmada=0, prueba_desde=NULL,
                        grade='Observación', ai_reason=?
                        WHERE address=?""", (razon, addr))
                 degradadas.append({"address": addr,
