@@ -123,6 +123,20 @@ AI_DAILY_BUDGET = _int("AI_DAILY_BUDGET", 300)
 AI_ESCALATE = os.getenv("AI_ESCALATE", "0") == "1"
 BOT_TX_PER_HOUR_LIMIT = 60        # más de esto por hora = probable bot
 
+# ── Creadores de mercado (26/8/2026, regla del dueño) ────────────────────
+# Una billetera que compra y VENDE el MISMO token una y otra vez no está
+# operando: está haciendo mercado (o lavando volumen). Gane o no gane, su
+# forma de ganar NO se puede copiar — medido sobre las señales reales del
+# bot, el grupo de 5+ vueltas tiene mediana -69,4% frente a -59,5% del
+# resto, y mete 3,9 señales por token frente a 2,3.
+# "Vuelta" = una ALTERNANCIA compra→venta del mismo token en orden
+# temporal: compra-venta-compra-venta son 2 vueltas, pero 7 compras
+# escalonadas seguidas de 5 ventas parciales es UNA sola (una posición
+# que se abre y se cierra por partes, comportamiento normal de trader).
+# MM_VUELTAS_MAX = 0 apaga la regla.
+MM_VUELTAS_MAX = _int("MM_VUELTAS_MAX", 5)
+MM_VENTANA_DIAS = _int("MM_VENTANA_DIAS", 30)
+
 # ── Base de datos ─────────────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "wallets.db")
 

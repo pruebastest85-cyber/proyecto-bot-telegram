@@ -2256,6 +2256,485 @@ def _vigilante(segundos=420):
     return t
 
 
+# ---------------------------------------------------------------------
+# OLA 18-K - 1 - el "top 50" es DE VERDAD el puesto de /top.
+# ---------------------------------------------------------------------
+def prueba_top50():
+    bloque("18-K/1 - alertar solo desde el top N REAL de /top")
+    import time as _t
+    import db
+    from db import get_conn
+
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM positions")
+        db.invalidar_copiables()
+        ahora = int(_t.time())
+        reciente, viejo = ahora - 600, ahora - 10 * 86400
+
+        # 6 estrellas que ganan y operan hoy: puestos 1..6 de /top.
+        for i in range(6):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "wallet_score, pnl_total, score) VALUES (?,1,0,?,?,0)",
+                (f"BUENA{i}", 90 - i, 10.0))
+            conn.execute(
+                "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+                "VALUES (?,?,0,?)", (f"BUENA{i}", f"M{i}", reciente))
+        # 4 estrellas que ganan pero llevan 10 dias dormidas: en /top van
+        # DESPUES de las activas, pero ANTES de cualquiera que pierda.
+        for i in range(4):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "wallet_score, pnl_total, score) VALUES (?,1,0,?,?,0)",
+                (f"DORMIDA{i}", 99, 10.0))
+            conn.execute(
+                "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+                "VALUES (?,?,0,?)", (f"DORMIDA{i}", f"D{i}", viejo))
+        # La del caso real: estrella ACTIVA pero en perdidas. En /top cae
+        # por debajo de TODAS las que no pierden -> puesto 11.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, "
+            "wallet_score, pnl_total, score) VALUES ('PERDEDORA',1,0,44,?,0)",
+            (-3.41,))
+        conn.execute(
+            "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+            "VALUES ('PERDEDORA','MP',0,?)", (reciente,))
+        # Candidata sin estrella, activa y ganadora: sale en /top pero
+        # nunca puede alertar.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, "
+            "wallet_score, pnl_total, score) VALUES ('CANDIDATA',0,0,95,50,0)")
+        conn.execute(
+            "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+            "VALUES ('CANDIDATA','MC',0,?)", (reciente,))
+        # Un bot con estrella, activo y con la mejor nota de todas: ni
+        # sale en /top ni puede alertar.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, "
+            "wallet_score, pnl_total, score) VALUES ('BOT1',1,1,100,99,0)")
+        conn.execute(
+            "INSERT INTO positions (wallet, mint, tokens, last_ts) "
+            "VALUES ('BOT1','MB',0,?)", (reciente,))
+        conn.commit()
+
+        puestos = [r["address"] for r in db.top_wallets(conn, 100)]
+        pos = {a: i for i, a in enumerate(puestos, 1)}
+        comprobar("montaje: la perdedora activa queda fuera del top 10 de "
+                  "/top (el caso que vio el dueno)",
+                  pos.get("PERDEDORA", 0) > 10,
+                  f"quedo en el puesto {pos.get('PERDEDORA')}")
+
+        op = db.top_addresses(conn, 10)
+        comprobar("una estrella activa PERO fuera del top N no alerta",
+                  "PERDEDORA" not in op,
+                  f"puesto {pos.get('PERDEDORA')} y aun asi alerta")
+        comprobar("una estrella dormida dentro del top N tampoco alerta",
+                  not any(a.startswith("DORMIDA") for a in op),
+                  f"conjunto = {sorted(op)}")
+        comprobar("una candidata sin estrella no alerta",
+                  "CANDIDATA" not in op, f"conjunto = {sorted(op)}")
+        comprobar("las 6 buenas si alertan", len(op) == 6, f"{sorted(op)}")
+        comprobar("un bot nunca alerta, por buena nota que tenga",
+                  "BOT1" not in op, f"conjunto = {sorted(op)}")
+
+        # Con un tope AMPLIO la candidata sin estrella si cabe dentro de
+        # los N primeros de /top. Aqui es donde se ve que el filtro de la
+        # estrella hace falta de verdad: con el tope pequeno la dejaba
+        # fuera el LIMIT, no el filtro.
+        db.invalidar_copiables()
+        amplio = db.top_addresses(conn, 50)
+        comprobar("montaje: con tope 50 la candidata SI esta dentro de /top",
+                  0 < pos.get("CANDIDATA", 0) <= 50,
+                  f"puesto {pos.get('CANDIDATA')}")
+        comprobar("montaje: con tope 50 las dormidas SI estan dentro de /top",
+                  all(0 < pos.get(f"DORMIDA{i}", 0) <= 50 for i in range(4)),
+                  "alguna dormida quedo fuera de los 50 primeros")
+        comprobar("montaje: con tope 50 la perdedora SI esta dentro de /top",
+                  0 < pos.get("PERDEDORA", 0) <= 50,
+                  f"puesto {pos.get('PERDEDORA')}")
+        comprobar("dentro del top 50: la candidata sin estrella no alerta",
+                  "CANDIDATA" not in amplio, f"conjunto = {sorted(amplio)}")
+        comprobar("dentro del top 50: las dormidas no alertan",
+                  not any(a.startswith("DORMIDA") for a in amplio),
+                  f"conjunto = {sorted(amplio)}")
+        # La perdedora SI vuelve a alertar con tope 50, y es correcto: la
+        # regla es POSICIONAL, no "las que pierden nunca". Con solo 11
+        # estrellas su puesto 11 cabe de sobra en 50. Lo que se arreglo es
+        # que con tope 10 colaba igual.
+        comprobar("dentro del top 50 alertan las 6 buenas Y la perdedora "
+                  "(su puesto 11 si cabe en 50)",
+                  amplio == ({f"BUENA{i}" for i in range(6)}
+                             | {"PERDEDORA"}),
+                  f"conjunto = {sorted(amplio)}")
+
+        # INVARIANTE, comprobada contra la OTRA funcion (no contra una
+        # copia de la misma consulta): quien alerta esta SIEMPRE entre
+        # los N primeros de /top.
+        for n in (1, 2, 3, 5, 8, 10, 50):
+            db.invalidar_copiables()
+            s = db.top_addresses(conn, n)
+            primeros = [r["address"] for r in db.top_wallets(conn, n)]
+            comprobar(f"top {n}: quien alerta esta entre los {n} primeros "
+                      f"de /top",
+                      all(a in primeros for a in s),
+                      f"sobran {sorted(set(s) - set(primeros))}")
+
+        # Contrato de tres estados.
+        db.invalidar_copiables()
+        comprobar("top_alertas = 0 devuelve None (sin limite, no 'nadie')",
+                  db.top_addresses(conn, 0) is None,
+                  f"devolvio {db.top_addresses(conn, 0)!r}")
+
+        class _ConnRota:
+            def execute(self, *a, **k):
+                raise RuntimeError("base caida")
+        db.invalidar_copiables()
+        comprobar("si la consulta falla devuelve None (no deja el bot mudo)",
+                  db.top_addresses(_ConnRota(), 5) is None,
+                  "devolvio algo que no es None")
+
+        conn.execute("DELETE FROM positions")     # nadie activo
+        conn.commit()
+        db.invalidar_copiables()
+        vacio = db.top_addresses(conn, 10)
+        comprobar("sin nadie activo devuelve un conjunto VACIO, no None",
+                  vacio is not None and len(vacio) == 0, f"{vacio!r}")
+
+        # Desempate DETERMINISTA (auditoria 18-K, hallazgo 4): /top, el
+        # conjunto operativo y la posicion de las tarjetas ejecutan el
+        # mismo ORDER BY por separado. Sin una ultima clave unica
+        # (address), dos billeteras empatadas pueden caer a un lado u
+        # otro del corte segun la ejecucion — en SQLite sale estable de
+        # casualidad, en Postgres no esta garantizado. Esta prueba mira
+        # el SQL porque el sintoma NO es reproducible en SQLite: aqui el
+        # empate sale siempre igual y una prueba de comportamiento
+        # pasaria tambien sin el desempate.
+        import inspect
+        import wallet_ident
+        for fn, dueno in ((db.top_wallets, "top_wallets"),
+                          (db._operativas, "_operativas"),
+                          (wallet_ident.posicion, "wallet_ident.posicion")):
+            fuente = inspect.getsource(fn)
+            i_orden = fuente.find("ORDER BY")
+            i_addr = fuente.find("w.address", i_orden)
+            i_limit = fuente.find("LIMIT", i_orden)
+            comprobar(f"{dueno}: el ORDER BY desempata por address",
+                      0 <= i_orden < i_addr < i_limit,
+                      "no hay w.address entre ORDER BY y LIMIT")
+
+        # El contrato, en el unico sitio donde se decide.
+        comprobar("en_top(None, x) deja pasar (sin filtro)",
+                  db.en_top(None, "X") is True)
+        comprobar("en_top(set(), x) NO deja pasar (filtro sin nadie)",
+                  db.en_top(set(), "X") is False)
+        comprobar("en_top({'X'}, 'X') deja pasar", db.en_top({"X"}, "X"))
+        comprobar("en_top({'Y'}, 'X') no deja pasar",
+                  db.en_top({"Y"}, "X") is False)
+    finally:
+        db.invalidar_copiables()
+        conn.close()
+
+
+# ---------------------------------------------------------------------
+# OLA 18-K - 2 - creadores de mercado: vueltas al MISMO token.
+# ---------------------------------------------------------------------
+def prueba_creador_mercado():
+    bloque("18-K/2 - sin estrella para quien da vueltas al mismo token")
+    import time as _t
+    import config as cfg
+    import performance_review as pv
+    from db import get_conn
+
+    conn = get_conn()
+    tope_previo = cfg.MM_VUELTAS_MAX
+    try:
+        ahora = int(_t.time())
+
+        def sembrar_seq(wallet, mint, secuencia, ts=None):
+            """Inserta señales en el ORDEN dado: 'CVCV' = compra, venta,
+            compra, venta, con timestamps crecientes."""
+            ts = ahora - 3600 if ts is None else ts
+            for k, letra in enumerate(secuencia):
+                side = "compra" if letra == "C" else "venta"
+                conn.execute(
+                    "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                    "side) VALUES (?,?,?,1,?,?)",
+                    (f"s{wallet}{mint}{k}{ts}", wallet, mint, ts + k, side))
+
+        def sembrar(wallet, mint, compras, ventas, ts=None):
+            """Compras y ventas ALTERNADAS (el patron del caso real)."""
+            pares = min(compras, ventas)
+            resto = ("C" * (compras - pares)) + ("V" * (ventas - pares))
+            sembrar_seq(wallet, mint, "CV" * pares + resto, ts=ts)
+
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM wallets")
+        for w in ("MM6", "JUSTO5", "ASIMETRICA", "DISPERSA", "ANTIGUA",
+                  "LIMPIA"):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, grade) "
+                "VALUES (?,1,0,'Seguimiento')", (w,))
+        sembrar("MM6", "TOKEN_A", 6, 6)              # 6 vueltas -> fuera
+        sembrar("JUSTO5", "TOKEN_B", 5, 5)           # 5 vueltas -> se queda
+        sembrar("ASIMETRICA", "TOKEN_C", 20, 5)      # min(20,5)=5 -> se queda
+        for i in range(8):                           # 8 tokens, 1 vuelta
+            sembrar("DISPERSA", f"TOKEN_D{i}", 1, 1)
+        sembrar("ANTIGUA", "TOKEN_E", 40, 40, ts=ahora - 400 * 86400)
+        sembrar("LIMPIA", "TOKEN_F", 3, 1)
+        conn.commit()
+
+        comprobar("6 vueltas al mismo token: SIN estrella",
+                  pv.creadora_de_mercado(conn, "MM6") is not None)
+        comprobar("exactamente 5 vueltas: se queda (el dueno dijo MAS de 5)",
+                  pv.creadora_de_mercado(conn, "JUSTO5") is None,
+                  str(pv.creadora_de_mercado(conn, "JUSTO5")))
+        comprobar("20 compras y 5 ventas son 5 vueltas, no 20",
+                  pv.creadora_de_mercado(conn, "ASIMETRICA") is None,
+                  str(pv.creadora_de_mercado(conn, "ASIMETRICA")))
+        comprobar("8 tokens con una vuelta cada uno NO es creador de mercado",
+                  pv.creadora_de_mercado(conn, "DISPERSA") is None,
+                  str(pv.creadora_de_mercado(conn, "DISPERSA")))
+        comprobar("40 vueltas hace mas de un ano no cuentan (fuera de la "
+                  "ventana)",
+                  pv.creadora_de_mercado(conn, "ANTIGUA") is None,
+                  str(pv.creadora_de_mercado(conn, "ANTIGUA")))
+        comprobar("una billetera normal no se toca",
+                  pv.creadora_de_mercado(conn, "LIMPIA") is None)
+
+        # El falso positivo que destapo la auditoria: 6 compras
+        # escalonadas y LUEGO 6 ventas parciales es UNA posicion, no 6
+        # vueltas. La metrica del minimo la condenaba; la de alternancias
+        # compra->venta la deja en paz.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, grade) "
+            "VALUES ('ESCALONADA',1,0,'Seguimiento')")
+        sembrar_seq("ESCALONADA", "TOKEN_G", "CCCCCCVVVVVV")
+        conn.commit()
+        comprobar("6 compras escalonadas + 6 ventas parciales = 1 vuelta, "
+                  "conserva la estrella",
+                  pv.creadora_de_mercado(conn, "ESCALONADA") is None,
+                  str(pv.creadora_de_mercado(conn, "ESCALONADA")))
+        # Ronda 2: dos señales en el MISMO segundo se ordenan por la
+        # FIRMA en Python (por puntos de codigo), no por el motor: un
+        # Postgres con colacion de idioma ordenaria 'a' antes que 'B' y
+        # contaria distinto que SQLite. Se insertan al reves del orden
+        # canonico: compra con firma 'zz', venta con firma 'aa'. En orden
+        # de insercion seria compra->venta (1 vuelta); por firma es
+        # venta->compra (0). La cuenta correcta es 0.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, grade) "
+            "VALUES ('EMPATADA',1,0,'Seguimiento')")
+        _ts_e = ahora - 3600
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, sol, ts, side) "
+            "VALUES ('zz_empate','EMPATADA','TOKEN_I',1,?, 'compra')",
+            (_ts_e,))
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, sol, ts, side) "
+            "VALUES ('aa_empate','EMPATADA','TOKEN_I',1,?, 'venta')",
+            (_ts_e,))
+        conn.commit()
+        comprobar("empate de segundo: manda el orden por firma (0 vueltas), "
+                  "no el orden de insercion",
+                  pv._vueltas_max(conn, 30, "EMPATADA")
+                  .get("EMPATADA", (0, None))[0] == 0,
+                  str(pv._vueltas_max(conn, 30, "EMPATADA")))
+
+        # Y el mismo volumen ALTERNADO si cae: es el patron real.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, grade) "
+            "VALUES ('ALTERNADA',1,0,'Seguimiento')")
+        sembrar_seq("ALTERNADA", "TOKEN_H", "CV" * 6)
+        conn.commit()
+        comprobar("el mismo volumen alternado (CVCVCV...) SI cae",
+                  pv.creadora_de_mercado(conn, "ALTERNADA") is not None)
+
+        motivo = pv.creadora_de_mercado(conn, "MM6")
+        comprobar("el motivo dice cuantas vueltas y a que token",
+                  motivo and "6" in motivo and "TOKEN_A"[:8] in motivo,
+                  str(motivo))
+
+        # El lote y el de una en una tienen que coincidir SIEMPRE.
+        lote = pv.creadoras_de_mercado(conn)
+        una = {w for w in ("MM6", "JUSTO5", "ASIMETRICA", "DISPERSA",
+                           "ANTIGUA", "LIMPIA", "ESCALONADA", "ALTERNADA",
+                           "EMPATADA")
+               if pv.creadora_de_mercado(conn, w)}
+        comprobar("el calculo en lote da lo mismo que el de una en una",
+                  set(lote) == una, f"lote={sorted(lote)} una={sorted(una)}")
+
+        # El lote solo mira estrellas.
+        conn.execute("UPDATE wallets SET is_tracked = 0 WHERE address='MM6'")
+        conn.commit()
+        comprobar("el lote ignora a las que ya no tienen estrella",
+                  "MM6" not in pv.creadoras_de_mercado(conn))
+        conn.execute("UPDATE wallets SET is_tracked = 1 WHERE address='MM6'")
+        conn.commit()
+
+        # Interruptor de apagado.
+        cfg.MM_VUELTAS_MAX = 0
+        comprobar("MM_VUELTAS_MAX = 0 apaga la regla",
+                  pv.creadora_de_mercado(conn, "MM6") is None
+                  and pv.creadoras_de_mercado(conn) == {})
+        cfg.MM_VUELTAS_MAX = tope_previo
+
+        # Y la depuracion le quita la estrella de verdad.
+        import ai_analyst as aa
+        res = aa.depurar_estrellas(conn)
+        fila = conn.execute(
+            "SELECT is_tracked, ai_follow, ai_reason FROM wallets "
+            "WHERE address='MM6'").fetchone()
+        comprobar("depurar_estrellas le quita la estrella",
+                  fila["is_tracked"] == 0, f"is_tracked = {fila['is_tracked']}")
+        comprobar("y deja de seguirla", not fila["ai_follow"])
+        comprobar("y escribe el motivo en la ficha",
+                  "creadora de mercado" in (fila["ai_reason"] or ""),
+                  str(fila["ai_reason"])[:90])
+        comprobar("y lo cuenta en el resumen (MM6 y ALTERNADA)",
+                  res.get("creadoras_mercado") == 2,
+                  f"resumen = {res}")
+        comprobar("a la escalonada no la toca",
+                  conn.execute("SELECT is_tracked FROM wallets WHERE "
+                               "address='ESCALONADA'").fetchone()
+                  ["is_tracked"] == 1)
+        intacta = conn.execute(
+            "SELECT is_tracked FROM wallets WHERE address='JUSTO5'"
+        ).fetchone()
+        comprobar("a la de 5 vueltas no la toca", intacta["is_tracked"] == 1)
+    finally:
+        cfg.MM_VUELTAS_MAX = tope_previo
+        conn.close()
+
+
+# ---------------------------------------------------------------------
+# OLA 18-K - 3 - /reentrada: enfriamiento por token desde el bot.
+# ---------------------------------------------------------------------
+def prueba_reentrada():
+    bloque("18-K/3 - /reentrada cambia el enfriamiento por token")
+    import asyncio as _aio
+    import telegram_bot as tb
+    from db import get_conn, get_setting, set_setting
+
+    conn = get_conn()
+    try:
+        comprobar("_f_setting: None -> por defecto",
+                  tb._f_setting(None, 24.0) == 24.0)
+        comprobar("_f_setting: '' -> por defecto",
+                  tb._f_setting("", 24.0) == 24.0)
+        comprobar("_f_setting: 'hola' -> por defecto",
+                  tb._f_setting("hola", 24.0) == 24.0)
+        comprobar("_f_setting: 'nan' -> por defecto (NaN pasa cualquier "
+                  "comparacion)",
+                  tb._f_setting("nan", 24.0) == 24.0)
+        comprobar("_f_setting: '6' -> 6.0", tb._f_setting("6", 24.0) == 6.0)
+        comprobar("_f_setting: '0' -> 0.0 (no cae al defecto)",
+                  tb._f_setting("0", 24.0) == 0.0)
+
+        dichos = []
+
+        class _Msg:
+            chat = None
+            async def reply_text(self, txt, **k):
+                dichos.append(txt)
+
+        upd = types.SimpleNamespace(message=_Msg(),
+                                    effective_user=types.SimpleNamespace(id=1))
+
+        def correr(*args):
+            dichos.clear()
+            ctx = types.SimpleNamespace(args=list(args))
+            _aio.run(tb.cmd_reentrada(upd, ctx))
+            return dichos[-1] if dichos else ""
+
+        set_setting(conn, "paper_reentrada_h", "0")
+        correr("6")
+        comprobar("/reentrada 6 lo guarda",
+                  float(get_setting(conn, "paper_reentrada_h", "x")) == 6.0,
+                  str(get_setting(conn, "paper_reentrada_h", None)))
+        correr("0")
+        comprobar("/reentrada 0 lo apaga",
+                  float(get_setting(conn, "paper_reentrada_h", "x")) == 0.0)
+
+        set_setting(conn, "paper_reentrada_h", "6")
+        for malo in ("-1", "abc", "nan", "inf", "99999"):
+            txt = correr(malo)
+            comprobar(f"/reentrada {malo} se rechaza y no cambia nada",
+                      "Uso:" in txt
+                      and float(get_setting(conn, "paper_reentrada_h",
+                                            "x")) == 6.0,
+                      f"respuesta = {txt[:50]!r}")
+
+        txt = correr()
+        comprobar("/reentrada sin argumentos informa del valor actual",
+                  "6" in txt, f"respuesta = {txt[:60]!r}")
+
+        # Y el enfriamiento hace su trabajo en paper_trading.
+        import paper_trading as pt
+        comprobar("paper_trading lee el ajuste",
+                  pt._f(conn, "paper_reentrada_h", 24.0) == 6.0,
+                  str(pt._f(conn, "paper_reentrada_h", 24.0)))
+
+        # /copiapura ya no gobierna el enfriamiento (auditoria 18-K):
+        # antes `on` lo ponia a 0 en silencio, deshaciendo un /reentrada
+        # recien dado, y `off` restauraba el valor viejo pisando el nuevo.
+        comprobar("el preset de copia pura ya no toca paper_reentrada_h",
+                  "paper_reentrada_h" not in tb._COPIA_PURA,
+                  str(sorted(tb._COPIA_PURA)))
+        import json as _json
+        set_setting(conn, "paper_reentrada_h", "6")
+        # foto vieja guardada por un `on` de ANTES del cambio
+        set_setting(conn, "copia_pura_previo",
+                    _json.dumps({"paper_reentrada_h": "24",
+                                 "paper_tp_pct": "100"}))
+        conn.commit()
+
+        class _Chat:
+            async def send_message(self, *a, **k):
+                return None
+        upd2 = types.SimpleNamespace(
+            message=types.SimpleNamespace(chat=_Chat(),
+                                          reply_text=_Msg().reply_text),
+            effective_user=types.SimpleNamespace(id=1))
+        ctx2 = types.SimpleNamespace(args=["off"])
+        _aio.run(tb.cmd_copia_pura(upd2, ctx2))
+        comprobar("una foto VIEJA de copia pura no pisa el /reentrada nuevo",
+                  float(get_setting(conn, "paper_reentrada_h", "x")) == 6.0,
+                  str(get_setting(conn, "paper_reentrada_h", None)))
+        comprobar("pero el resto de la foto vieja SI se restaura",
+                  get_setting(conn, "paper_tp_pct", None) == "100",
+                  str(get_setting(conn, "paper_tp_pct", None)))
+
+        # Ronda 2: el residuo del preset VIEJO. Si el `on` antiguo dejo
+        # el enfriamiento a 0 y el dueño NUNCA dio /reentrada, el `off`
+        # debe restaurar la foto en vez de dejar el 0 huerfano (que
+        # perpetuaria las 24 reaperturas del mismo token).
+        set_setting(conn, "paper_reentrada_h", "0")
+        set_setting(conn, "copia_pura_previo",
+                    _json.dumps({"paper_reentrada_h": "24",
+                                 "paper_tp_pct": "100"}))
+        conn.commit()
+        _aio.run(tb.cmd_copia_pura(upd2, types.SimpleNamespace(args=["off"])))
+        comprobar("el 0 huerfano del preset viejo SI se restaura en el off",
+                  float(get_setting(conn, "paper_reentrada_h", "x")) == 24.0,
+                  str(get_setting(conn, "paper_reentrada_h", None)))
+
+        # Ronda 3: un /reentrada 0 DELIBERADO (se guarda como "0.0", no
+        # como el "0" literal del preset viejo) se respeta en el off.
+        correr("0")
+        set_setting(conn, "copia_pura_previo",
+                    _json.dumps({"paper_reentrada_h": "24",
+                                 "paper_tp_pct": "100"}))
+        conn.commit()
+        _aio.run(tb.cmd_copia_pura(upd2, types.SimpleNamespace(args=["off"])))
+        comprobar("un /reentrada 0 deliberado NO se pisa en el off",
+                  float(get_setting(conn, "paper_reentrada_h", "x")) == 0.0,
+                  str(get_setting(conn, "paper_reentrada_h", None)))
+    finally:
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -2271,6 +2750,9 @@ def main():
     prueba_ocultos()
     prueba_rug()
     prueba_polvo()
+    prueba_top50()
+    prueba_creador_mercado()
+    prueba_reentrada()
 
     print("\n" + "─" * 60)
     if _FALLOS:

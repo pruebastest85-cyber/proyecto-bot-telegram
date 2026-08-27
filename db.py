@@ -1180,7 +1180,8 @@ def top_wallets(conn, limit=20):
                     CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
                     w.wallet_score DESC,
                     COALESCE(w.pnl_total, -1e9) DESC,
-                    w.score DESC
+                    w.score DESC,
+                    w.address
            LIMIT ?""",
         (corte, limit),
     ).fetchall()
@@ -1207,26 +1208,57 @@ _COP_CACHE: dict = {"ts": 0.0, "limit": None, "set": None}
 
 
 def _operativas(conn, limit: int) -> set:
+    # v3 (26/8/2026) — EL PUESTO ES EL DE /top, NO OTRO RANKING.
+    #
+    # Fallo medido por el dueño: con `top_alertas = 50` alertaban dos
+    # billeteras que /top pone en los puestos **147 y 148** (una de ellas
+    # 12 alertas en 24 h con PnL -3,41 y 0% de acierto). El motivo: la v2
+    # ordenaba una poblacion DISTINTA. Su WHERE dejaba fuera a las ⭐
+    # dormidas, asi que solo quedaban 35 candidatas para 50 cupos: el tope
+    # no recortaba NADA y entraban tambien las perdedoras. En /top, en
+    # cambio, el puesto se calcula sobre TODAS las billeteras, y una ⭐ que
+    # pierde dinero cae por debajo de las ~110 que no pierden — de ahi el
+    # 147.
+    #
+    # Ahora se ordena EXACTAMENTE igual que db.top_wallets (mismo SELECT,
+    # mismo ORDER BY, misma poblacion), se corta por el tope, y solo
+    # DESPUES se filtra: de esas N primeras, las que ademas son ⭐ y estan
+    # activas. Asi "top 50" significa lo que el dueño entiende al leerlo:
+    # las 50 primeras de la lista que ve con /top.
+    #
+    # Consecuencia buscada: el conjunto puede ser MAS pequeño que el tope
+    # (hoy 33 en vez de 35). Un cupo vacio no se rellena con una ⭐ del
+    # puesto 148; copiar peor no es mejor que copiar menos.
     import time as _t
     import os as _os
     _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
     corte = int(_t.time()) - int(_horas * 3600)
     rows = conn.execute(
-        """SELECT w.address
+        """SELECT w.address, w.is_tracked,
+                  COALESCE(actividad.ult, 0) AS ult
            FROM wallets w
            LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                       GROUP BY wallet) actividad
                 ON actividad.wallet = w.address
-           WHERE w.is_tracked = 1 AND COALESCE(w.is_bot, 0) = 0
-             AND COALESCE(actividad.ult, 0) >= ?
-           ORDER BY CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
+           WHERE w.is_bot = 0
+           ORDER BY w.is_tracked DESC,
+                    CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
+                         THEN 1 ELSE 0 END,
+                    CASE WHEN COALESCE(actividad.ult, 0) < ?
                          THEN 1 ELSE 0 END,
                     CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
                     w.wallet_score DESC,
-                    COALESCE(w.pnl_total, -1e9) DESC
+                    COALESCE(w.pnl_total, -1e9) DESC,
+                    w.score DESC,
+                    w.address
            LIMIT ?""",
         (corte, limit)).fetchall()
-    return {r["address"] for r in rows}
+    # Se comprueba por verdad y no por `== 1`: la columna es INTEGER en
+    # los dos motores, pero cualquier driver que devolviera booleano
+    # rompería una comparación estricta sin que ninguna prueba (que corren
+    # sobre SQLite) pudiera avisarlo.
+    return {r["address"] for r in rows
+            if r["is_tracked"] and (r["ult"] or 0) >= corte}
 
 
 def invalidar_copiables() -> None:
@@ -1235,15 +1267,30 @@ def invalidar_copiables() -> None:
         _COP_CACHE["ts"] = 0.0
 
 
-def top_addresses(conn, limit: int | None = None) -> set:
+def top_addresses(conn, limit: int | None = None):
     """Conjunto OPERATIVO: las billeteras que alertan y disparan la copia.
 
-    Solo ⭐ ACTIVAS (operaron dentro de TOP_ACTIVITY_HOURS, 48 h por
-    defecto), ordenadas por calidad; las perdedoras solo llenan cupo
-    sobrante. Cache de 60 s compartida por todos los consumidores
-    (alertas, camino caliente, consenso): un solo conjunto, una sola
-    definicion. Si algo falla devuelve un conjunto vacio, y quien llama
-    debe interpretarlo como "no filtres" en vez de "no alertes nada".
+    Las N primeras de /top (mismo orden y misma poblacion que
+    db.top_wallets) que ademas son ⭐ y estan ACTIVAS (operaron dentro de
+    TOP_ACTIVITY_HOURS, 48 h por defecto). Cache de 60 s compartida por
+    todos los consumidores (alertas, camino caliente, consenso): un solo
+    conjunto, una sola definicion.
+
+    DEVUELVE (contrato de tres estados, v3 del 26/8/2026):
+      · None  → NO HAY FILTRO. O el dueño puso `top_alertas = 0` (sin
+                limite, a proposito), o la consulta fallo. Quien llama
+                debe dejar pasar todo: mas vale alertar de mas que
+                quedarse mudo por un fallo de base de datos.
+      · set() → filtro calculado y NADIE lo pasa. Es un resultado
+                legitimo (p.ej. ninguna de las 50 primeras opero en 48 h)
+                y significa "no alerta nadie". OJO: puede darse incluso
+                con ⭐ activas — si pierden dinero, /top las pone por
+                DETRAS de las dormidas ganadoras, y las dormidas pueden
+                llenar el cupo. Elegido a proposito (el cupo no se
+                rellena con peores) y avisado por consola cuando pasa.
+    Antes los dos casos devolvian el mismo conjunto vacio y quien llamaba
+    los leia a ambos como "no filtres": un dia sin ⭐ activas habria
+    ANULADO el top 50 en silencio y habrian alertado todas.
     """
     if limit is None:
         try:
@@ -1253,7 +1300,7 @@ def top_addresses(conn, limit: int | None = None) -> set:
         except (TypeError, ValueError):
             limit = TOP_ALERTAS_DEFAULT
     if limit <= 0:
-        return set()
+        return None
     import time as _t
     with _COP_LOCK:
         if (_COP_CACHE["set"] is not None
@@ -1262,12 +1309,36 @@ def top_addresses(conn, limit: int | None = None) -> set:
             return set(_COP_CACHE["set"])
     try:
         s = _operativas(conn, limit)
+        if not s:
+            # Visible a proposito (auditoria 18-K): puede pasar con ⭐
+            # operando AHORA MISMO — p.ej. si los N primeros puestos de
+            # /top los ocupan dormidas ganadoras (van por delante de una
+            # activa en perdidas) y ninguna esta activa. Es el
+            # comportamiento elegido ("las N primeras de /top", sin
+            # rellenar cupos), pero sin esta linea el silencio seria
+            # indistinguible de un fallo.
+            print(f"👁 top de alertas: ninguna de las {limit} primeras "
+                  f"de /top esta activa; nadie alerta este minuto")
         with _COP_LOCK:
             _COP_CACHE.update({"ts": _t.time(), "limit": limit, "set": s})
         return set(s)
     except Exception as e:
         print(f"· top_addresses falló ({e}); no se filtra por top")
-        return set()
+        return None
+
+
+def en_top(top, wallet: str) -> bool:
+    """¿Esta billetera puede alertar, según lo que devolvió top_addresses?
+
+    Existe para que el contrato de tres estados tenga UNA sola definición
+    en vez de repetirse en cada consumidor. Antes cada sitio escribía
+    `(not top) or wallet in top`, que confunde los dos vacíos: "no se
+    pudo calcular el filtro" y "el filtro no lo pasa nadie".
+
+      · top is None → no hay filtro: pasa todo.
+      · conjunto    → pasa quien esté dentro (si está vacío, nadie).
+    """
+    return (top is None) or (wallet in top)
 
 
 def purgar_posiciones_muertas(conn, dias: int = 30) -> int:

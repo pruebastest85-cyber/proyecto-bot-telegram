@@ -30,6 +30,7 @@ from flask import Flask, request, jsonify
 
 import config
 from db import get_conn, get_setting, top_addresses
+from db import en_top as _en_top
 from token_check import analyze_token, format_token_block, ai_payload
 from signal_score import compute_signal_score
 
@@ -750,10 +751,14 @@ def _proc(txs: list[dict], conn):
     stars = set(lista_e)
     if not tracked:
         return
-    # Solo alertan las mejores del ranking (mismo orden que /top). Las
-    # demás ⭐ se siguen midiendo en silencio, igual que las candidatas.
-    # Conjunto vacío = no se pudo calcular → no filtramos, para no dejar
-    # el bot mudo por un fallo de consulta.
+    # Solo alertan las mejores del ranking (mismo orden y misma población
+    # que /top: desde la v3 del 26/8 el puesto es DE VERDAD el de /top).
+    # Las demás ⭐ se siguen midiendo en silencio, igual que las
+    # candidatas.
+    #   · None            = no hay filtro (top_alertas = 0, o falló la
+    #                       consulta) → no filtramos, para no dejar el bot
+    #                       mudo por un fallo de base de datos.
+    #   · conjunto vacío  = filtro calculado y no lo pasa nadie.
     top = top_addresses(conn)
     _devs_w = {w_ for w_, _m in devs}      # (Ola 16) fuera del bucle
     for tx in txs:
@@ -857,7 +862,7 @@ def _proc(txs: list[dict], conn):
         if trade["wallet"] in stars:
             try:
                 if int(float(get_setting(conn, "paper_rapido", "1") or 1)):
-                    en_top = (not top) or trade["wallet"] in top
+                    en_top = _en_top(top, trade["wallet"])
                     _accion = None      # (tipo, trade_a_usar)
                     if es_compra and en_top:
                         _accion = ("abrir", trade, "top")
@@ -1101,7 +1106,7 @@ def _proc(txs: list[dict], conn):
         # la ⭐, o tenerla pero estar fuera del top. En ambos casos la
         # operación se registra y se mide; solo no sale por el chat.
         es_star = trade["wallet"] in stars
-        en_top = (not top) or trade["wallet"] in top
+        en_top = _en_top(top, trade["wallet"])
         if not es_star or not en_top:
             _cerrar_huerfana = False
             if not es_compra:

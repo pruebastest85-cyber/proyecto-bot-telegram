@@ -99,6 +99,140 @@ def perdedora_confirmada(conn, wallet: str) -> str | None:
     return None
 
 
+# ── Creadores de mercado (26/8/2026) ─────────────────────────────────────
+# Regla del dueño: "creadores de mercado o billeteras que compran y venden
+# un token más de 5 veces no deberían tener estrella, sus estrategias no
+# son copiables".
+#
+# POR QUÉ hacía falta algo nuevo: ya existía un detector de MM en
+# `wallet_profiler` (`mm_tokens`), pero exige TRES condiciones a la vez —
+# 3+ tokens distintos, 3+ compras y 3+ ventas en cada uno, y PnL neto
+# ~0 — y encima se calcula sobre una muestra de Helius. Una billetera que
+# da 64 vueltas a UN SOLO token y encima gana dinero no cumple ninguna de
+# las tres, así que pasaba limpia. El caso real que lo destapó: 21 ⭐
+# dándole vueltas al mismo token (GASSPAS), 491 operaciones en 14 horas,
+# compra-venta-compra-venta perfectamente alternado.
+#
+# Esta comprobación usa NUESTRAS señales ya guardadas: no gasta créditos
+# de Helius ni de IA, y mide comportamiento observado, no una muestra.
+
+def _tope_mm() -> tuple:
+    try:
+        import config as _cfg
+        return (int(getattr(_cfg, "MM_VUELTAS_MAX", 5)),
+                int(getattr(_cfg, "MM_VENTANA_DIAS", 30)))
+    except Exception:
+        return (5, 30)
+
+
+def _vueltas_max(conn, dias: int, wallet: str | None = None) -> dict:
+    """{billetera: (vueltas, mint)} — el token al que MÁS vueltas le dio.
+
+    Una "vuelta" es una ALTERNANCIA real compra→venta en orden temporal:
+    comprar y después vender. La primera versión contaba
+    `min(compras, ventas)` y la auditoría (18-K) enseñó el fallo: un
+    trader normal que entra en 6 compras escalonadas y sale en 6 ventas
+    parciales daba 6 "vueltas" sin haber dado ninguna — es UNA posición
+    escalonada, comportamiento copiable. Con alternancias, ese caso vale
+    1 y el creador de mercado real (compra-venta-compra-venta…) vale lo
+    que alterna. Medido sobre la base real del 27/8: las DOS métricas
+    marcaban exactamente a las mismas 21 billeteras (33-103 alternancias
+    cada una), así que el cambio no toca a nadie hoy; solo protege al
+    trader escalonado de mañana.
+
+    El conteo se hace en Python: necesita el ORDEN de las señales, y de
+    paso evita el `MIN(a, b)` de dos argumentos que SQLite acepta pero
+    Postgres no. El orden TAMBIEN se hace en Python (auditoria 18-K,
+    ronda 2): un `ORDER BY signature` no da lo mismo en los dos motores
+    — SQLite ordena por bytes y un Postgres con colacion de idioma pone
+    'a' antes que 'B' — y dos señales del mismo segundo podian contar
+    distinto segun el motor. Ordenar la tupla en Python es identico en
+    todas partes.
+    """
+    import time as _t
+    desde = int(_t.time()) - int(dias) * 86400
+    if wallet:
+        rows = conn.execute(
+            """SELECT wallet, mint, side, ts, signature
+               FROM signals
+               WHERE ts >= ? AND wallet = ?""",
+            (desde, wallet)).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT s.wallet AS wallet, s.mint AS mint, s.side AS side,
+                      s.ts AS ts, s.signature AS signature
+               FROM signals s
+               JOIN wallets w ON w.address = s.wallet
+               WHERE s.ts >= ? AND w.is_tracked = 1""",
+            (desde,)).fetchall()
+    # Si `signals` crece a millones de filas, esto debera pasar a
+    # fetchmany por trozos (misma deuda que backup.py, ver CLAUDE.md §5).
+    # Hoy la ventana de 30 dias lo deja muy por debajo de eso.
+    rows = sorted(rows, key=lambda r: (r["wallet"], r["mint"],
+                                       r["ts"] or 0, r["signature"] or ""))
+    peor: dict = {}
+    clave = None
+    previa = None
+    vueltas = 0
+
+    def _apuntar(k, v):
+        if k is None:
+            return
+        w, m = k
+        act = peor.get(w)
+        if act is None or v > act[0]:
+            peor[w] = (v, m)
+
+    for r in rows:
+        k = (r["wallet"], r["mint"])
+        if k != clave:
+            _apuntar(clave, vueltas)
+            clave, previa, vueltas = k, None, 0
+        if previa == "compra" and r["side"] == "venta":
+            vueltas += 1
+        previa = r["side"]
+    _apuntar(clave, vueltas)
+    return peor
+
+
+def _motivo_mm(vueltas: int, mint: str | None, dias: int) -> str:
+    return (f"creadora de mercado: {vueltas} vueltas compra→venta al MISMO "
+            f"token ({(mint or '?')[:8]}…) en {dias} días; esa estrategia "
+            f"no se puede copiar")
+
+
+def creadora_de_mercado(conn, wallet: str) -> str | None:
+    """¿Le da vueltas al mismo token? Devuelve el motivo (texto) o None.
+
+    GUARDA en la re-evaluación de la IA: sin ella, la IA le devolvería la
+    ⭐ en el siguiente ciclo a quien esta regla acaba de degradar.
+    """
+    tope, dias = _tope_mm()
+    if tope <= 0:                      # regla apagada a propósito
+        return None
+    try:
+        peor = _vueltas_max(conn, dias, wallet)
+    except Exception:
+        return None                    # sin datos no se castiga a nadie
+    dato = peor.get(wallet)
+    if not dato or dato[0] <= tope:
+        return None
+    return _motivo_mm(dato[0], dato[1], dias)
+
+
+def creadoras_de_mercado(conn) -> dict:
+    """{billetera: motivo} de TODAS las ⭐, en una sola consulta.
+
+    La versión de una en una haría 197 consultas en cada depuración.
+    """
+    tope, dias = _tope_mm()
+    if tope <= 0:
+        return {}
+    peor = _vueltas_max(conn, dias)
+    return {a: _motivo_mm(v, m, dias) for a, (v, m) in peor.items()
+            if v > tope}
+
+
 def review_tracked(notify: bool = True) -> dict:
     """
     Revisa las ⭐ activas y degrada a las que sus señales medidas pierden.

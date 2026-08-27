@@ -61,7 +61,8 @@ def posicion(conn, address: str, tope: int = 200):
                         CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
                         w.wallet_score DESC,
                         COALESCE(w.pnl_total, -1e9) DESC,
-                        w.score DESC
+                        w.score DESC,
+                        w.address
                LIMIT ?""", (corte, tope)).fetchall()
         for i, r in enumerate(rows, 1):
             if r["address"] == address:

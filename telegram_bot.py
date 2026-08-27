@@ -1494,7 +1494,13 @@ _COPIA_PURA = {
     "paper_tp_pct": "999999",         # no cortar las ganadoras
     "paper_sl_pct": "999999",         # no vender en el suelo
     "paper_timeout_h": "999999",      # no cerrar por reloj
-    "paper_reentrada_h": "0",         # si la ⭐ recompra, tú también
+    # `paper_reentrada_h` YA NO esta aqui (26/8/2026): lo gobierna el mando
+    # /reentrada. Cuando este preset lo ponia a 0, un mismo token llego a
+    # abrirse 24 veces en un dia (varias ⭐ turnandose), y /copiapura on
+    # pisaba en silencio lo que el dueño acababa de fijar con /reentrada.
+    # Al quitarlo de este dict, el `off` tampoco restaura el valor viejo
+    # de fotos guardadas antes del cambio (el bucle de restauracion filtra
+    # por las claves de ESTE dict a proposito).
     "paper_max_abiertas": "50",       # no descartar señales en los picos
     "paper_parcial_min_pct": "0",     # copiar también las ventas pequeñas
     "paper_total_pct": "100",         # cerrar solo cuando ella cierra
@@ -1544,7 +1550,8 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         "ella sale.\n\n"
                         "• take-profit, stop-loss y reloj: apagados\n"
                         "• hold extra y trailing: apagados\n"
-                        "• enfriamiento por token: quitado\n"
+                        "• enfriamiento por token: NO se toca "
+                        "(se maneja con /reentrada)\n"
                         "• tope de posiciones: 50\n"
                         "• la IA ya no decide salidas\n\n"
                         "_Los rugs siguen cerrándose: esa vía no depende "
@@ -1562,10 +1569,33 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 for k, v in previo.items():
                     if k in _COPIA_PURA:
                         set_setting(conn, k, v if v is not None else "")
+                # Residuo del preset VIEJO (auditoria 18-K, ronda 2): las
+                # versiones anteriores ponian paper_reentrada_h a "0" al
+                # encender. Como la clave ya no esta en _COPIA_PURA, el
+                # bucle de arriba no la restaura, y ese 0 huerfano dejaria
+                # al mismo token reabriendose en cadena para siempre. Solo
+                # se toca si el valor actual es LITERALMENTE la cadena
+                # "0" que escribio el preset viejo: /reentrada guarda el
+                # numero como float ("0.0", "6.0"), asi que un
+                # `/reentrada 0` deliberado NO coincide y se respeta
+                # (ronda 3 de la auditoria).
+                _linea_reent = ""
+                if "paper_reentrada_h" in previo:
+                    _act = get_setting(conn, "paper_reentrada_h", None)
+                    _es_cero = (str(_act).strip() == "0")
+                    if _es_cero:
+                        _v = previo["paper_reentrada_h"]
+                        set_setting(conn, "paper_reentrada_h",
+                                    _v if _v is not None else "")
+                        _linea_reent = (
+                            "\nEl enfriamiento por token también vuelve a "
+                            f"*{_v or '24'} h* (lo había dejado a 0 una "
+                            "versión vieja de este modo; ajústalo con "
+                            "/reentrada).")
                 set_setting(conn, "copia_pura_previo", "")
                 conn.commit()
                 return ("🧬 *Copia pura apagada.* Restaurados los valores "
-                        "que había antes de encenderla.")
+                        "que había antes de encenderla." + _linea_reent)
             return "Uso: `/copiapura on` · `/copiapura off` · `/copiapura`"
         finally:
             conn.close()
@@ -1722,6 +1752,64 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
     finally:
         conn.close()
+
+
+@solo_admin
+async def cmd_reentrada(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enfriamiento por token del paper trading. /reentrada [horas]
+
+    0 = sin enfriamiento (un token puede reabrirse al instante).
+
+    Hacía falta un mando propio (26/8/2026): el valor solo se podía
+    cambiar desde `/copiapura`, que lo deja en 0, y con 0 el mismo token
+    se reabría en cadena — un caso real llegó a 24 posiciones del mismo
+    token en un día porque varias ⭐ lo compraban y vendían por turnos.
+    Escribirlo desde fuera significaría abrir la base que el proceso
+    tiene viva; se hace desde dentro, con la conexión de siempre.
+    """
+    from db import set_setting, get_setting
+    conn = get_conn()
+    try:
+        args = ctx.args or []
+        if args:
+            try:
+                h = float(args[0])
+                # NaN e inf pasarían un `h < 0` a secas.
+                if not (0 <= h <= 720):
+                    raise ValueError
+            except (TypeError, ValueError):
+                await update.message.reply_text(
+                    "Uso: /reentrada <horas> entre 0 y 720  "
+                    "(0 = sin enfriamiento; ej: /reentrada 6)")
+                return
+            set_setting(conn, "paper_reentrada_h", h)
+            txt = (f"⏳ Un token ya jugado no se vuelve a abrir hasta "
+                   f"*{h:g} h* después de cerrarse."
+                   if h else
+                   "⏳ Sin enfriamiento: un token puede reabrirse al "
+                   "instante.")
+            await update.message.reply_text(txt, parse_mode="Markdown")
+            return
+        actual = _f_setting(get_setting(conn, "paper_reentrada_h", "24"), 24.0)
+        _desc = (f"*{actual:g} h*" if actual else "*sin enfriamiento*")
+        await update.message.reply_text(
+            f"⏳ Enfriamiento por token: {_desc}.\n"
+            f"Cambiar: `/reentrada 6`  ·  `/reentrada 0`",
+            parse_mode="Markdown")
+    finally:
+        conn.close()
+
+
+def _f_setting(valor, por_defecto: float) -> float:
+    """Lee un ajuste numérico sin romperse con None, '' o basura."""
+    try:
+        v = float(valor)
+    except (TypeError, ValueError):
+        return por_defecto
+    # NaN sobrevive a cualquier comparación; se descarta explícitamente.
+    if v != v:
+        return por_defecto
+    return v
 
 
 @solo_admin
@@ -1945,6 +2033,7 @@ async def _post_init(app: Application):
             BotCommand("backtest", "Simular copiar las señales"),
             BotCommand("paper", "Paper trading simulado"),
             BotCommand("topalertas", "Cuántas billeteras pueden alertar"),
+            BotCommand("reentrada", "Horas antes de repetir un token"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -2568,6 +2657,7 @@ def main():
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("topalertas", cmd_top_alertas))
     app.add_handler(CommandHandler("copiapura", cmd_copia_pura))
+    app.add_handler(CommandHandler("reentrada", cmd_reentrada))
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))

@@ -521,6 +521,24 @@ def evaluate_tracked(conn) -> int:
             except Exception as e:
                 print(f"· guarda de rendimiento omitida: {e}")
 
+        # Guarda de CREADOR DE MERCADO (26/8, regla del dueño): darle
+        # vueltas al mismo token no es una estrategia copiable, aunque la
+        # billetera gane dinero. Va aquí, junto a las demás guardas, para
+        # que la re-evaluación de la IA no devuelva en silencio una ⭐ que
+        # `depurar_estrellas` acaba de quitar por este mismo motivo.
+        if seguir:
+            try:
+                from performance_review import creadora_de_mercado
+                _mm = creadora_de_mercado(conn, addr)
+                if _mm:
+                    seguir = 0
+                    verdict["razon"] = (
+                        f"{verdict.get('razon', '')} · ⛔ sin ⭐: "
+                        f"{_mm}")[:500]
+                    print(f"  ⛔ {addr[:8]}… no recibe ⭐: {_mm}")
+            except Exception as e:
+                print(f"· guarda de creador de mercado omitida: {e}")
+
         if seguir:
             try:
                 _tier = (_grade or {}).get("tier")
@@ -610,9 +628,10 @@ def depurar_estrellas(conn) -> dict:
     aunque incumpliera. Se veía como "hice el ciclo y siguen todas".
 
     No gasta créditos: usa lo que ya está guardado en la base.
-    Devuelve {"no_seguibles": n, "hermanas": n}.
+    Devuelve {"no_seguibles": n, "hermanas": n, "descartadas": n,
+              "creadoras_mercado": n}.
     """
-    fuera_hold, fuera_fam, fuera_grade = [], [], []
+    fuera_hold, fuera_fam, fuera_grade, fuera_mm = [], [], [], []
 
     # 0) Descartadas por el grading ya guardado en la base.
     # Va PRIMERO a propósito: si se ejecutara después del bloque de familias,
@@ -666,6 +685,29 @@ def depurar_estrellas(conn) -> dict:
     except Exception as e:
         print(f"· depuración por retención omitida: {e}")
 
+    # 1.5) Creadores de mercado: le dan vueltas al MISMO token.
+    # Va después de la retención y antes de las familias por el mismo
+    # motivo que el bloque 0: quitando primero a las que no valen, una
+    # familia elige representante entre las que sí.
+    try:
+        from performance_review import creadoras_de_mercado
+        for addr, motivo in creadoras_de_mercado(conn).items():
+            # `AND is_tracked = 1`: los bloques 0 y 1 pueden haberle
+            # quitado ya la ⭐ en esta misma pasada. Se cuenta por
+            # rowcount para no apuntar dos veces a la misma billetera.
+            cur_mm = conn.execute(
+                """UPDATE wallets
+                   SET is_tracked = 0, ai_follow = 0, grade = 'Observación',
+                       ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
+                   WHERE address = ? AND is_tracked = 1""",
+                (f" · 🔁 sin ⭐: {motivo}", addr))
+            if getattr(cur_mm, "rowcount", 1) != 0:
+                fuera_mm.append(addr)
+        if fuera_mm:
+            conn.commit()
+    except Exception as e:
+        print(f"· depuración por creadores de mercado omitida: {e}")
+
     # 2) Una sola ⭐ por familia: se queda la de mejor wallet_score.
     try:
         from wallet_funding import familia
@@ -698,9 +740,19 @@ def depurar_estrellas(conn) -> dict:
     except Exception as e:
         print(f"· depuración por familias omitida: {e}")
 
-    if fuera_hold or fuera_fam or fuera_grade:
+    if fuera_hold or fuera_fam or fuera_grade or fuera_mm:
         print(f"🧹 Depuración de ⭐: {len(fuera_hold)} no seguibles, "
               f"{len(fuera_fam)} hermanas duplicadas, "
-              f"{len(fuera_grade)} descartadas por grading")
+              f"{len(fuera_grade)} descartadas por grading, "
+              f"{len(fuera_mm)} creadoras de mercado")
+    # El conjunto operativo (alertas/copia) se refresca ya, sin esperar el
+    # TTL de 60 s: esta pasada acaba de quitar ⭐.
+    if fuera_hold or fuera_fam or fuera_grade or fuera_mm:
+        try:
+            from db import invalidar_copiables
+            invalidar_copiables()
+        except Exception:
+            pass
     return {"no_seguibles": len(fuera_hold), "hermanas": len(fuera_fam),
-            "descartadas": len(fuera_grade)}
+            "descartadas": len(fuera_grade),
+            "creadoras_mercado": len(fuera_mm)}

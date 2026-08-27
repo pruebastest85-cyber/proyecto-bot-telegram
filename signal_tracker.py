@@ -510,9 +510,12 @@ def _alert_milestone(conn, s, pct: float, price: float,
     # fuera de las mejores, se marca el escalón (solo hacia ARRIBA:
     # mult > last garantizado por el candado de arriba) y se silencia.
     try:
-        from db import top_addresses
+        from db import top_addresses, en_top
         _top = top_addresses(conn)
-        if _top and w_base and w_base not in _top:
+        # `en_top` guarda el contrato de tres estados: None = sin filtro
+        # (top_alertas = 0 o consulta fallida) y pasa todo; un conjunto
+        # vacío SÍ filtra y no lo pasa nadie.
+        if w_base and not en_top(_top, w_base):
             print(f"  🔇 x{mult} de {s['mint'][:8]}… sin tarjeta: "
                   f"la billetera está fuera del top")
             set_setting(conn, key, mult)
