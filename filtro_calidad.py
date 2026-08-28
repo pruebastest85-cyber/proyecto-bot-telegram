@@ -75,6 +75,7 @@ def _cfg() -> dict:
         "acierto_min": g("FILTRO_ACIERTO_MIN", 40.0),
         "prueba_dias": g("FILTRO_PRUEBA_DIAS", 14),
         "provisional": g("FILTRO_PROVISIONAL", 1),
+        "neto_min": g("FILTRO_NETO_MIN", 0.0),
     }
 
 
@@ -156,13 +157,24 @@ def historial(conn, wallet: str | None = None) -> dict:
     for r in rows:
         d = por.setdefault(r["wallet"],
                            {"cerradas": 0, "ganadas": 0, "tokens": 0,
-                            "holds": []})
+                            "holds": [], "neto": 0.0})
         sol_in = r["sol_in"] or 0
         sol_out = r["sol_out"] or 0
         tok_in = r["tok_in"] or 0
         tok_out = r["tok_out"] or 0
         if sol_in > 0:
             d["tokens"] += 1
+            # (18-N) El NETO de la ventana suma TODOS los mints comprados,
+            # cerrados o no: las perdidas gordas suelen vivir en bolsas
+            # que nunca se cierran y el winrate de las cerradas no las ve
+            # (caso real cazado por el dueño: 62% de acierto y -21,8 SOL).
+            # Los mints sin compra (airdrops vendidos) quedan fuera:
+            # ingreso regalado no es habilidad copiable. LIMITE conocido
+            # (auditoria 18-N): una compra-polvo de 0.001 SOL convierte
+            # el mint en "comprado" y sus ventas por transferencias SI
+            # entrarian al neto — burlarlo requiere intencion, y la
+            # puerta 3 (señales medidas en vivo) sigue detras.
+            d["neto"] += sol_out - sol_in
         if sol_in > 0 and sol_out > 0 and tok_in > 0 \
                 and 0.7 * tok_in <= tok_out <= 1.05 * tok_in:
             d["cerradas"] += 1
@@ -175,7 +187,8 @@ def historial(conn, wallet: str | None = None) -> dict:
     for w, d in por.items():
         wr = (100.0 * d["ganadas"] / d["cerradas"]) if d["cerradas"] else None
         res[w] = {"cerradas": d["cerradas"], "wr": wr,
-                  "tokens": d["tokens"], "hold_min": _mediana(d["holds"])}
+                  "tokens": d["tokens"], "hold_min": _mediana(d["holds"]),
+                  "neto": d["neto"]}
     return res
 
 
@@ -209,7 +222,8 @@ def puertas(hist: dict | None, med: dict | None) -> tuple:
     billetera (None = sin datos en esa fuente).
     """
     cfg = _cfg()
-    h = hist or {"cerradas": 0, "wr": None, "tokens": 0, "hold_min": None}
+    h = hist or {"cerradas": 0, "wr": None, "tokens": 0, "hold_min": None,
+                 "neto": 0.0}
     # Puerta 1 — historial real
     if h["cerradas"] < cfg["min_cerradas"]:
         return (False, f"historial corto: {h['cerradas']} posiciones "
@@ -222,6 +236,20 @@ def puertas(hist: dict | None, med: dict | None) -> tuple:
         _wr = "?" if h["wr"] is None else f"{h['wr']:.0f}"
         return (False, f"winrate {_wr}% en {h['cerradas']} "
                        f"cerradas (mínimo {cfg['wr_min']:.0f}%)")
+    if h.get("neto", 0.0) <= cfg["neto_min"]:
+        # (18-N) Ganar "por acierto" no basta: el neto de TODA la ventana
+        # (bolsas sin cerrar incluidas) tiene que ser positivo. Cazado
+        # por el dueño: 62% de winrate en cerradas y -21,8 SOL netos.
+        _n = h.get("neto", 0.0)
+        if _n <= 0:
+            return (False, f"pierde dinero: neto {_n:+.1f} SOL "
+                           f"en {cfg['ventana_dias']} días (las bolsas "
+                           f"sin cerrar también cuentan)")
+        # neto positivo pero por debajo del minimo que puso el dueño:
+        # decir "pierde" seria mentira.
+        return (False, f"no gana lo suficiente: neto {_n:+.1f} SOL "
+                       f"(mínimo >{cfg['neto_min']:g}) en "
+                       f"{cfg['ventana_dias']} días")
     # Puerta 2 — copiable
     if h["hold_min"] is None or h["hold_min"] < cfg["hold_min_min"]:
         _hm = "?" if h["hold_min"] is None else f"{h['hold_min']:.0f}"
@@ -358,9 +386,10 @@ def resumen(conn) -> str:
     p1 = p2 = p3 = prov = 0
     for w in est:
         h = hist.get(w) or {"cerradas": 0, "wr": None, "tokens": 0,
-                            "hold_min": None}
+                            "hold_min": None, "neto": 0.0}
         if h["cerradas"] >= cfg["min_cerradas"] \
-                and h["wr"] is not None and h["wr"] >= cfg["wr_min"]:
+                and h["wr"] is not None and h["wr"] >= cfg["wr_min"] \
+                and h.get("neto", 0.0) > cfg["neto_min"]:
             p1 += 1
             if (h["hold_min"] or 0) >= cfg["hold_min_min"] \
                     and h["tokens"] >= cfg["min_tokens"]:
@@ -381,8 +410,8 @@ def resumen(conn) -> str:
     return (f"🚪 *Filtro de tres puertas* — {estado}\n\n"
             f"⭐ actuales: {len(est)}  ·  confirmadas: {conf}\n"
             f"1️⃣ Historial (WR ≥{cfg['wr_min']:.0f}% en "
-            f"≥{cfg['min_cerradas']} cerradas / "
-            f"{cfg['ventana_dias']}d): pasan {p1}\n"
+            f"≥{cfg['min_cerradas']} cerradas / {cfg['ventana_dias']}d, "
+            f"neto >{cfg['neto_min']:g} SOL): pasan {p1}\n"
             f"2️⃣ Copiable (retención ≥{cfg['hold_min_min']:.0f} min, "
             f"≥{cfg['min_tokens']} tokens): pasan {p2}\n"
             f"{_linea3}\n\n"
@@ -433,13 +462,14 @@ def reevaluacion(conn, ejecutar: bool = False) -> dict:
     for r in est:
         w = r["address"]
         h = hist.get(w) or {"cerradas": 0, "wr": None, "tokens": 0,
-                            "hold_min": None}
+                            "hold_min": None, "neto": 0.0}
         # Solo puertas 1-2: el motivo que devuelva puertas() con las
         # medidas en None es exactamente el veredicto del HISTORIAL
         # (si llega a la puerta 3 sin medidas, en modo estricto diría
         # "en prueba" y en provisional pasaría — ambos = sobrevive).
         pasa_12 = (h["cerradas"] >= cfg["min_cerradas"]
                    and h["wr"] is not None and h["wr"] >= cfg["wr_min"]
+                   and h.get("neto", 0.0) > cfg["neto_min"]
                    and h["hold_min"] is not None
                    and h["hold_min"] >= cfg["hold_min_min"]
                    and h["tokens"] >= cfg["min_tokens"])

@@ -156,6 +156,11 @@ FILTRO_PRUEBA_DIAS = _int("FILTRO_PRUEBA_DIAS", 14)
 # confirmación si sus primeras FILTRO_MIN_MEDIDAS medidas salen malas.
 # FILTRO_PROVISIONAL=0 = modo estricto (nadie alerta sin medidas buenas).
 FILTRO_PROVISIONAL = _int("FILTRO_PROVISIONAL", 1)
+# (18-N, cazado por el dueño) La puerta 1 exige ademas GANAR de verdad:
+# neto en SOL de la ventana > FILTRO_NETO_MIN. El winrate de las cerradas
+# escondia a billeteras que ganan poquitos y palman fuerte en bolsas que
+# nunca cierran (caso real: 62% de acierto en cerradas y -21,8 SOL netos).
+FILTRO_NETO_MIN = _float("FILTRO_NETO_MIN", 0.0)
 
 # ── Base de datos ─────────────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "wallets.db")

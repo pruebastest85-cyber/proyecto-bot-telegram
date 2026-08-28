@@ -2919,6 +2919,31 @@ def prueba_filtro():
         for i in range(12):
             posicion("ANTIGUA", f"TH{i}", gana=True, hace_dias=200 + i)
 
+        # NETO_NEGATIVO (18-N, cazado por el dueño): 62% de winrate en
+        # cerradas pequeñas... y una bolsa SIN cerrar que lo hunde. El
+        # neto de la ventana manda.
+        estrella("NETO_NEGATIVO")
+        for i in range(12):
+            posicion("NETO_NEGATIVO", f"TN{i}", gana=(i < 9),
+                     hace_dias=10 + i)      # neto de cerradas: +3.0
+        op("NETO_NEGATIVO", "TNX", "compra", 25.0, ahora - 5 * 86400)
+        # vende solo el 10%: no cuenta como cerrada, pero el neto la ve
+        op("NETO_NEGATIVO", "TNX", "venta", 2.0, ahora - 4 * 86400,
+           tokens=10)
+
+        # AIRDROP_MAQUILLA: trading neto -2.5, pero vendio airdrops por
+        # +10. Los mints sin compra NO maquillan el neto.
+        estrella("AIRDROP_MAQUILLA")
+        for i in range(12):
+            posicion("AIRDROP_MAQUILLA", f"TO{i}", gana=(i < 9),
+                     hace_dias=10 + i)
+        op("AIRDROP_MAQUILLA", "TOX", "compra", 6.0, ahora - 5 * 86400)
+        op("AIRDROP_MAQUILLA", "TOX", "venta", 0.5, ahora - 4 * 86400,
+           tokens=10)          # trading: +3.0 - 5.5 = -2.5
+        for i in range(4):     # airdrops vendidos: +10 SOL regalados
+            op("AIRDROP_MAQUILLA", f"TOA{i}", "venta", 2.5,
+               ahora - 3 * 86400 + i)
+
         # MEDIDAS_MALAS: historial perfecto pero sus señales medidas
         # pierden (acierto 17%, mediana negativa) -> puerta 3.
         estrella("MEDIDAS_MALAS")
@@ -2936,7 +2961,8 @@ def prueba_filtro():
             "COMPLETA": True, "SIN_MEDIDAS": False, "WR_BAJO": False,
             "POCAS": False, "SCALPER": False, "CONCENTRADA": False,
             "VENTA_PARCIAL": False, "ANTIGUA": False,
-            "MEDIDAS_MALAS": False,
+            "MEDIDAS_MALAS": False, "NETO_NEGATIVO": False,
+            "AIRDROP_MAQUILLA": False,
         }
         for w, esperado in casos.items():
             ok, motivo = fc.puertas(hist.get(w), med.get(w))
@@ -3015,6 +3041,25 @@ def prueba_filtro():
                   "winrate" in fc.puertas(hist.get("WR_BAJO"), None)[1])
         comprobar("el motivo de SCALPER es la retencion",
                   "retención" in fc.puertas(hist.get("SCALPER"), None)[1])
+        comprobar("NETO_NEGATIVO cae por perder dinero (la bolsa sin "
+                  "cerrar cuenta)",
+                  "pierde dinero" in fc.puertas(hist.get("NETO_NEGATIVO"),
+                                                None)[1],
+                  fc.puertas(hist.get("NETO_NEGATIVO"), None)[1])
+        comprobar("los airdrops vendidos NO maquillan el neto",
+                  "pierde dinero" in fc.puertas(
+                      hist.get("AIRDROP_MAQUILLA"), None)[1],
+                  fc.puertas(hist.get("AIRDROP_MAQUILLA"), None)[1])
+        # Con un minimo de neto SUBIDO, una que gana poco no "pierde":
+        # el motivo tiene que decir la verdad (ronda de auditoria 18-N).
+        _neto_previo = cfg.FILTRO_NETO_MIN
+        cfg.FILTRO_NETO_MIN = 10.0
+        _m_poco = fc.puertas(hist.get("COMPLETA"), None)[1]
+        comprobar("con el minimo subido, ganar poco dice 'no gana lo "
+                  "suficiente', no 'pierde'",
+                  "no gana lo suficiente" in _m_poco
+                  and "pierde" not in _m_poco, _m_poco)
+        cfg.FILTRO_NETO_MIN = _neto_previo
         # Las posiciones cerradas se cuentan POR TOKEN, asi que con el
         # minimo por defecto (10 cerradas) la puerta de diversificacion
         # solo puede hablar si el dueño baja ese minimo: 10 tokens
@@ -3134,6 +3179,16 @@ def prueba_filtro():
         comprobar("el resumen de /filtro menciona las tres puertas",
                   "1️⃣" in txt and "2️⃣" in txt and "3️⃣" in txt,
                   txt[:80])
+        # El CONTADOR de la puerta 1 tambien se vigila (auditoria 18-N):
+        # era el unico de los cuatro sitios con la condicion del neto sin
+        # prueba. Con las sembradas de este bloque, pasan cerradas+WR+neto
+        # exactamente 5: COMPLETA, SIN_MEDIDAS, SCALPER, MEDIDAS_MALAS y
+        # TRANSFERIDA (NETO_NEGATIVO y AIRDROP_MAQUILLA caen por el neto;
+        # si cambias las sembradas, recalcula este numero a mano).
+        _linea1 = [l for l in txt.split("\n") if l.startswith("1️⃣")][0]
+        comprobar("el contador de la puerta 1 descuenta a las del neto "
+                  "negativo (pasan 5)",
+                  "pasan 5" in _linea1, _linea1)
 
         # -- el consenso del camino caliente exige confirmada --
         import inspect, realtime
@@ -3405,16 +3460,29 @@ def prueba_reembudo():
         estrella("FALLA_POCAS")
         for i in range(3):
             posicion("FALLA_POCAS", f"RE{i}", gana=True, hace_dias=10 + i)
+        # FALLA_NETO (18-N): winrate alto en cerradas pero una bolsa sin
+        # cerrar la deja en negativo -> el corte del reembudo la tira.
+        estrella("FALLA_NETO")
+        for i in range(12):
+            posicion("FALLA_NETO", f"RN{i}", gana=(i < 9),
+                     hace_dias=10 + i)
+        op("FALLA_NETO", "RNX", "compra", 25.0, ahora - 5 * 86400)
+        op("FALLA_NETO", "RNX", "venta", 2.0, ahora - 4 * 86400,
+           tokens=10)
         conn.commit()
 
         # -- ensayo: cuenta bien y NO toca nada --
         res = fc.reevaluacion(conn, ejecutar=False)
-        comprobar("ensayo: 3 caerian y 2 sobreviven",
-                  res["caen"] == 3 and res["sobreviven"] == 2
+        comprobar("ensayo: 4 caerian y 2 sobreviven",
+                  res["caen"] == 4 and res["sobreviven"] == 2
                   and not res["ejecutado"], str(res)[:120])
+        _mot_neto = {w: m for w, _a, m in res["detalle_caen"]}.get(
+            "FALLA_NETO", "")
+        comprobar("la del neto negativo cae por 'pierde dinero'",
+                  "pierde dinero" in _mot_neto, _mot_neto)
         n_est = conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
                              "is_tracked=1").fetchone()["c"]
-        comprobar("el ensayo no quita ninguna estrella", n_est == 5,
+        comprobar("el ensayo no quita ninguna estrella", n_est == 6,
                   f"quedan {n_est}")
         comprobar("el ensayo lista a las supervivientes",
                   {w for w, _a in res["detalle_viven"]}
@@ -3433,9 +3501,10 @@ def prueba_reembudo():
         f = {r["address"]: r for r in conn.execute(
             "SELECT address, is_tracked, confirmada, ai_reason "
             "FROM wallets").fetchall()}
-        comprobar("las 3 que no pasan el historial pierden la estrella",
+        comprobar("las 4 que no pasan el historial pierden la estrella",
                   all(f[w]["is_tracked"] == 0 for w in
-                      ("FALLA_WR", "FALLA_HOLD", "FALLA_POCAS")),
+                      ("FALLA_WR", "FALLA_HOLD", "FALLA_POCAS",
+                       "FALLA_NETO")),
                   str({w: f[w]["is_tracked"] for w in motivos}))
         comprobar("y el motivo queda al principio de la ficha",
                   (f["FALLA_WR"]["ai_reason"] or "")
