@@ -40,6 +40,11 @@ aviso_fallo_commit = None
 # Momento a partir del cual se puede volver a intentar una actualizacion
 # que fallo. Es una MARCA DE TIEMPO, no un sleep: dormir aqui dejaria al
 # bot apagado, porque para actualizar hay que pararlo primero.
+# (Ola 18-M) Todos los intervalos usan el reloj MONOTONICO: la hora de
+# pared (time.time) salta en Windows con la sincronizacion NTP o un
+# cambio manual — un salto hacia atras convertia "vivio 3 s" en "vivio
+# horas" (reseteando el contador anti-bucle) y un salto hacia delante
+# aplazaba la proxima actualizacion indefinidamente.
 proximo_intento = 0.0
 
 
@@ -210,12 +215,12 @@ def main():
     muertes_seguidas = 0
     while True:
         proc = lanzar()
-        nacio = time.time()
-        ultimo_chequeo = time.time()
+        nacio = time.monotonic()
+        ultimo_chequeo = time.monotonic()
         while True:
             time.sleep(10)
             if proc.poll() is not None:          # el bot murio solo
-                vida = time.time() - nacio
+                vida = time.monotonic() - nacio
                 # Backoff exponencial (auditoria 19/8): un commit que
                 # rompe el arranque producia un bucle infinito de ~25 s
                 # sin aviso — cada vuelta re-corria migraciones y
@@ -243,13 +248,13 @@ def main():
                 # volvia a intentarla —fetch + reset + rev-parse, hasta
                 # 90 s de espera cada uno— retrasando el relanzamiento sin
                 # ninguna posibilidad de exito.
-                if time.time() >= proximo_intento and hay_actualizacion():
+                if time.monotonic() >= proximo_intento and hay_actualizacion():
                     if not actualizar():
-                        proximo_intento = time.time() + ESPERA_FALLO_S
+                        proximo_intento = time.monotonic() + ESPERA_FALLO_S
                 break
-            if time.time() - ultimo_chequeo >= CADA_S:
-                ultimo_chequeo = time.time()
-                if time.time() < proximo_intento:
+            if time.monotonic() - ultimo_chequeo >= CADA_S:
+                ultimo_chequeo = time.monotonic()
+                if time.monotonic() < proximo_intento:
                     continue          # la ultima actualizacion fallo hace poco
                 if hay_actualizacion():
                     # PRIMERO parar, DESPUES tocar archivos (19/8): antes
@@ -276,7 +281,7 @@ def main():
                         # proximo intento de actualizar, no el arranque:
                         # dormir aqui lo dejaria muerto media hora, sin
                         # Telegram, sin webhook y sin trabajos.
-                        proximo_intento = time.time() + ESPERA_FALLO_S
+                        proximo_intento = time.monotonic() + ESPERA_FALLO_S
                         print(f"🔄 Relanzo el bot con el codigo anterior; "
                               f"no vuelvo a intentar la actualizacion "
                               f"hasta dentro de {ESPERA_FALLO_S // 60} min")

@@ -689,9 +689,21 @@ def track_outcomes() -> int:
     2) Vigila el precio de las señales recientes (<48h) y avisa cuando
        el token alcanza un nuevo múltiplo (x2, x3, x4…).
     Pensado para correr como job periódico (cada ~15 min).
+
+    (Ola 18-M) La conexión va en try/finally: antes el `conn.close()`
+    vivía al final del cuerpo y cualquier excepción a mitad de pasada la
+    dejaba abierta — con SQLite en WAL eso retiene el candado de
+    escritura y castiga a los demás hilos hasta que el recolector pase.
     """
-    now = time.time()
     conn = get_conn()
+    try:
+        return _track_outcomes(conn)
+    finally:
+        conn.close()
+
+
+def _track_outcomes(conn) -> int:
+    now = time.time()
     # 1) Señales PENDIENTES de medicion, solo dentro de su ventana valida:
     #    la "1h" se mide entre 1h y 3h; la "24h" entre 24h y 30h. Antes una
     #    medicion atrasada (backlog, caida) se guardaba con la etiqueta
@@ -904,7 +916,6 @@ def track_outcomes() -> int:
         conn.commit()
     _check_streaks(conn)
     _auto_threshold(conn)
-    conn.close()
     if updated:
         print(f"📈 Track record: {updated} mediciones de señales actualizadas")
     return updated

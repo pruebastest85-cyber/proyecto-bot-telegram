@@ -163,6 +163,22 @@ MIN_SIGNAL_SOL_VENTA = 0.05
 CONSENSUS_WINDOW_MIN = 45
 
 
+def _sym_md(s) -> str:
+    """Símbolo de token apto para Markdown de Telegram.
+
+    (Ola 18-M) 439 tokens medidos llevan `*`, `_`, `[` o backtick en el
+    símbolo. `tg_send` ya reintenta en texto plano si el Markdown
+    revienta, así que la alerta no se pierde — pero llega SIN formato
+    entero por culpa de un carácter del símbolo. Mejor sanear en origen,
+    igual que hacen paper_trading y signal_tracker desde la 18-E.
+    """
+    txt = str(s or "?")
+    for c, r in (("*", ""), ("_", " "), ("`", ""), ("[", "("),
+                 ("]", ")")):
+        txt = txt.replace(c, r)
+    return txt.strip() or "?"
+
+
 def tg_send(text: str, buttons: list | None = None) -> bool:
     """Envía mensaje al admin vía HTTP API (seguro desde cualquier hilo).
     buttons: lista de filas [[(texto, callback_data), …], …].
@@ -1318,7 +1334,7 @@ def _proc(txs: list[dict], conn):
         pat_txt = f"\n{patron_line}" if patron_line else ""
 
         # Bloque de posición: tokens obtenidos/vendidos, total y profit
-        sym = t.get('symbol') or trade['mint'][:6]
+        sym = _sym_md(t.get('symbol') or trade['mint'][:6])
         if es_compra:
             linea_sol = (f"💵 {verbo}: *{_money(trade['sol'], su)}*"
                          f"  ·  {trade['sol']:.2f} SOL")
@@ -1359,7 +1375,7 @@ def _proc(txs: list[dict], conn):
         _entregada = tg_send(
             f"{side_icon} *{side_txt}* de billetera ⭐{cons_txt}\n"
             f"{div}\n"
-            f"💎 *{t['symbol']}*\n`{trade['mint']}`\n\n"
+            f"💎 *{sym}*\n`{trade['mint']}`\n\n"
             f"🎯 Señal  {bar}  *{score_sig}/100*\n\n"
             f"👤 *{alias}*"
             + (f"  ·  🏆 #{_postop} del top" if _postop else "")

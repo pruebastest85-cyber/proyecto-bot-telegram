@@ -572,12 +572,30 @@ _INDICES_TARDIOS = (
 
 
 def _crear_indices_tardios(conn):
-    """Indices que dependen de columnas añadidas por migracion."""
+    """Indices que dependen de columnas añadidas por migracion.
+
+    (Ola 18-M) En Postgres, CREATE INDEX espera un candado de tabla: si
+    otro proceso tiene una transaccion larga abierta, el arranque entero
+    se quedaria colgado esperando sin limite. Con lock_timeout el intento
+    aborta a los 5 s, el indice "se omite" (como ya hace con cualquier
+    otro error) y se creara en el siguiente arranque. SQLite no tiene
+    este ajuste: alli manda busy_timeout, ya puesto en la preparacion.
+    """
+    if USE_PG:
+        try:
+            conn.execute("SET lock_timeout = '5s'")
+        except Exception:
+            pass
     for sql in _INDICES_TARDIOS:
         try:
             conn.execute(sql)
         except Exception as e:
             print(f"· Índice omitido ({str(e)[:80]})")
+    if USE_PG:
+        try:
+            conn.execute("SET lock_timeout = DEFAULT")
+        except Exception:
+            pass
     try:
         conn.commit()
     except Exception:

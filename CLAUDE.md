@@ -22,7 +22,7 @@ datos. Anota qué habría pasado si copiaras las señales. Nadie compra nada.
 | Si algo falla | Consecuencia real |
 |---|---|
 | Un cálculo mal | Un número raro en un mensaje de Telegram |
-| Una excepción sin capturar | El bot se reinicia en Railway |
+| Una excepción sin capturar | El supervisor del PC reinicia el bot |
 | Un despliegue malo | Se revierte y ya está |
 | **Borrar `appearances` o `signals`** | **Se pierde el histórico, que no se recupera** |
 
@@ -53,27 +53,41 @@ mensajes a Telegram.
 ## 2. Dónde vive
 
 - **Repositorio:** https://github.com/pruebastest85-cyber/proyecto-bot-telegram
-- **Producción:** Railway, proyecto `ravishing-youthfulness`, servicio `worker`
-  - `Procfile`: `python migrate_to_pg.py && python telegram_bot.py`
-  - Base: servicio **Postgres** aparte (con `DATABASE_URL`)
-  - Región Southeast Asia · Python 3.13 · 1 réplica
-- **Copia local:** `C:\Users\black\OpenHandsTest\project\bot\`
-  - ⚠️ **El `.git` de esa carpeta está VACÍO** — no es un clon de verdad.
-    No tiene remoto ni `HEAD`. Para subir hay que clonar el repo aparte,
-    o usar la subida web de GitHub.
-- 60 archivos `.py`, ~14.200 líneas. Sin tests formales; la red de
-  seguridad es `auditoria.py`.
+- **PRODUCCIÓN (desde el 26/8/2026): el PC del dueño.**
+  `C:\Users\black\wallet-edge-local` — clon real del repo, **SQLite**
+  (`DB_PATH` en `bot_local.env`), bajo `supervisor.py` que hace
+  auto-deploy desde GitHub cada 5 min (git manda: las ediciones locales
+  se pisan solas). IA local Qwen vía LM Studio; nube de respaldo.
+  - ⚠️ El PC descarga con **CRLF**: su `git status` sale siempre "sucio"
+    y no significa nada. Comparar con `git diff --ignore-cr-at-eol` o
+    hashes normalizados a LF.
+  - `AUTO_CYCLE_HOURS=2` en su env (el default del código es 6).
+- **Railway ya NO es producción.** El webhook de Helius que apuntaba
+  allí lo desactivó Helius el 26/8 por 99,2% de fallos. Sin `PUBLIC_URL`
+  en el PC, **LaserStream es la ÚNICA vía de ingesta**. Aun así, TODO SQL
+  nuevo debe seguir funcionando en SQLite Y Postgres.
+- **Subidas:** clonar el repo aparte (o subida web de GitHub). Nunca
+  editar la carpeta del PC directamente: el supervisor la pisa.
+- ~72 archivos `.py`. La red de seguridad son `auditoria.py` **y la
+  suite `pruebas_ola18h.py` (300+ pruebas), que vive DENTRO del repo**
+  porque los entornos de trabajo efímeros ya la perdieron dos veces.
 
 ### Antes de subir nada
 
 ```bash
 python -m py_compile <archivos tocados>
-python auditoria.py          # debe decir "Sin hallazgos"
+python -m pyflakes <archivos tocados>
+python auditoria.py                      # debe decir "Sin hallazgos"
+python pruebas_ola18h.py                 # todas verdes (PRUEBAS_ESTRES_S=1 la acorta)
 ```
 
 `auditoria.py` comprueba el SQL contra el esquema real, los placeholders
 frente a los parámetros, y los campos que se leen fuera de su `SELECT`.
-Ha cazado errores de verdad. **Pásalo siempre.**
+Ha cazado errores de verdad. **Pásalo siempre.** Y el método que ha
+funcionado 13 olas seguidas: **mutación** (romper cada arreglo a mano y
+comprobar que la suite lo caza) + **auditoría independiente repetida
+hasta que no encuentre nada** + clon fresco byte a byte tras subir +
+confirmar que el PC lo recogió y el bot sigue escribiendo señales.
 
 ---
 
@@ -86,13 +100,15 @@ Ha cazado errores de verdad. **Pásalo siempre.**
 - **Migraciones:** columnas nuevas se añaden con `ALTER TABLE ... ADD COLUMN`
   idempotente al arrancar, en los dos motores. **No hay que tocar Railway
   a mano** para añadir una columna.
-- **Entrada de datos:** webhook de Helius (`POST /helius`, Flask) y
-  LaserStream como respaldo.
+- **Entrada de datos:** **LaserStream** (única vía en el PC). El
+  servidor Flask con `POST /helius` escucha SIEMPRE (verás el puerto
+  abierto también en el PC), pero sin `PUBLIC_URL` Helius no registra
+  el webhook: por ahí no entra nada.
 - **Trabajos periódicos** (`telegram_bot.py`, final del archivo):
 
 | Trabajo | Cada |
 |---|---|
-| `auto_cycle` | 6 h (`AUTO_CYCLE_HOURS`) |
+| `auto_cycle` | 6 h por defecto (`AUTO_CYCLE_HOURS`; **2 h en el PC**) |
 | `track_outcomes` | 15 min |
 | `paper_trading` | 15 min |
 | `predictions_eval` | **10 min** |
@@ -124,7 +140,7 @@ para que se abra.
 
 ---
 
-## 5. El problema de memoria (agosto 2026)
+## 5. El problema de memoria (agosto 2026 — era de Railway; el patrón sigue en el código)
 
 **Síntoma medido:** el servicio muere por `Out of memory` (límite 8 GB). La
 memoria sube sostenida hasta ~7,5 GB, Railway lo mata, reinicia sobre 2 GB y
@@ -168,13 +184,38 @@ descarta `_weight`, o sea que no se pierde nada que se use).
 
 ---
 
-## 6. Cómo trabajar aquí
+## 6. El filtro de calidad y los mandos del dueño (olas 18-K/18-L, 27/8)
+
+- **La estrella se GANA con tres puertas** (`filtro_calidad.py`):
+  historial real (WR ≥60% en ≥10 posiciones cerradas/90d), estrategia
+  copiable (retención ≥30 min, ≥8 tokens), y confirmación con señales
+  medidas por el propio bot. `wallets.confirmada` = fase: solo las
+  confirmadas alertan y se copian; las demás EN PRUEBA se miden en
+  silencio y caen a los 14 días sin operar. Umbrales por env
+  (`FILTRO_*`); `FILTRO_TRES_PUERTAS=0` lo apaga entero;
+  `FILTRO_PROVISIONAL=1` (elegido por el dueño) confirma ya a quien
+  pasa historial+copiabilidad mientras junta sus 5 primeras medidas.
+- **Creadores de mercado** (>5 alternancias compra→venta al MISMO token
+  en 30 días) pierden la estrella: `MM_VUELTAS_MAX` (0 apaga).
+- **El "top N" es POSICIONAL sobre /top** — misma consulta y población
+  en `top_wallets`, `_operativas` y `wallet_ident.posicion` (espejos
+  obligatorios; las confirmadas ordenan primero). `top_addresses` tiene
+  contrato de TRES estados: None = sin filtro / set vacío = nadie
+  alerta. Consumidores SIEMPRE vía `db.en_top`.
+- **Mandos**: `/filtro` (las puertas y quién las pasa), `/topalertas N`,
+  `/reentrada H` (enfriamiento por token del paper; `/copiapura` ya no
+  lo toca), `/copiapura on|off`, `/nota`.
+- Regla del dueño, textual: **"quiero calidad no cantidad"** y **"no
+  supongas nunca nada, siempre busca la evidencia"** — medir contra la
+  base real ANTES de leer el código, y nunca proponer sin datos.
+
+## 7. Cómo trabajar aquí
 
 - **Explica cada decisión técnica en lenguaje sencillo.** El usuario no
   programa a nivel avanzado.
 - **No inventes el contenido de archivos que no hayas leído.**
-- **No supongas cifras ni estados:** verifica con `git log`, con la suite,
-  o mirando Railway.
+- **No supongas cifras ni estados:** verifica con `git log`, con la
+  suite, o midiendo contra la base real del PC.
 - **Nada de `git add` / `commit` / `push` sin autorización explícita en la
   sesión actual.**
 - Cambios pequeños y verificables, de uno en uno.

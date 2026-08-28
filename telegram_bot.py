@@ -1755,6 +1755,70 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_reembudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Re-evalúa TODAS las ⭐ con el embudo vigente, de un solo golpe.
+
+    /reembudo      → ensayo: cuántas caerían y cuántas sobreviven.
+    /reembudo si   → lo ejecuta de verdad (primero pasa la depuración
+                     completa: grading, retención, creadores de mercado,
+                     familias — y después el corte por historial).
+    Pedido del dueño (28/8): al cambiar el embudo, descartar de una vez
+    lo que no lo pasa en vez de esperar semanas de retiros por goteo.
+    Reversible: las descartadas quedan como candidatas y el embudo puede
+    re-promoverlas si su historial mejora.
+    """
+    from filtro_calidad import reevaluacion
+    ejecutar = bool(ctx.args and ctx.args[0].strip().lower() in
+                    ("si", "sí", "yes"))
+
+    def _trabajo() -> str:
+        conn = get_conn()
+        try:
+            if ejecutar:
+                # La depuración completa primero: así el corte por
+                # historial actúa sobre quien sobrevive a los filtros
+                # que ya existen (MM, grading, retención, familias).
+                try:
+                    from ai_analyst import depurar_estrellas
+                    depurar_estrellas(conn)
+                except Exception as e:
+                    print(f"· depuración previa omitida: {e}")
+            res = reevaluacion(conn, ejecutar=ejecutar)
+            if res.get("error"):
+                return f"⚠️ {res['error']}"
+            if not ejecutar:
+                from paper_trading import _md as _md_pt
+                _v = "\n".join(
+                    f"  · {_md_pt(a) if a else w[:8]}"
+                    for w, a in res["detalle_viven"])
+                _mas = res["sobreviven"] - len(res["detalle_viven"])
+                if _mas > 0:
+                    _v += f"\n  · … y {_mas} más"
+                return (f"🧪 *Ensayo de re-evaluación del embudo*\n\n"
+                        f"⭐ actuales: {res['total']}\n"
+                        f"🧹 caerían: *{res['caen']}* (historial que no "
+                        f"pasa las puertas 1-2)\n"
+                        f"✅ sobrevivirían: *{res['sobreviven']}*\n"
+                        + (f"\n{_v}\n" if _v else "")
+                        + "\nEjecutar de verdad: `/reembudo si`\n"
+                        "_Las descartadas vuelven a ser candidatas "
+                        "normales; nada es irreversible._")
+            # El estado FINAL (tras clasificar): la depuracion previa y
+            # la regla de inactividad tambien pudieron quitar estrellas,
+            # asi que se informa lo que QUEDO en la base, no lo prometido.
+            return (f"🧹 *Re-evaluación del embudo EJECUTADA*\n\n"
+                    f"Descartadas por el corte: *{res['caen']}*\n"
+                    f"⭐ que quedan: *{res.get('quedan', '?')}*  ·  "
+                    f"confirmadas: *{res.get('confirmadas', '?')}*\n"
+                    f"El detalle de cada una, en /filtro y en su ficha.")
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
 async def cmd_filtro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Estado del filtro de tres puertas: umbrales y quién los pasa hoy."""
     from filtro_calidad import resumen
@@ -2051,6 +2115,7 @@ async def _post_init(app: Application):
             BotCommand("topalertas", "Cuántas billeteras pueden alertar"),
             BotCommand("reentrada", "Horas antes de repetir un token"),
             BotCommand("filtro", "Las tres puertas de la estrella"),
+            BotCommand("reembudo", "Re-evaluar TODAS con el embudo"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -2676,6 +2741,7 @@ def main():
     app.add_handler(CommandHandler("copiapura", cmd_copia_pura))
     app.add_handler(CommandHandler("reentrada", cmd_reentrada))
     app.add_handler(CommandHandler("filtro", cmd_filtro))
+    app.add_handler(CommandHandler("reembudo", cmd_reembudo))
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))
@@ -2691,7 +2757,17 @@ def main():
     try:
         from laserstream import start as _ls_start
         if _ls_start():
-            print("📡 LaserStream activo (webhook sigue como respaldo)")
+            # (Ola 18-M) Decir la verdad segun el entorno: en el PC no
+            # hay PUBLIC_URL, el webhook esta muerto por diseño y
+            # LaserStream es la UNICA via de ingesta. El mensaje viejo
+            # presentaba el webhook como respaldo vivo — mentira alli,
+            # y ya confundio un diagnostico.
+            if os.getenv("PUBLIC_URL", "").strip():
+                print("📡 LaserStream activo (webhook de respaldo "
+                      "configurado)")
+            else:
+                print("📡 LaserStream activo — UNICA via de ingesta "
+                      "(sin PUBLIC_URL no hay webhook de respaldo)")
     except Exception as e:
         print(f"· LaserStream no arrancó: {e}")
 

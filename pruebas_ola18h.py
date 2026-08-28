@@ -18,6 +18,11 @@ import types
 
 _TMP = tempfile.mkdtemp(prefix="ola18h_")
 os.environ["DB_PATH"] = os.path.join(_TMP, "pruebas.db")
+# GUARDIA (18-M): la suite hace DELETE FROM wallets/signals/trades. Con
+# DATABASE_URL puesta, db.py hablaria con ese Postgres y los borrados
+# irian contra una base REAL. Se quita SIEMPRE: las pruebas son de
+# SQLite temporal, sin excepciones.
+os.environ.pop("DATABASE_URL", None)
 os.environ.setdefault("HELIUS_API_KEY", "clave-de-prueba")
 os.environ.setdefault("TELEGRAM_TOKEN", "0:token-de-prueba")
 os.environ.setdefault("TELEGRAM_CHAT_ID", "1")
@@ -2635,6 +2640,11 @@ def prueba_creador_mercado():
                   and pv.creadoras_de_mercado(conn) == {})
         cfg.MM_VUELTAS_MAX = tope_previo
 
+        # Sin red: `familia` llama a Helius de verdad y la cabecera de
+        # la suite promete "no necesitan red".
+        import wallet_funding as _wf
+        _familia_real = _wf.familia
+        _wf.familia = lambda a: []
         # Y la depuracion le quita la estrella de verdad. MM6 entra
         # CONFIRMADA para comprobar que la democion tambien limpia la
         # fase: sin eso, una re-promocion futura alertaria al instante
@@ -2670,6 +2680,7 @@ def prueba_creador_mercado():
             "SELECT is_tracked FROM wallets WHERE address='JUSTO5'"
         ).fetchone()
         comprobar("a la de 5 vueltas no la toca", intacta["is_tracked"] == 1)
+        _wf.familia = _familia_real
     finally:
         cfg.MM_VUELTAS_MAX = tope_previo
         conn.close()
@@ -3233,6 +3244,327 @@ def prueba_filtro():
         conn.close()
 
 
+# ---------------------------------------------------------------------
+# OLA 18-M - estabilidad: seis grietas pequeñas, cerradas.
+# ---------------------------------------------------------------------
+def prueba_18m():
+    bloque("18-M - estabilidad")
+    import io as _io
+    import inspect
+    import realtime
+    import signal_tracker as st
+    import db as _dbm
+
+    # 1) simbolo saneado para la tarjeta
+    comprobar("_sym_md limpia * _ ` [ ]",
+              realtime._sym_md("A*B_C`D[E]") == "AB CD(E)",
+              repr(realtime._sym_md("A*B_C`D[E]")))
+    comprobar("_sym_md con None devuelve ?",
+              realtime._sym_md(None) == "?")
+    comprobar("_sym_md con solo basura devuelve ?",
+              realtime._sym_md("*`*") == "?",
+              repr(realtime._sym_md("*`*")))
+    comprobar("_sym_md deja en paz un simbolo normal",
+              realtime._sym_md("BONK") == "BONK")
+    fuente_proc = inspect.getsource(realtime._proc)
+    comprobar("la tarjeta usa el simbolo SANEADO (sym), no el crudo",
+              "💎 *{sym}*" in fuente_proc,
+              "la linea de la tarjeta no usa {sym}")
+
+    # 2) track_outcomes cierra la conexion AUNQUE la pasada reviente
+    real_inner = st._track_outcomes
+    conexiones = []
+    real_get = st.get_conn
+
+    def _get_espia():
+        c = real_get()
+        conexiones.append(c)
+        return c
+
+    def _revienta(conn):
+        raise RuntimeError("pasada rota a proposito")
+    st.get_conn = _get_espia
+    st._track_outcomes = _revienta
+    try:
+        try:
+            st.track_outcomes()
+            exploto = False
+        except RuntimeError:
+            exploto = True
+        cerrada = False
+        if conexiones:
+            try:
+                conexiones[0].execute("SELECT 1")
+            except Exception:
+                cerrada = True
+        comprobar("una pasada rota propaga el error (no lo esconde)",
+                  exploto)
+        comprobar("y la conexion queda CERRADA igualmente",
+                  cerrada, "la conexion seguia abierta")
+    finally:
+        st._track_outcomes = real_inner
+        st.get_conn = real_get
+
+    # 3) el arranque dice la verdad sobre el webhook segun PUBLIC_URL
+    _f_tg = _io.open("telegram_bot.py", encoding="utf-8").read()
+    comprobar("el arranque distingue con y sin PUBLIC_URL",
+              "sin PUBLIC_URL no hay webhook" in _f_tg
+              and _f_tg.count('print("📡 LaserStream activo') == 2,
+              f"ramas: {_f_tg.count(chr(39)+chr(34)+'LaserStream')}")
+    comprobar("el mensaje viejo (mentira en el PC) ya no existe",
+              "webhook sigue como respaldo" not in _f_tg)
+
+    # 4) el supervisor usa el reloj monotonico, no la hora de pared
+    _f_sup = _io.open("supervisor.py", encoding="utf-8").read()
+    comprobar("supervisor sin time.time() (solo monotonico)",
+              "time.time()" not in _f_sup
+              and _f_sup.count("time.monotonic()") >= 8,
+              f"time(): {_f_sup.count('time.time()')} · "
+              f"monotonic: {_f_sup.count('time.monotonic()')}")
+
+    # 5) lock_timeout en los indices tardios (solo Postgres)
+    _f_idx = inspect.getsource(_dbm._crear_indices_tardios)
+    comprobar("los indices tardios ponen lock_timeout en Postgres",
+              "lock_timeout = '5s'" in _f_idx
+              and "lock_timeout = DEFAULT" in _f_idx
+              and "USE_PG" in _f_idx,
+              "falta el SET '5s', el DEFAULT o la guarda USE_PG")
+
+    # 6) el alias va saneado en los dos mensajes del paper
+    _f_pt = _io.open("paper_trading.py", encoding="utf-8").read()
+    comprobar("el paper sanea el alias en 'Copiando a' y en la venta "
+              "parcial",
+              _f_pt.count("_md(_nom)") >= 2,
+              f"_md(_nom) aparece {_f_pt.count('_md(_nom)')} veces")
+
+
+# ---------------------------------------------------------------------
+# OLA 18-M - /reembudo: re-evaluar TODAS con el embudo, de un golpe.
+# ---------------------------------------------------------------------
+def prueba_reembudo():
+    bloque("18-M - /reembudo re-evalua todas de un golpe")
+    import asyncio as _aio
+    import time as _t
+    import config as cfg
+    import filtro_calidad as fc
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    act_previo = cfg.FILTRO_TRES_PUERTAS
+    prov_previo = cfg.FILTRO_PROVISIONAL
+    cfg.FILTRO_TRES_PUERTAS = 1
+    cfg.FILTRO_PROVISIONAL = 1
+    try:
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+
+        def op(w, m, side, sol, ts, tokens=100):
+            conn.execute(
+                "INSERT INTO trades (wallet, signature, mint, side, sol, "
+                "tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                (w, f"{w}{m}{side}{ts}{sol}", m, side, sol, tokens, ts))
+
+        def posicion(w, m, gana, hold_min=60, hace_dias=10):
+            t0 = ahora - hace_dias * 86400
+            op(w, m, "compra", 1.0, t0)
+            op(w, m, "venta", 1.5 if gana else 0.5,
+               t0 + int(hold_min * 60))
+
+        def estrella(w):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "confirmada, grade) VALUES (?,1,0,0,'Seguimiento')", (w,))
+
+        # PASA_TODO: historial impecable + 6 medidas buenas -> confirmada
+        estrella("PASA_TODO")
+        for i in range(12):
+            posicion("PASA_TODO", f"RA{i}", gana=(i < 9), hace_dias=10 + i)
+        for i in range(6):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?,?,?,1,?,'compra',?)",
+                (f"rs{i}", "PASA_TODO", f"RM{i}", ahora - 3600 - i,
+                 50 if i < 4 else -50))
+        # PASA_12: historial impecable sin medidas -> provisional
+        estrella("PASA_12")
+        for i in range(12):
+            posicion("PASA_12", f"RB{i}", gana=(i < 9), hace_dias=10 + i)
+        # FALLA_WR / FALLA_HOLD / FALLA_POCAS: no pasan el historial
+        estrella("FALLA_WR")
+        for i in range(12):
+            posicion("FALLA_WR", f"RC{i}", gana=(i < 5), hace_dias=10 + i)
+        estrella("FALLA_HOLD")
+        for i in range(12):
+            posicion("FALLA_HOLD", f"RD{i}", gana=(i < 9), hold_min=5,
+                     hace_dias=10 + i)
+        estrella("FALLA_POCAS")
+        for i in range(3):
+            posicion("FALLA_POCAS", f"RE{i}", gana=True, hace_dias=10 + i)
+        conn.commit()
+
+        # -- ensayo: cuenta bien y NO toca nada --
+        res = fc.reevaluacion(conn, ejecutar=False)
+        comprobar("ensayo: 3 caerian y 2 sobreviven",
+                  res["caen"] == 3 and res["sobreviven"] == 2
+                  and not res["ejecutado"], str(res)[:120])
+        n_est = conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
+                             "is_tracked=1").fetchone()["c"]
+        comprobar("el ensayo no quita ninguna estrella", n_est == 5,
+                  f"quedan {n_est}")
+        comprobar("el ensayo lista a las supervivientes",
+                  {w for w, _a in res["detalle_viven"]}
+                  == {"PASA_TODO", "PASA_12"},
+                  str(res["detalle_viven"]))
+        motivos = {w: m for w, _a, m in res["detalle_caen"]}
+        comprobar("cada caida lleva su motivo del historial",
+                  "winrate" in motivos["FALLA_WR"]
+                  and "retención" in motivos["FALLA_HOLD"]
+                  and "historial corto" in motivos["FALLA_POCAS"],
+                  str(motivos))
+
+        # -- ejecutar: descarta, conserva y clasifica --
+        res2 = fc.reevaluacion(conn, ejecutar=True)
+        comprobar("ejecutar lo marca como ejecutado", res2["ejecutado"])
+        f = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, confirmada, ai_reason "
+            "FROM wallets").fetchall()}
+        comprobar("las 3 que no pasan el historial pierden la estrella",
+                  all(f[w]["is_tracked"] == 0 for w in
+                      ("FALLA_WR", "FALLA_HOLD", "FALLA_POCAS")),
+                  str({w: f[w]["is_tracked"] for w in motivos}))
+        comprobar("y el motivo queda al principio de la ficha",
+                  (f["FALLA_WR"]["ai_reason"] or "")
+                  .startswith("🧹 re-evaluación del embudo"),
+                  str(f["FALLA_WR"]["ai_reason"])[:60])
+        comprobar("las 2 supervivientes conservan la estrella",
+                  f["PASA_TODO"]["is_tracked"] == 1
+                  and f["PASA_12"]["is_tracked"] == 1)
+        comprobar("y quedan clasificadas: la completa confirmada",
+                  f["PASA_TODO"]["confirmada"] == 1,
+                  str(f["PASA_TODO"]["ai_reason"])[:60])
+        comprobar("y la sin-medidas confirmada provisional",
+                  f["PASA_12"]["confirmada"] == 1
+                  and "provisional" in (f["PASA_12"]["ai_reason"] or ""),
+                  str(f["PASA_12"]["ai_reason"])[:60])
+
+        # -- con el interruptor apagado se niega --
+        cfg.FILTRO_TRES_PUERTAS = 0
+        res3 = fc.reevaluacion(conn, ejecutar=True)
+        comprobar("con el filtro apagado devuelve error y no actua",
+                  bool(res3.get("error")), str(res3)[:80])
+        cfg.FILTRO_TRES_PUERTAS = 1
+
+        # -- el mando /reembudo: ensayo y ejecucion --
+        # Sin red: la depuracion previa del "si" pasa por `familia`.
+        import wallet_funding as _wf
+        _familia_real = _wf.familia
+        _wf.familia = lambda a: []
+        import types as _types
+        import telegram_bot as tb
+        # reponer una que cae, para que la ejecucion del mando tenga algo
+        conn.execute("UPDATE wallets SET is_tracked=1 "
+                     "WHERE address='FALLA_WR'")
+        conn.commit()
+        mensajes = []
+
+        class _Chat:
+            async def send_message(self, txt, **k):
+                mensajes.append(txt)
+        upd = _types.SimpleNamespace(
+            message=_types.SimpleNamespace(chat=_Chat()),
+            effective_user=_types.SimpleNamespace(id=1))
+        _aio.run(tb.cmd_reembudo(upd, _types.SimpleNamespace(args=[])))
+        comprobar("/reembudo (ensayo) responde con numeros y sin tocar",
+                  mensajes and "Ensayo" in mensajes[-1]
+                  and conn.execute(
+                      "SELECT is_tracked FROM wallets WHERE "
+                      "address='FALLA_WR'").fetchone()["is_tracked"] == 1,
+                  (mensajes[-1][:70] if mensajes else "sin mensaje"))
+        _aio.run(tb.cmd_reembudo(upd, _types.SimpleNamespace(args=["si"])))
+        comprobar("/reembudo si ejecuta de verdad",
+                  "EJECUTADA" in mensajes[-1]
+                  and conn.execute(
+                      "SELECT is_tracked FROM wallets WHERE "
+                      "address='FALLA_WR'").fetchone()["is_tracked"] == 0,
+                  mensajes[-1][:70])
+        comprobar("y el mensaje informa del estado FINAL (quedan/confirmadas)",
+                  "quedan" in mensajes[-1] and "confirmadas" in mensajes[-1],
+                  mensajes[-1][:90])
+
+        # Hallazgo de la auditoria: una superviviente del corte que cae
+        # justo despues por inactividad NO debe contarse como "queda".
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+        estrella("VIEJA_MALA")          # pasa 1-2, medidas malas, dormida
+        for i in range(12):
+            posicion("VIEJA_MALA", f"RF{i}", gana=(i < 9),
+                     hace_dias=30 + i)
+        for i in range(6):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?,?,?,1,?,'compra',?)",
+                (f"vm{i}", "VIEJA_MALA", f"VM{i}",
+                 ahora - 20 * 86400 - i, -60))
+        conn.execute("UPDATE wallets SET prueba_desde=? "
+                     "WHERE address='VIEJA_MALA'", (ahora - 20 * 86400,))
+        conn.commit()
+        r4 = fc.reevaluacion(conn, ejecutar=True)
+        comprobar("el corte la da por superviviente (pasa 1-2)...",
+                  r4["sobreviven"] == 1, str(r4)[:100])
+        comprobar("...pero 'quedan' dice la verdad tras clasificar "
+                  "(la retiro la inactividad)",
+                  r4.get("quedan") == 0,
+                  f"quedan={r4.get('quedan')}")
+
+        # La guardia de DATABASE_URL de la cabecera: sin ella, correr la
+        # suite con esa variable puesta lanzaria los DELETE contra un
+        # Postgres REAL. Se comprueba sobre el propio fuente porque en
+        # el entorno de pruebas la variable no existe y el sintoma no es
+        # observable.
+        import io as _io2
+        _fuente_suite = _io2.open(__file__, encoding="utf-8").read()
+        # Se mira solo la CABECERA (2.000 primeros caracteres): la
+        # propia cadena de esta prueba no cuenta como guardia. Y ademas
+        # se comprueba el EFECTO en runtime: comentar la linea dejaria
+        # el texto presente pero la variable viva.
+        import os as _os3
+        comprobar("la suite quita DATABASE_URL antes de tocar nada",
+                  'os.environ.pop("DATABASE_URL"' in _fuente_suite[:2000]
+                  and "DATABASE_URL" not in _os3.environ)
+
+        # Ensayo con MAS de 50 supervivientes: la lista se corta y el
+        # mensaje lo dice ("y N más") en vez de callarselo.
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+        for k in range(52):
+            estrella(f"MASIVA{k:02d}")
+            for i in range(12):
+                posicion(f"MASIVA{k:02d}", f"MM{k}_{i}", gana=(i < 9),
+                         hace_dias=10 + i)
+        conn.commit()
+        mensajes.clear()
+        _aio.run(tb.cmd_reembudo(upd, _types.SimpleNamespace(args=[])))
+        comprobar("con 52 supervivientes el ensayo avisa 'y 2 más'",
+                  "y 2 más" in mensajes[-1],
+                  mensajes[-1][-120:])
+    finally:
+        try:
+            _wf.familia = _familia_real
+        except Exception:
+            pass
+        cfg.FILTRO_TRES_PUERTAS = act_previo
+        cfg.FILTRO_PROVISIONAL = prov_previo
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -3252,6 +3584,8 @@ def main():
     prueba_creador_mercado()
     prueba_reentrada()
     prueba_filtro()
+    prueba_18m()
+    prueba_reembudo()
 
     print("\n" + "─" * 60)
     if _FALLOS:

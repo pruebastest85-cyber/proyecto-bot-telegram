@@ -377,7 +377,7 @@ def open_trade(conn, trade: dict, token: dict, score,
             _pos = posicion(conn, trade["wallet"], 30)
         except Exception:
             pass
-        linea_star = (f"\n⭐ Copiando a *{_nom}*"
+        linea_star = (f"\n⭐ Copiando a *{_md(_nom)}*"
                       + (f" (#{_pos} del top)" if _pos else "")
                       + (f" · compró {float(trade.get('sol') or 0):.2f} SOL"
                          if trade.get("sol") else ""))
@@ -926,7 +926,8 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
                 else (row["wallet"] or "")[:8] + "…")
     except Exception:
         _nom = "la ⭐"
-    _tg(f"✂️ *Venta parcial copiada* en *{_md(row['symbol'])}*: *{_nom}* vendió "
+    _tg(f"✂️ *Venta parcial copiada* en *{_md(row['symbol'])}*: "
+        f"*{_md(_nom)}* vendió "
         f"el {pct:.0f}% y el paper vende su {pct:.0f}%"
         f" (queda {nueva*100:.0f}% de la posición){txt_pnl}")
     print(f"✂️ Paper: venta parcial {pct:.0f}% en {row['symbol']} "

@@ -390,3 +390,102 @@ def resumen(conn) -> str:
             f"miden en silencio y, si pasan {cfg['prueba_dias']} días "
             f"sin operar, pierden la estrella. Umbrales: variables "
             f"FILTRO\\_\\* del entorno._")
+
+
+def reevaluacion(conn, ejecutar: bool = False) -> dict:
+    """Pasa TODAS las ⭐ por el embudo VIGENTE de un solo golpe.
+
+    Pedido del dueño (28/8): "cuando el embudo cambia, una función de
+    re-evaluar todas las billeteras en una sola ola de evaluaciones y
+    descartar lo que no sirve con el nuevo embudo y dejar lo que
+    sobrevive". Sin esto, una ⭐ vieja que jamás pasaría el embudo nuevo
+    conservaba la estrella "en prueba" hasta agotar los 14 días de
+    inactividad — semanas de lista inflada tras cada cambio de criterio.
+
+    Criterio: se DESCARTA (pierde la estrella ya) la ⭐ cuyo HISTORIAL no
+    pasa las puertas 1-2 — historial y copiabilidad no mejoran por
+    esperar: si sus 90 días de operaciones no dan el winrate, la
+    retención o la diversificación exigidos, medir sus señales no lo va
+    a arreglar. SOBREVIVE la que pasa 1-2: confirmada si además pasa la
+    puerta 3 (o el modo provisional), en prueba si aún le faltan
+    medidas. Las descartadas quedan como candidatas normales: si su
+    historial mejora, el embudo puede re-promoverlas — nada es
+    irreversible.
+
+    `ejecutar=False` (por defecto) es un ENSAYO: cuenta y lista sin
+    tocar nada, para que el dueño confirme viendo números. Con
+    `ejecutar=True` aplica los descartes y clasifica al final.
+
+    Con el interruptor maestro apagado devuelve un error en vez de
+    actuar: purgar por un embudo que el dueño apagó sería contradecirle.
+    """
+    cfg = _cfg()
+    if not cfg["activo"]:
+        return {"error": "el filtro de tres puertas está APAGADO "
+                         "(FILTRO_TRES_PUERTAS=0); enciéndelo antes de "
+                         "re-evaluar con él"}
+    ahora = int(time.time())
+    est = conn.execute(
+        """SELECT address, alias FROM wallets
+           WHERE is_tracked = 1""").fetchall()
+    hist = historial(conn)
+    caen, sobreviven = [], []
+    for r in est:
+        w = r["address"]
+        h = hist.get(w) or {"cerradas": 0, "wr": None, "tokens": 0,
+                            "hold_min": None}
+        # Solo puertas 1-2: el motivo que devuelva puertas() con las
+        # medidas en None es exactamente el veredicto del HISTORIAL
+        # (si llega a la puerta 3 sin medidas, en modo estricto diría
+        # "en prueba" y en provisional pasaría — ambos = sobrevive).
+        pasa_12 = (h["cerradas"] >= cfg["min_cerradas"]
+                   and h["wr"] is not None and h["wr"] >= cfg["wr_min"]
+                   and h["hold_min"] is not None
+                   and h["hold_min"] >= cfg["hold_min_min"]
+                   and h["tokens"] >= cfg["min_tokens"])
+        if pasa_12:
+            sobreviven.append((w, r["alias"]))
+            continue
+        # El motivo es el veredicto del HISTORIAL: como pasa_12 es
+        # False, puertas() corta en la puerta 1 o en la 2 y nunca llega
+        # a la 3 (ni al modo provisional), asi que el texto siempre
+        # explica que le falta al historial.
+        _, motivo = puertas(h, None)
+        caen.append((w, r["alias"], motivo))
+    res = {"total": len(est), "caen": len(caen),
+           "sobreviven": len(sobreviven),
+           "detalle_caen": caen[:400], "detalle_viven": sobreviven[:50],
+           "ejecutado": False}
+    if not ejecutar:
+        return res
+    for w, _alias, motivo in caen:
+        try:
+            conn.execute(
+                """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
+                   confirmada = 0, prueba_desde = NULL,
+                   ai_reason = SUBSTR(? || COALESCE(ai_reason,''), 1, 500)
+                   WHERE address = ? AND is_tracked = 1""",
+                (f"🧹 re-evaluación del embudo ({ahora}): {motivo} · ", w))
+        except Exception as _e:
+            print(f"· re-evaluación: {w[:8]}… omitida ({_e})")
+    conn.commit()
+    # Clasificar a las supervivientes con el embudo vigente (confirma o
+    # deja en prueba) y refrescar el conjunto operativo ya.
+    clasificar(conn)
+    try:
+        from db import invalidar_copiables
+        invalidar_copiables()
+    except Exception:
+        pass
+    res["ejecutado"] = True
+    # El estado FINAL se cuenta DESPUES de clasificar (auditoria 18-M):
+    # una superviviente del corte puede caer un instante despues por la
+    # regla de inactividad (14 dias en prueba sin operar), y el mensaje
+    # de "sobreviven N" mentiria. Se informa lo que de verdad quedo.
+    res["quedan"] = conn.execute(
+        """SELECT COUNT(*) AS c FROM wallets
+           WHERE is_tracked = 1""").fetchone()["c"]
+    res["confirmadas"] = conn.execute(
+        """SELECT COUNT(*) AS c FROM wallets
+           WHERE is_tracked = 1 AND confirmada = 1""").fetchone()["c"]
+    return res
