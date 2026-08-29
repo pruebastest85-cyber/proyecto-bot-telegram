@@ -161,6 +161,15 @@ FILTRO_PROVISIONAL = _int("FILTRO_PROVISIONAL", 1)
 # escondia a billeteras que ganan poquitos y palman fuerte en bolsas que
 # nunca cierran (caso real: 62% de acierto en cerradas y -21,8 SOL netos).
 FILTRO_NETO_MIN = _float("FILTRO_NETO_MIN", 0.0)
+# (18-O) La IA no puede DAR la estrella a quien no pasa las puertas 1-2.
+# Medido en la base del dueño el 28/8: de 24 ⭐ vivas, solo 7 pasaban el
+# embudo; las otras 17 las habia promovido la re-evaluacion de la IA en
+# un dia, sin pasar por el filtro. Ninguna podia confirmarse jamas (la
+# puerta 1 corta antes), asi que solo servian para inflar la lista y
+# ocupar sitio en el webhook. OJO: esto IMPIDE DARLA de aqui en
+# adelante; a las ⭐ que ya estan puestas las retira /reembudo, que es un
+# mando manual a proposito. FILTRO_PUERTA_PROMOCION=0 lo apaga.
+FILTRO_PUERTA_PROMOCION = _int("FILTRO_PUERTA_PROMOCION", 1)
 
 # ── Base de datos ─────────────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "wallets.db")

@@ -3634,6 +3634,1393 @@ def prueba_reembudo():
         conn.close()
 
 
+# ---------------------------------------------------------------------
+# OLA 18-O - los 5 hallazgos de la auditoria transversal del 28/8.
+# ---------------------------------------------------------------------
+def prueba_18o_rastrear():
+    bloque("18-O/1 - /rastrear deja de deshacerse solo")
+    import time as _t
+    import signal_tracker as st
+    import wallet_admin as wa
+    import realtime as rt
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    _hook_real = wa.sync_helius_webhook
+    _tg_real = getattr(rt, "tg_send", None)
+    _hook_rt_real = rt.sync_helius_webhook
+    wa.sync_helius_webhook = lambda: "(webhook de prueba)"
+    rt.tg_send = lambda *a, **k: None
+    rt.sync_helius_webhook = lambda *a, **k: None
+    try:
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+
+        def senal(w, i, chg, ts):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?,?,?,1,?,'compra',?)",
+                (f"o{w}{i}", w, f"M{w}{i}", ts, chg))
+
+        # VIEJA: 4 señales rojas ANTIGUAS y ningun turno nuevo.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, pnl_30d, "
+            "ai_reason) VALUES ('VIEJA',1,0,-5,'ficha previa')")
+        for i in range(4):
+            senal("VIEJA", i, -30, ahora - 10 * 86400 + i)
+        conn.commit()
+        st._check_streaks(conn)
+        f = conn.execute("SELECT is_tracked, ai_reason FROM wallets "
+                         "WHERE address='VIEJA'").fetchone()
+        comprobar("sin turno nuevo, la racha SIGUE degradando (no se "
+                  "afloja nada)", f["is_tracked"] == 0,
+                  str(f["is_tracked"]))
+        comprobar("y el motivo se antepone SIN borrar la ficha anterior",
+                  (f["ai_reason"] or "").startswith("📉 sin ⭐")
+                  and "ficha previa" in (f["ai_reason"] or ""),
+                  str(f["ai_reason"])[:120])
+        comprobar("y NO dice 'de este turno' cuando no hay turno (esa se "
+                  "juzgo por toda su vida)",
+                  "de este turno" not in (f["ai_reason"] or ""),
+                  str(f["ai_reason"])[:120])
+
+        # RESTAURADA: mismas señales viejas, pero el dueño la restauro.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, pnl_30d, "
+            "grade) VALUES ('RESTAURADA',0,1,-5,'Descartada')")
+        for i in range(4):
+            senal("RESTAURADA", i, -30, ahora - 10 * 86400 + i)
+        conn.commit()
+        msg = wa.restore_wallet("RESTAURADA")
+        fr = conn.execute(
+            "SELECT is_tracked, is_bot, confirmada, prueba_desde, grade "
+            "FROM wallets WHERE address='RESTAURADA'").fetchone()
+        comprobar("/rastrear devuelve la estrella", fr["is_tracked"] == 1)
+        comprobar("y NO el altavoz (entra en prueba)",
+                  not fr["confirmada"] and fr["prueba_desde"],
+                  f"confirmada={fr['confirmada']} desde={fr['prueba_desde']}")
+        comprobar("y borra la nota vieja ('Descartada' ya no la tumba)",
+                  fr["grade"] is None, str(fr["grade"]))
+        comprobar("y avisa de que hoy no pasa el embudo",
+                  "⚠️" in msg and "historial corto" in msg, msg[-160:])
+
+        # El aviso mira las TRES puertas: el caso mas frecuente es una
+        # billetera con buen historial degradada por su rendimiento
+        # MEDIDO, y esas señales no caducan.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot) "
+            "VALUES ('REST3',0,1)")
+        for i in range(12):    # historial que SI pasa las puertas 1-2
+            t0 = ahora - (10 + i) * 86400
+            for side, sol, ts in (("compra", 1.0, t0),
+                                  ("venta", 1.6 if i < 9 else 0.4,
+                                   t0 + 90 * 60)):
+                conn.execute(
+                    "INSERT INTO trades (wallet, signature, mint, side, "
+                    "sol, tokens, ts) VALUES ('REST3',?,?,?,?,100,?)",
+                    (f"r3{i}{side}", f"R3M{i}", side, sol, ts))
+        for i in range(8):     # pero 8 medidas malas del bot
+            senal("REST3", i, -70, ahora - 30 * 86400 + i)
+        conn.commit()
+        msg3 = wa.restore_wallet("REST3")
+        comprobar("el aviso llega tambien cuando lo que falla es la "
+                  "puerta 3 (señales medidas)",
+                  "⚠️" in msg3 and "medidas malas" in msg3, msg3[-200:])
+        comprobar("y NO le promete que /reembudo se la llevara (solo "
+                  "retira a quien falla el historial)",
+                  "/reembudo NO se la llevaría" in msg3, msg3[-200:])
+        comprobar("mientras que a la de historial corto si se lo dice",
+                  "/reembudo se la llevaría" in msg
+                  and "NO se la llevaría" not in msg, msg[-200:])
+
+        # La retención vieja tampoco puede tumbarla: el bloque 1 de la
+        # depuración lee `hold_median_min`, del perfilado ANTERIOR.
+        # Se limpia SOLO al restaurar de verdad (estando fuera).
+        conn.execute("UPDATE wallets SET hold_median_min=2.0, "
+                     "grade='Descartada', is_tracked=0 "
+                     "WHERE address='REST3'")
+        conn.commit()
+        wa.restore_wallet("REST3")
+        _fh = conn.execute(
+            "SELECT hold_median_min, grade FROM wallets "
+            "WHERE address='REST3'").fetchone()
+        comprobar("/rastrear borra la retencion y la nota viejas",
+                  _fh["hold_median_min"] is None and _fh["grade"] is None,
+                  str(dict(_fh)))
+
+        # Pero sobre una ⭐ VIVA no toca nada suyo: quitarle la
+        # confirmacion la dejaria muda hasta 2 h, y la nota y la
+        # retencion solo vuelven si entra otra vez en la cola de
+        # perfilado, cosa que no esta garantizada.
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=1, "
+                     "grade='Elite', hold_median_min=95.0 "
+                     "WHERE address='REST3'")
+        conn.commit()
+        msg_viva = wa.restore_wallet("REST3")
+        _fv = conn.execute(
+            "SELECT confirmada, grade, hold_median_min FROM wallets "
+            "WHERE address='REST3'").fetchone()
+        comprobar("/rastrear sobre una ⭐ viva no la desconfirma ni le "
+                  "borra la nota ni la retencion",
+                  _fv["confirmada"] == 1 and _fv["grade"] == "Elite"
+                  and _fv["hold_median_min"] == 95.0, str(dict(_fv)))
+        comprobar("y se lo dice al dueño, nombrando lo que conserva",
+                  "Ya la tenías" in msg_viva
+                  and "la confirmación" in msg_viva
+                  and "Elite" in msg_viva, msg_viva[-260:])
+        comprobar("y la enumeracion se lee como español (a, b y c)",
+                  "la confirmación, la nota (Elite) y la retención"
+                  in msg_viva, msg_viva[-260:])
+
+        # Y si esa ⭐ viva viene CONFIRMADA pero no pasa el embudo, el
+        # aviso no puede decirle que esta muda: lo esta alertando.
+        conn.execute("DELETE FROM trades WHERE wallet='REST3'")
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=1 "
+                     "WHERE address='REST3'")
+        conn.commit()
+        print("DEBUG estado:", dict(conn.execute(
+            "SELECT is_tracked, confirmada FROM wallets "
+            "WHERE address='REST3'").fetchone()))
+        msg_conf = wa.restore_wallet("REST3")
+        print("DEBUG msg:", repr(msg_conf))
+        comprobar("a una confirmada el aviso NO le dice que esta muda",
+                  "puede alertar y copiarse" in msg_conf
+                  and "no alerta ni se copia" not in msg_conf,
+                  msg_conf[-260:])
+
+        # EL CASO DE HOY: ⭐ viva con el reloj del turno en NULL (todas
+        # las heredadas de antes de esta ola). /rastrear le estrena reloj
+        # IGUAL que a una descartada — si no, el mando no protegeria de
+        # nada justo en la poblacion real — y el mensaje lo dice.
+        conn.execute("DELETE FROM signals WHERE wallet='REST3'")
+        conn.execute("UPDATE wallets SET is_tracked=1, turno_desde=NULL, "
+                     "prueba_desde=?, ai_reason='ficha valiosa' "
+                     "WHERE address='REST3'", (ahora - 9 * 86400,))
+        for i in range(10):
+            senal("REST3", 50 + i, -40, ahora - 3600 + i)
+        conn.commit()
+        import performance_review as pv_r3
+        _antes_g = pv_r3.perdedora_confirmada(conn, "REST3")
+        msg_null = wa.restore_wallet("REST3")
+        _fnull = conn.execute(
+            "SELECT turno_desde, ai_reason FROM wallets "
+            "WHERE address='REST3'").fetchone()
+        comprobar("a una ⭐ viva SIN reloj de turno se le estrena uno",
+                  _fnull["turno_desde"] is not None,
+                  str(_fnull["turno_desde"]))
+        comprobar("y con el la guarda anti-re-promocion deja de verle el "
+                  "expediente viejo (para eso sirve el mando)",
+                  (_antes_g is not None)
+                  and pv_r3.perdedora_confirmada(conn, "REST3") is None,
+                  f"antes={_antes_g} ahora="
+                  f"{pv_r3.perdedora_confirmada(conn, 'REST3')}")
+        comprobar("y el mensaje avisa de que su expediente deja de contar",
+                  "dejan de contar en su contra" in msg_null,
+                  msg_null[:220])
+        comprobar("y la ficha se antepone en vez de borrarse",
+                  "ficha valiosa" in (_fnull["ai_reason"] or ""),
+                  str(_fnull["ai_reason"])[:120])
+
+        # Y si arrastra una nota o una retencion que la van a tumbar, se
+        # avisa (a la viva no se le borran, asi que el ciclo las lee).
+        conn.execute("UPDATE wallets SET grade='Descartada', "
+                     "hold_median_min=1.0 WHERE address='REST3'")
+        conn.commit()
+        msg_her = wa.restore_wallet("REST3")
+        comprobar("y se avisa de la nota y la retencion heredadas",
+                  "Arrastra del perfilado anterior" in msg_her
+                  and "Descartada" in msg_her, msg_her[-260:])
+        comprobar("y NO se le promete que empezara a alertar (esos "
+                  "bloques corren ANTES de la clasificacion)",
+                  "empezará a alertar" not in msg_her, msg_her[-260:])
+        comprobar("el aviso nombra tambien las reglas que la re-evaluacion "
+                  "puede volver a aplicarle (bot/entidad)",
+                  "como bot" in msg_her, msg_her[-260:])
+        comprobar("y el mensaje va en texto plano, sin marcas de formato "
+                  "sueltas (/rastrear no manda parse_mode)",
+                  "_(" not in msg_her and ")_" not in msg_her,
+                  msg_her[-160:])
+        conn.execute("DELETE FROM signals WHERE wallet='REST3'")
+        conn.execute("UPDATE wallets SET grade=NULL, hold_median_min=NULL "
+                     "WHERE address='REST3'")
+        conn.commit()
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=0 "
+                     "WHERE address='REST3'")
+        conn.commit()
+
+        # Y si es CREADORA DE MERCADO, se le dice claro: esa regla del
+        # dueño no la levanta /rastrear.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot) "
+            "VALUES ('RESTMM',0,1)")
+        for k in range(24):        # 12 vueltas compra→venta al mismo token
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side) VALUES (?, 'RESTMM','TOKMM',1,?,?)",
+                (f"mm{k}", ahora - 3600 + k,
+                 "compra" if k % 2 == 0 else "venta"))
+        conn.commit()
+        msgmm = wa.restore_wallet("RESTMM")
+        comprobar("a la creadora de mercado se le avisa de que el ciclo "
+                  "se la va a quitar igual",
+                  "CREADORA DE MERCADO" in msgmm, msgmm[-200:])
+
+        # Con el embudo APAGADO no hay aviso: todas confirman y
+        # /reembudo se niega a correr, asi que avisar seria mentir.
+        cfg_ra = __import__("config")
+        _act_prev = cfg_ra.FILTRO_TRES_PUERTAS
+        cfg_ra.FILTRO_TRES_PUERTAS = 0
+        try:
+            conn.execute("UPDATE wallets SET is_tracked=0 "
+                         "WHERE address='RESTAURADA'")
+            conn.commit()
+            msg_ap = wa.restore_wallet("RESTAURADA")
+        finally:
+            cfg_ra.FILTRO_TRES_PUERTAS = _act_prev
+        comprobar("con el embudo apagado /rastrear no avisa de puertas",
+                  "⚠️" not in msg_ap, msg_ap[-160:])
+        comprobar("ni promete que 'pasa el embudo' cuando no hay embudo",
+                  "Pasa el embudo" not in msg_ap, msg_ap[-160:])
+
+        # A la que PASA el embudo y venia de fuera se le dice que
+        # empezara a alertar en cuanto la clasifiquen: antes se quedaba
+        # muda hasta 2 h sin que el mensaje dijera nada.
+        conn.execute("DELETE FROM signals WHERE wallet='REST3'")
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=0 "
+                     "WHERE address='REST3'")
+        for i in range(12):
+            t0 = ahora - (10 + i) * 86400
+            for side, sol, ts in (("compra", 1.0, t0),
+                                  ("venta", 1.6, t0 + 90 * 60)):
+                conn.execute(
+                    "INSERT INTO trades (wallet, signature, mint, side, "
+                    "sol, tokens, ts) VALUES ('REST3',?,?,?,?,100,?)",
+                    (f"ok{i}{side}", f"OKM{i}", side, sol, ts))
+        conn.commit()
+        msg_ok = wa.restore_wallet("REST3")
+        comprobar("a la que SI pasa el embudo se le avisa de que hablara "
+                  "en cuanto la clasifiquen",
+                  "empezará a alertar" in msg_ok and "⚠️" not in msg_ok,
+                  msg_ok[-260:])
+        # Y si ademas es creadora de mercado, esa promesa NO puede salir.
+        conn.execute("DELETE FROM signals WHERE wallet='REST3'")
+        for k in range(24):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side) VALUES (?, 'REST3','TOKMM2',1,?,?)",
+                (f"mm2x{k}", ahora - 7200 + k,
+                 "compra" if k % 2 == 0 else "venta"))
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=0 "
+                     "WHERE address='REST3'")
+        conn.commit()
+        msg_ok_mm = wa.restore_wallet("REST3")
+        comprobar("pero si es creadora de mercado esa promesa NO sale "
+                  "(la depuracion corre antes que la clasificacion)",
+                  "empezará a alertar" not in msg_ok_mm
+                  and "CREADORA DE MERCADO" in msg_ok_mm,
+                  msg_ok_mm[-260:])
+        conn.execute("DELETE FROM signals WHERE wallet='REST3'")
+        conn.commit()
+        conn.execute("DELETE FROM trades WHERE wallet='REST3'")
+        conn.commit()
+
+        # Y a la que estaba fuera, lo mismo.
+        conn.execute("UPDATE wallets SET is_tracked=0, turno_desde=NULL "
+                     "WHERE address='REST3'")
+        conn.commit()
+        wa.restore_wallet("REST3")
+        # El plazo de inactividad tambien se reinicia SIEMPRE, incluida
+        # una ⭐ VIVA: si no, una que llevara 14 dias parada la retiraria
+        # la clasificacion justo despues de que el dueño la pidiera.
+        conn.execute("UPDATE wallets SET is_tracked=1, "
+                     "prueba_desde=? WHERE address='REST3'",
+                     (ahora - 40 * 86400,))
+        conn.commit()
+        wa.restore_wallet("REST3")
+        comprobar("/rastrear reinicia el plazo de inactividad tambien a "
+                  "una ⭐ viva (si no, la clasificacion la retiraria)",
+                  conn.execute("SELECT prueba_desde FROM wallets WHERE "
+                               "address='REST3'").fetchone()["prueba_desde"]
+                  >= ahora - 60, "reloj de prueba viejo")
+        # Y `confirmada` nunca se queda en NULL (defensa en profundidad:
+        # el conjunto operativo la evalua como falsa, pero un NULL ahi es
+        # el estado huerfano que la reparacion de arranque limpia).
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=NULL "
+                     "WHERE address='REST3'")
+        conn.commit()
+        wa.restore_wallet("REST3")
+        comprobar("y `confirmada` nunca se queda en NULL",
+                  conn.execute("SELECT confirmada FROM wallets WHERE "
+                               "address='REST3'").fetchone()["confirmada"]
+                  == 0, "quedo NULL")
+        comprobar("y a la que estaba fuera tambien se le pone",
+                  conn.execute("SELECT turno_desde FROM wallets WHERE "
+                               "address='REST3'").fetchone()["turno_desde"],
+                  "sigue NULL")
+
+        st._check_streaks(conn)
+        f = conn.execute("SELECT is_tracked FROM wallets "
+                         "WHERE address='RESTAURADA'").fetchone()
+        comprobar("la racha VIEJA ya no deshace el /rastrear del dueño",
+                  f["is_tracked"] == 1, str(f["is_tracked"]))
+
+        # Pero si vuelve a fallar EN SU TURNO NUEVO, cae igual.
+        # (el `or ahora` es para que una regresión que borre el reloj no
+        # tumbe la suite con un TypeError y esconda los demás fallos)
+        _desde = conn.execute("SELECT prueba_desde FROM wallets WHERE "
+                              "address='RESTAURADA'").fetchone()[0] or ahora
+        conn.execute("UPDATE wallets SET is_tracked=1 WHERE "
+                     "address='RESTAURADA'")
+        for i in range(4):
+            senal("RESTAURADA", 10 + i, -30, int(_desde) + 1 + i)
+        conn.commit()
+        st._check_streaks(conn)
+        f = conn.execute("SELECT is_tracked, ai_reason FROM wallets "
+                         "WHERE address='RESTAURADA'").fetchone()
+        comprobar("y si falla otra vez con señales NUEVAS, cae igual",
+                  f["is_tracked"] == 0, str(f["is_tracked"]))
+        comprobar("con un motivo que habla de ESTE turno",
+                  "de este turno" in (f["ai_reason"] or ""),
+                  str(f["ai_reason"])[:120])
+
+        # La revision de rendimiento respeta el mismo turno.
+        import performance_review as pv
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, alias, "
+            "turno_desde, ai_reason) VALUES "
+            "('REVISADA',1,0,'Revisada',?,'ficha previa')",
+            (ahora - 300,))
+        for i in range(10):        # 10 medidas MALAS, todas del turno viejo
+            senal("REVISADA", i, -40, ahora - 5 * 86400 + i)
+        conn.commit()
+        r = pv.review_tracked(notify=False)
+        f = conn.execute("SELECT is_tracked FROM wallets "
+                         "WHERE address='REVISADA'").fetchone()
+        comprobar("la revisión de rendimiento tampoco juzga con el "
+                  "expediente del turno anterior",
+                  f["is_tracked"] == 1 and r["degradadas"] == 0, str(r))
+        for i in range(10):        # ahora 10 medidas malas de ESTE turno
+            senal("REVISADA", 20 + i, -40, ahora - 100 + i)
+        conn.commit()
+        r = pv.review_tracked(notify=False)
+        f = conn.execute("SELECT is_tracked, ai_reason FROM wallets "
+                         "WHERE address='REVISADA'").fetchone()
+        comprobar("pero con señales malas de SU turno sí degrada",
+                  f["is_tracked"] == 0 and r["degradadas"] == 1, str(r))
+        comprobar("y el motivo se antepone sin borrar la ficha",
+                  (f["ai_reason"] or "").startswith("📉 sin ⭐")
+                  and "ficha previa" in (f["ai_reason"] or ""),
+                  str(f["ai_reason"])[:120])
+
+        # Si otro hilo se adelanta y le quita la ⭐ a MITAD de la
+        # comprobacion, ni la racha ni la revision pueden anunciar una
+        # degradacion que no hicieron (el UPDATE lleva is_tracked=1 y se
+        # mira el rowcount).
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, alias, "
+            "pnl_30d) VALUES ('ROBADA',1,0,'Robada',-5)")
+        for i in range(10):
+            senal("ROBADA", i, -40, ahora - 3600 + i)
+        conn.commit()
+        avisos_tg = []
+        _tg_prev = rt.tg_send
+        rt.tg_send = lambda *a, **k: avisos_tg.append(a[0] if a else "")
+        _getconn_prev = pv.get_conn
+        try:
+            st._check_streaks(_ConnRoba(
+                conn, "ROBADA", "is_tracked, alias, turno_desde"))
+            comprobar("la racha no avisa de una degradacion que no hizo",
+                      avisos_tg == [], str(avisos_tg))
+            conn.execute("UPDATE wallets SET is_tracked=1 "
+                         "WHERE address='ROBADA'")
+            conn.commit()
+            pv.get_conn = lambda: _ConnRoba(
+                conn, "ROBADA", "address, alias, turno_desde")
+            r_ya = pv.review_tracked(notify=False)
+            comprobar("y la revision no la cuenta como degradada",
+                      r_ya["degradadas"] == 0, str(r_ya))
+        finally:
+            rt.tg_send = _tg_prev
+            pv.get_conn = _getconn_prev
+
+        # Las dos degradaciones tienen que refrescar el conjunto
+        # operativo YA: sin esto la ⭐ degradada seguia alertando y
+        # copiandose hasta 60 s (el TTL de la cache).
+        import db as _db
+        avisos = {"copiables": 0, "vigiladas": 0}
+        _ic_real, _iv_real = _db.invalidar_copiables, rt.invalidar_vigiladas
+
+        def _ic():
+            avisos["copiables"] += 1
+
+        def _iv():
+            avisos["vigiladas"] += 1
+
+        _db.invalidar_copiables = _ic
+        rt.invalidar_vigiladas = _iv
+        try:
+            conn.execute("DELETE FROM wallets")
+            conn.execute("DELETE FROM signals")
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "pnl_30d) VALUES ('CACHE',1,0,-5)")
+            for i in range(4):
+                senal("CACHE", i, -30, ahora - 3600 + i)
+            conn.commit()
+            st._check_streaks(conn)
+            comprobar("la racha refresca el conjunto operativo",
+                      avisos["copiables"] >= 1 and avisos["vigiladas"] >= 1,
+                      str(avisos))
+            avisos["copiables"] = avisos["vigiladas"] = 0
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, alias, "
+                "pnl_30d) VALUES ('CACHE2',1,0,'C2',-5)")
+            for i in range(10):
+                senal("CACHE2", i, -40, ahora - 3600 + i)
+            conn.commit()
+            pv.review_tracked(notify=False)
+            comprobar("y la revisión de rendimiento también",
+                      avisos["copiables"] >= 1 and avisos["vigiladas"] >= 1,
+                      str(avisos))
+        finally:
+            _db.invalidar_copiables = _ic_real
+            rt.invalidar_vigiladas = _iv_real
+    finally:
+        # Se devuelven TODOS los dobles: si `realtime.sync_helius_webhook`
+        # se queda anulado, cualquier prueba posterior corre con el
+        # webhook desactivado en silencio.
+        wa.sync_helius_webhook = _hook_real
+        rt.sync_helius_webhook = _hook_rt_real
+        rt.tg_send = _tg_real
+        conn.close()
+
+
+def prueba_18o_promocion():
+    bloque("18-O/2 - la IA no puede dar la estrella saltandose el embudo")
+    import time as _t
+    import config as cfg
+    import ai_analyst as aa
+    import wallet_funding as wf
+    import wallet_identity as wi
+    import wallet_score as ws
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    previos = {
+        "perfil": aa.profile_wallet, "bot": aa._hard_bot_reason,
+        "veredicto": aa.ai_verdict, "nota": aa.nota_bloquea,
+        "id": wi.identificar, "mot": wi.motivo_exclusion,
+        "nueva": wf.recien_creada, "herm": wf.hermanas,
+        "jefa": wf.hermana_con_estrella, "destr": wf.destronar_hermanas,
+        "score": ws.compute_score,
+        "puerta": cfg.FILTRO_PUERTA_PROMOCION,
+        "cerradas": cfg.FILTRO_MIN_CERRADAS,
+    }
+    import trades_store as _ts
+    previos["tope_trades"] = _ts.MAX_TRADES_TOTAL
+    try:
+        aa.profile_wallet = lambda a: {
+            "tx_sampled": 200, "pnl_30d_sol": 9.0, "pnl_total_sol": 30.0,
+            "unrealized_sol": 0.0, "net_pnl_sol": 30.0,
+            "hold_median_min": 120.0, "metrics": {"roi_median": 1.5},
+            "tokens": {}}
+        aa._hard_bot_reason = lambda p: None
+        aa.ai_verdict = lambda *a, **k: {
+            "clasificacion": "trader", "seguir": True, "confianza": 90,
+            "alias": None, "razon": "veredicto de prueba",
+            "modelo": "doble"}
+        aa.nota_bloquea = lambda conn_, tier: False
+        wi.identificar = lambda dirs: {}
+        wi.motivo_exclusion = lambda x: None
+        wf.recien_creada = lambda a: (False, 999.0, "")
+        wf.hermanas = lambda a: []
+        wf.hermana_con_estrella = lambda c, a, s: None
+        wf.destronar_hermanas = lambda c, a: []
+        ws.compute_score = lambda p, t: {"score": 70.0}
+        cfg.FILTRO_MIN_CERRADAS = 10
+
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.execute("DELETE FROM appearances")
+        conn.commit()
+
+        def candidata(w):
+            conn.execute(
+                "INSERT INTO wallets (address, winning_tokens_count, "
+                "is_tracked, is_bot, score) VALUES (?,3,0,0,10)", (w,))
+            conn.execute(
+                "INSERT INTO appearances (wallet, mint, reason, buy_sol, "
+                "entry_multiple) VALUES (?,?,'prueba',5.0,9.0)",
+                (w, f"AP{w}"))
+
+        def posicion(w, m, gana, hold_min=90, hace_dias=10):
+            t0 = ahora - hace_dias * 86400
+            for side, sol, ts in (("compra", 1.0, t0),
+                                  ("venta", 1.6 if gana else 0.4,
+                                   t0 + int(hold_min * 60))):
+                conn.execute(
+                    "INSERT INTO trades (wallet, signature, mint, side, "
+                    "sol, tokens, ts) VALUES (?,?,?,?,?,100,?)",
+                    (w, f"{w}{m}{side}", m, side, sol, ts))
+
+        # BUENA: 12 cerradas, 9 ganadas (75%), neto positivo, 12 tokens.
+        candidata("PROMO_BUENA")
+        for i in range(12):
+            posicion("PROMO_BUENA", f"B{i}", gana=(i < 9), hace_dias=10 + i)
+        # MALA: 12 cerradas pero solo 3 ganadas (25%) y neto negativo.
+        candidata("PROMO_MALA")
+        for i in range(12):
+            posicion("PROMO_MALA", f"L{i}", gana=(i < 3), hace_dias=10 + i)
+        # CORTA: historial de 4 posiciones, impecable pero insuficiente.
+        candidata("PROMO_CORTA")
+        for i in range(4):
+            posicion("PROMO_CORTA", f"C{i}", gana=True, hace_dias=10 + i)
+        conn.commit()
+
+        aa.evaluate_tracked(conn)
+        est = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, confirmada, prueba_desde, "
+            "turno_desde, ai_reason FROM wallets")}
+        comprobar("la que pasa el historial SÍ recibe la estrella",
+                  est["PROMO_BUENA"]["is_tracked"] == 1,
+                  str(est["PROMO_BUENA"]["ai_reason"])[:120])
+        comprobar("y entra EN PRUEBA, no confirmada",
+                  not est["PROMO_BUENA"]["confirmada"]
+                  and est["PROMO_BUENA"]["prueba_desde"],
+                  str(dict(est["PROMO_BUENA"])))
+        comprobar("y con el reloj del turno en marcha (desde ahora "
+                  "cuentan sus señales)",
+                  est["PROMO_BUENA"]["turno_desde"],
+                  str(est["PROMO_BUENA"]["turno_desde"]))
+        comprobar("a la rechazada se le borra el reloj del turno (si "
+                  "volviera, se la juzgaria por todo su historial)",
+                  est["PROMO_MALA"]["turno_desde"] is None,
+                  str(est["PROMO_MALA"]["turno_desde"]))
+        comprobar("la de winrate 25% NO recibe estrella aunque la IA "
+                  "diga que sí", est["PROMO_MALA"]["is_tracked"] == 0,
+                  str(est["PROMO_MALA"]["ai_reason"])[:120])
+        comprobar("y la ficha dice en qué puerta se quedó",
+                  "winrate" in (est["PROMO_MALA"]["ai_reason"] or ""),
+                  str(est["PROMO_MALA"]["ai_reason"])[:120])
+        comprobar("la de historial corto tampoco",
+                  est["PROMO_CORTA"]["is_tracked"] == 0
+                  and "historial corto" in
+                  (est["PROMO_CORTA"]["ai_reason"] or ""),
+                  str(est["PROMO_CORTA"]["ai_reason"])[:120])
+
+        # A una ⭐ QUE YA TIENE la estrella la guarda no la toca: es lo
+        # que hace que /rastrear del dueño valga para algo (si no, el
+        # ciclo se la quitaba a las 2 h y el mando volvia a ser inutil).
+        conn.execute("UPDATE wallets SET is_tracked=1, ai_class=NULL, "
+                     "pnl_updated=NULL WHERE address='PROMO_MALA'")
+        conn.commit()
+        aa.evaluate_tracked(conn)
+        _fya = conn.execute(
+            "SELECT is_tracked, turno_desde FROM wallets "
+            "WHERE address='PROMO_MALA'").fetchone()
+        comprobar("a la ⭐ ya puesta (p. ej. restaurada a mano) la guarda "
+                  "NO se la quita", _fya["is_tracked"] == 1)
+        comprobar("y a una ⭐ HEREDADA (sin reloj de turno) la IA no le "
+                  "inventa uno: nada de amnistia al desplegar",
+                  _fya["turno_desde"] is None, str(_fya["turno_desde"]))
+        conn.execute("UPDATE wallets SET is_tracked=0, ai_class=NULL, "
+                     "pnl_updated=NULL WHERE address='PROMO_MALA'")
+        conn.commit()
+
+        # Una fila con la confirmacion puesta pero SIN estrella (estado
+        # que existio antes de 18-O) no puede entrar al altavoz en el
+        # momento de la promocion: la ⭐ nueva empieza siempre en prueba.
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=1, "
+                     "turno_desde=NULL, prueba_desde=NULL, "
+                     "ai_class=NULL, pnl_updated=NULL "
+                     "WHERE address='PROMO_BUENA'")
+        conn.commit()
+        aa.evaluate_tracked(conn)
+        _fhu = conn.execute(
+            "SELECT is_tracked, confirmada FROM wallets "
+            "WHERE address='PROMO_BUENA'").fetchone()
+        comprobar("una fila con confirmacion huerfana no alerta al "
+                  "recibir la ⭐: entra en prueba",
+                  _fhu["is_tracked"] == 1 and not _fhu["confirmada"],
+                  str(dict(_fhu)))
+
+        # Si otro hilo la degrada JUSTO despues del UPDATE grande de la
+        # promocion, el reloj del turno no puede quedarse puesto: seria
+        # una ⭐ degradada con reloj, y con el la guarda anti-re-promocion
+        # se queda ciega.
+        conn.execute("UPDATE wallets SET is_tracked=0, turno_desde=NULL, "
+                     "prueba_desde=NULL, ai_class=NULL, pnl_updated=NULL "
+                     "WHERE address='PROMO_BUENA'")
+        conn.commit()
+        aa.evaluate_tracked(_ConnRoba(
+            conn, "PROMO_BUENA", "UPDATE wallets SET ai_class=?"))
+        _fcar = conn.execute(
+            "SELECT is_tracked, turno_desde, prueba_desde FROM wallets "
+            "WHERE address='PROMO_BUENA'").fetchone()
+        comprobar("una degradacion a mitad de la promocion no deja reloj "
+                  "de turno puesto",
+                  not (_fcar["turno_desde"] and not _fcar["is_tracked"]),
+                  str(dict(_fcar)))
+        comprobar("ni el reloj de la prueba (si volviera, le regalaria "
+                  "el plazo entero y un motivo de retiro falso)",
+                  not (_fcar["prueba_desde"] and not _fcar["is_tracked"]),
+                  str(dict(_fcar)))
+        conn.execute("UPDATE wallets SET is_tracked=1 "
+                     "WHERE address='PROMO_BUENA'")
+        conn.commit()
+
+        # Y al reves: si el dueño hace /rastrear JUSTO cuando la IA la
+        # esta degradando, el borrado de fase no puede pisar la estrella
+        # recien restaurada (en Postgres las dos escrituras no son
+        # atomicas).
+        conn.execute("UPDATE wallets SET is_tracked=1, turno_desde=NULL, "
+                     "prueba_desde=NULL, ai_class=NULL, pnl_updated=NULL "
+                     "WHERE address='PROMO_MALA'")
+        conn.commit()
+        _ver_prev2 = aa.ai_verdict
+        aa.ai_verdict = lambda *a, **k: {
+            "clasificacion": "indeterminado", "seguir": False,
+            "confianza": 80, "alias": None, "razon": "no",
+            "modelo": "doble"}
+        try:
+            aa.evaluate_tracked(_ConnRastreo(
+                conn, "PROMO_MALA", ahora, "UPDATE wallets SET ai_class=?"))
+        finally:
+            aa.ai_verdict = _ver_prev2
+        _fres = conn.execute(
+            "SELECT is_tracked, turno_desde FROM wallets "
+            "WHERE address='PROMO_MALA'").fetchone()
+        comprobar("un /rastrear a mitad de la degradacion no se queda sin "
+                  "reloj de turno",
+                  not (_fres["is_tracked"] and not _fres["turno_desde"]),
+                  str(dict(_fres)))
+        conn.execute("UPDATE wallets SET is_tracked=0, turno_desde=NULL, "
+                     "ai_class=NULL, pnl_updated=NULL "
+                     "WHERE address='PROMO_MALA'")
+        conn.commit()
+
+        # Al QUITAR la estrella se borra el reloj del turno: si volviera
+        # mas adelante, se la juzgaria por TODO su historial otra vez y
+        # no con media pagina en blanco.
+        conn.execute("UPDATE wallets SET is_tracked=1, turno_desde=?, "
+                     "ai_class=NULL, pnl_updated=NULL "
+                     "WHERE address='PROMO_MALA'", (ahora - 86400,))
+        conn.commit()
+        _ver_prev = aa.ai_verdict
+        aa.ai_verdict = lambda *a, **k: {
+            "clasificacion": "indeterminado", "seguir": False,
+            "confianza": 80, "alias": None, "razon": "la IA dice que no",
+            "modelo": "doble"}
+        aa.evaluate_tracked(conn)
+        aa.ai_verdict = _ver_prev
+        _fdeg = conn.execute(
+            "SELECT is_tracked, turno_desde FROM wallets "
+            "WHERE address='PROMO_MALA'").fetchone()
+        comprobar("al quitar la ⭐ se borra el reloj del turno",
+                  _fdeg["is_tracked"] == 0
+                  and _fdeg["turno_desde"] is None, str(dict(_fdeg)))
+        conn.execute("UPDATE wallets SET is_tracked=0, ai_class=NULL, "
+                     "pnl_updated=NULL WHERE address='PROMO_MALA'")
+        conn.commit()
+
+        # Con la tabla `trades` en su tope, la guarda NO se apaga: la
+        # poda deja la tabla clavada EN el tope, asi que apagarse ahi
+        # seria apagarse para siempre. Se AVISA y se sigue juzgando.
+        import io as _io
+        import contextlib as _ctx
+        _tope_prev = _ts.MAX_TRADES_TOTAL
+        _ts.MAX_TRADES_TOTAL = 1
+        _salida = _io.StringIO()
+        try:
+            with _ctx.redirect_stdout(_salida):
+                aa.evaluate_tracked(conn)
+        finally:
+            _ts.MAX_TRADES_TOTAL = _tope_prev
+        comprobar("con `trades` en su tope la guarda SIGUE aplicandose",
+                  conn.execute("SELECT is_tracked FROM wallets WHERE "
+                               "address='PROMO_MALA'").fetchone()
+                  ["is_tracked"] == 0)
+        comprobar("pero avisa al dueño de que hay que subir el tope",
+                  "MAX_TRADES_TOTAL" in _salida.getvalue(),
+                  _salida.getvalue()[-200:])
+        conn.execute("UPDATE wallets SET is_tracked=0, ai_class=NULL, "
+                     "pnl_updated=NULL WHERE address='PROMO_MALA'")
+        conn.commit()
+
+        # El interruptor de apagado devuelve el comportamiento anterior.
+        cfg.FILTRO_PUERTA_PROMOCION = 0
+        conn.execute("UPDATE wallets SET ai_class=NULL, pnl_updated=NULL")
+        conn.commit()
+        aa.evaluate_tracked(conn)
+        comprobar("FILTRO_PUERTA_PROMOCION=0 apaga la guarda",
+                  conn.execute("SELECT is_tracked FROM wallets WHERE "
+                               "address='PROMO_MALA'").fetchone()
+                  ["is_tracked"] == 1)
+    finally:
+        aa.profile_wallet = previos["perfil"]
+        aa._hard_bot_reason = previos["bot"]
+        aa.ai_verdict = previos["veredicto"]
+        aa.nota_bloquea = previos["nota"]
+        wi.identificar = previos["id"]
+        wi.motivo_exclusion = previos["mot"]
+        wf.recien_creada = previos["nueva"]
+        wf.hermanas = previos["herm"]
+        wf.hermana_con_estrella = previos["jefa"]
+        wf.destronar_hermanas = previos["destr"]
+        ws.compute_score = previos["score"]
+        cfg.FILTRO_PUERTA_PROMOCION = previos["puerta"]
+        cfg.FILTRO_MIN_CERRADAS = previos["cerradas"]
+        _ts.MAX_TRADES_TOTAL = previos["tope_trades"]
+        conn.close()
+
+
+class _CursorFalso:
+    """Cursor con filas ya materializadas (para simular una carrera)."""
+
+    def __init__(self, filas):
+        self._f = filas
+
+    def fetchall(self):
+        return self._f
+
+    def fetchone(self):
+        return self._f[0] if self._f else None
+
+
+class _ConnRoba:
+    """Conexión que le quita la ⭐ a una billetera JUSTO despues de que
+    el código lea su fila: sirve para probar los candados
+    `AND is_tracked = 1` + `rowcount` de la racha y de la revisión."""
+
+    def __init__(self, real, victima, fragmento):
+        self._real = real
+        self._victima = victima
+        self._frag = fragmento
+        self.robada = False
+
+    def execute(self, sql, params=()):
+        cur = self._real.execute(sql, params)
+        if not self.robada and self._frag in " ".join(sql.split()):
+            filas = cur.fetchall()
+            self._real.execute(
+                "UPDATE wallets SET is_tracked = 0 WHERE address = ?",
+                (self._victima,))
+            self._real.commit()
+            self.robada = True
+            return _CursorFalso(filas)
+        return cur
+
+    def commit(self):
+        return self._real.commit()
+
+    def close(self):
+        pass            # la conexión real la cierra quien la abrió
+
+
+class _ConnRastreo:
+    """Conexión que simula un /rastrear del dueño JUSTO en medio de la
+    clasificación: le pone reloj nuevo a la billetera despues de que la
+    pasada leyera el viejo."""
+
+    def __init__(self, real, victima, nuevo_reloj, fragmento=None):
+        self._real = real
+        self._victima = victima
+        self._reloj = nuevo_reloj
+        self._frag = fragmento or "MAX(s.ts) AS ult"
+        self.disparado = False
+
+    def execute(self, sql, params=()):
+        cur = self._real.execute(sql, params)
+        if not self.disparado and self._frag in " ".join(sql.split()):
+            filas = cur.fetchall()
+            # Un /rastrear completo: estrella y reloj de turno nuevos.
+            self._real.execute(
+                "UPDATE wallets SET prueba_desde = ?, is_tracked = 1, "
+                "turno_desde = ? WHERE address = ?",
+                (self._reloj, self._reloj, self._victima))
+            self._real.commit()
+            self.disparado = True
+            return _CursorFalso(filas)
+        return cur
+
+    def commit(self):
+        return self._real.commit()
+
+    def close(self):
+        pass
+
+
+class _ConnCarrera:
+    """Conexión que, justo DESPUÉS de que `clasificar` lea la lista de
+    estrellas, le quita la ⭐ a una de ellas — la carrera real entre el
+    hilo del ciclo y el que degrada (racha, /descartar, revisión)."""
+
+    def __init__(self, real, victima):
+        self._real = real
+        self._victima = victima
+        self.robada = False
+
+    def execute(self, sql, params=()):
+        cur = self._real.execute(sql, params)
+        # Se roba la ⭐ en la ÚLTIMA consulta previa al bucle (la de la
+        # última señal): así el historial ya está calculado y la
+        # billetera llega a la línea de la confirmación, que es
+        # justamente lo que hay que probar.
+        if not self.robada and "MAX(s.ts) AS ult" in " ".join(sql.split()):
+            filas = cur.fetchall()
+            self._real.execute(
+                "UPDATE wallets SET is_tracked = 0 WHERE address = ?",
+                (self._victima,))
+            self._real.commit()
+            self.robada = True
+            return _CursorFalso(filas)
+        return cur
+
+    def commit(self):
+        return self._real.commit()
+
+
+def prueba_18o_carrera():
+    bloque("18-O/3 - la confirmacion no resucita a una ⭐ ya degradada")
+    import time as _t
+    import config as cfg
+    import filtro_calidad as fc
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    act_previo = cfg.FILTRO_TRES_PUERTAS
+    cer_previo = cfg.FILTRO_MIN_CERRADAS
+    cfg.FILTRO_TRES_PUERTAS = 1
+    cfg.FILTRO_MIN_CERRADAS = 10
+    try:
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, confirmada) "
+            "VALUES ('CARRERA',1,0,0)")
+        for i in range(12):
+            t0 = ahora - (10 + i) * 86400
+            for side, sol, ts in (("compra", 1.0, t0),
+                                  ("venta", 1.6 if i < 9 else 0.4,
+                                   t0 + 90 * 60)):
+                conn.execute(
+                    "INSERT INTO trades (wallet, signature, mint, side, "
+                    "sol, tokens, ts) VALUES ('CARRERA',?,?,?,?,100,?)",
+                    (f"c{i}{side}", f"CM{i}", side, sol, ts))
+        conn.commit()
+
+        proxy = _ConnCarrera(conn, "CARRERA")
+        fc.clasificar(proxy)
+        comprobar("la carrera se disparó (la ⭐ se pierde a mitad)",
+                  proxy.robada)
+        fcar = conn.execute("SELECT is_tracked, confirmada FROM wallets "
+                            "WHERE address='CARRERA'").fetchone()
+        comprobar("no queda el estado imposible is_tracked=0 + "
+                  "confirmada=1", not (fcar["confirmada"] and
+                                       not fcar["is_tracked"]),
+                  f"is_tracked={fcar['is_tracked']} "
+                  f"confirmada={fcar['confirmada']}")
+
+        # Sin carrera, la misma billetera SÍ se confirma (la condición
+        # nueva no rompe el camino normal).
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=0 "
+                     "WHERE address='CARRERA'")
+        conn.commit()
+        fc.clasificar(conn)
+        fok = conn.execute("SELECT confirmada FROM wallets "
+                           "WHERE address='CARRERA'").fetchone()
+        comprobar("y sin carrera se confirma como siempre",
+                  fok["confirmada"] == 1, str(fok["confirmada"]))
+
+        # DOS RELOJES, DOS COSAS (ronda 4). `prueba_desde` es el plazo
+        # de inactividad y la clasificacion lo reinicia; `turno_desde`
+        # dice desde cuando cuentan las señales y NADIE de aqui lo toca.
+        # Cuando eran la misma columna, la ⭐ que empezaba a fallar se
+        # blindaba: al volver a prueba se le renovaba el reloj y con el
+        # se le borraba el expediente medido.
+        conn.execute("DELETE FROM signals")
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=1, "
+                     "prueba_desde=?, turno_desde=? "
+                     "WHERE address='CARRERA'",
+                     (ahora - 30 * 86400, ahora - 30 * 86400))
+        for i in range(9):     # empieza a fallar la puerta 3
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?, 'CARRERA', ?, 1, ?, "
+                "'compra', -70)",
+                (f"cn{i}", f"CN{i}", ahora - 3600 + i))
+        conn.commit()
+        fc.clasificar(conn)
+        fnull2 = conn.execute(
+            "SELECT confirmada, prueba_desde, turno_desde FROM wallets "
+            "WHERE address='CARRERA'").fetchone()
+        comprobar("la confirmada que falla la puerta 3 vuelve a prueba",
+                  not fnull2["confirmada"], str(dict(fnull2)))
+        comprobar("y se le renueva el plazo de prueba (como en 18-L)",
+                  fnull2["prueba_desde"] > ahora - 86400,
+                  str(fnull2["prueba_desde"]))
+        comprobar("pero NO el reloj del turno: sus señales malas siguen "
+                  "contando contra ella",
+                  fnull2["turno_desde"] == ahora - 30 * 86400,
+                  str(fnull2["turno_desde"]))
+        import performance_review as pv3
+        comprobar("y la guarda anti-re-promocion las ve",
+                  pv3.perdedora_confirmada(conn, "CARRERA") is not None,
+                  str(pv3.perdedora_confirmada(conn, "CARRERA")))
+
+        # Una ⭐ vieja SIN reloj de turno (base migrada) no recibe uno de
+        # la clasificacion: NULL significa "se la juzga por todo", que es
+        # la direccion segura. Si la clasificacion se lo pusiera, el dia
+        # del despliegue amnistiaria a toda la poblacion de golpe.
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=0, "
+                     "prueba_desde=NULL, turno_desde=NULL "
+                     "WHERE address='CARRERA'")
+        conn.commit()
+        fc.clasificar(conn)
+        fmig = conn.execute(
+            "SELECT turno_desde FROM wallets "
+            "WHERE address='CARRERA'").fetchone()
+        comprobar("a la ⭐ heredada sin reloj de turno no se le inventa "
+                  "uno (nada de amnistia al desplegar)",
+                  fmig["turno_desde"] is None, str(fmig["turno_desde"]))
+        comprobar("y por eso sus señales viejas siguen contando",
+                  pv3.perdedora_confirmada(conn, "CARRERA") is not None,
+                  str(pv3.perdedora_confirmada(conn, "CARRERA")))
+
+        # Lo mismo con el interruptor maestro apagado.
+        conn.execute("UPDATE wallets SET confirmada=0 "
+                     "WHERE address='CARRERA'")
+        conn.commit()
+        cfg.FILTRO_TRES_PUERTAS = 0
+        fc.clasificar(conn)
+        cfg.FILTRO_TRES_PUERTAS = 1
+        fapag = conn.execute(
+            "SELECT confirmada, turno_desde FROM wallets "
+            "WHERE address='CARRERA'").fetchone()
+        comprobar("con el embudo apagado tampoco se inventa reloj",
+                  fapag["confirmada"] == 1
+                  and fapag["turno_desde"] is None, str(dict(fapag)))
+
+        # El retiro por inactividad dice lo que mide, y no pisa un
+        # /rastrear que haya ocurrido a mitad de la pasada.
+        conn.execute("DELETE FROM signals")
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=0, "
+                     "prueba_desde=? WHERE address='CARRERA'",
+                     (ahora - 40 * 86400,))
+        conn.execute("DELETE FROM trades WHERE wallet='CARRERA'")
+        conn.commit()
+        fc.clasificar(conn)
+        fret = conn.execute(
+            "SELECT is_tracked, ai_reason FROM wallets "
+            "WHERE address='CARRERA'").fetchone()
+        comprobar("la inactiva pierde la ⭐ con un motivo que dice lo que "
+                  "de verdad se midio",
+                  fret["is_tracked"] == 0
+                  and "con ⭐ sin operar" in (fret["ai_reason"] or ""),
+                  str(fret["ai_reason"])[:120])
+
+        # Y si el dueño hace /rastrear a mitad de la pasada, el retiro
+        # por inactividad NO puede aplicarse con el reloj viejo.
+        conn.execute("UPDATE wallets SET is_tracked=1, confirmada=0, "
+                     "prueba_desde=? WHERE address='CARRERA'",
+                     (ahora - 40 * 86400,))
+        conn.commit()
+        proxy3 = _ConnRastreo(conn, "CARRERA", ahora)
+        fc.clasificar(proxy3)
+        comprobar("el /rastrear a mitad de pasada se disparó",
+                  proxy3.disparado)
+        frast = conn.execute(
+            "SELECT is_tracked, prueba_desde FROM wallets "
+            "WHERE address='CARRERA'").fetchone()
+        comprobar("un /rastrear a mitad de pasada no lo pisa el retiro "
+                  "por inactividad con el reloj viejo",
+                  frast["is_tracked"] == 1, str(dict(frast)))
+
+        # G2: la carrera tampoco debe dejar reloj puesto sin estrella
+        # (ese reloj falso cegaria a la guarda de arriba). Se prueban los
+        # DOS caminos que ponen el reloj: el de la confirmada que vuelve
+        # a prueba y el de la que entra en prueba por primera vez.
+        for etiqueta, conf in (("volviendo de confirmada", 1),
+                               ("entrando en prueba por primera vez", 0)):
+            conn.execute("UPDATE wallets SET is_tracked=1, confirmada=?, "
+                         "prueba_desde=NULL WHERE address='CARRERA'",
+                         (conf,))
+            conn.commit()
+            proxy2 = _ConnCarrera(conn, "CARRERA")
+            fc.clasificar(proxy2)
+            fg2 = conn.execute(
+                "SELECT is_tracked, prueba_desde FROM wallets "
+                "WHERE address='CARRERA'").fetchone()
+            comprobar(f"degradada a mitad ({etiqueta}) no queda con "
+                      f"reloj puesto",
+                      not (fg2["prueba_desde"] and not fg2["is_tracked"]),
+                      f"is_tracked={fg2['is_tracked']} "
+                      f"prueba_desde={fg2['prueba_desde']}")
+    finally:
+        cfg.FILTRO_TRES_PUERTAS = act_previo
+        cfg.FILTRO_MIN_CERRADAS = cer_previo
+        conn.close()
+
+
+def prueba_18o_puertas12():
+    bloque("18-O/4 - una sola version de las puertas 1-2")
+    import config as cfg
+    import filtro_calidad as fc
+
+    cer_previo = cfg.FILTRO_MIN_CERRADAS
+    cfg.FILTRO_MIN_CERRADAS = 10
+    try:
+        buena = {"cerradas": 12, "wr": 70.0, "tokens": 12,
+                 "hold_min": 90.0, "neto": 5.0}
+        comprobar("historial bueno pasa las puertas 1-2",
+                  fc.puertas_historial(buena)[0])
+        comprobar("sin historial NO pasa (y lo dice)",
+                  fc.puertas_historial(None)[0] is False
+                  and "historial corto" in fc.puertas_historial(None)[1])
+        for campo, valor, texto in (
+                ("cerradas", 4, "historial corto"),
+                ("wr", 30.0, "winrate"),
+                ("neto", -3.0, "pierde dinero"),
+                ("hold_min", 5.0, "retención"),
+                ("tokens", 2, "tokens operados")):
+            malo = dict(buena, **{campo: valor})
+            ok, motivo = fc.puertas_historial(malo)
+            comprobar(f"puertas 1-2: cae por {campo}",
+                      (not ok) and texto in motivo, f"{ok} {motivo}")
+        # /filtro deduce "se quedó en la puerta 2" leyendo el TEXTO del
+        # motivo. Si alguien cambia esas cadenas sin mirar, el mando le
+        # enseñaría al dueño un embudo distinto del real: se fijan aquí.
+        p2 = [fc.puertas_historial(dict(buena, hold_min=5.0))[1],
+              fc.puertas_historial(dict(buena, tokens=2))[1]]
+        comprobar("los motivos de la puerta 2 llevan las palabras que "
+                  "/filtro busca (la constante, no una copia)",
+                  all(any(p in m for p in fc._PALABRAS_PUERTA2)
+                      for m in p2), f"{p2} vs {fc._PALABRAS_PUERTA2}")
+        p1 = [fc.puertas_historial(dict(buena, cerradas=4))[1],
+              fc.puertas_historial(dict(buena, wr=30.0))[1],
+              fc.puertas_historial(dict(buena, neto=-3.0))[1]]
+        comprobar("y los de la puerta 1 NO las llevan (si no, /filtro "
+                  "contaría a un suspenso de la 1 como aprobado)",
+                  not any(any(p in m for p in fc._PALABRAS_PUERTA2)
+                          for m in p1), str(p1))
+        # El indice por billetera de `signals` tiene que crearse al
+        # arrancar: las tres consultas nuevas por billetera (racha,
+        # rendimiento medido, puerta 3) escanean la tabla entera sin el.
+        import db as _dbi
+        comprobar("el arranque crea el indice signals(wallet, ts)",
+                  any("idx_signals_wallet_ts" in q
+                      for q in _dbi._INDICES_TARDIOS),
+                  str(_dbi._INDICES_TARDIOS))
+    finally:
+        cfg.FILTRO_MIN_CERRADAS = cer_previo
+
+
+def prueba_18o_turno():
+    bloque("18-O/7 - el reloj del turno se borra en TODA degradacion")
+    import re as _re
+    import time as _t
+    import config as cfg
+    import ai_analyst as aa
+    import filtro_calidad as fc
+    import performance_review as pv
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    cer_previo = cfg.FILTRO_MIN_CERRADAS
+    cfg.FILTRO_MIN_CERRADAS = 10
+    try:
+        # 1) INVARIANTE ESTRUCTURAL. Cualquier UPDATE del repo que quite
+        # la estrella tiene que borrar tambien el reloj del turno; si se
+        # queda puesto sin estrella, la guarda que impide a la IA
+        # re-promover a una perdedora medida se queda ciega. Se
+        # comprueba sobre el CODIGO porque los sitios son once y estan
+        # repartidos por siete ficheros.
+        import glob as _glob
+        _raiz = os.path.dirname(os.path.abspath(__file__))
+        huerfanos = []
+        for ruta in _glob.glob(os.path.join(_raiz, "*.py")):
+            arch = os.path.basename(ruta)
+            if arch.startswith("pruebas_"):
+                continue
+            # Los comentarios se quitan: varios EXPLICAN el estado
+            # is_tracked=0 en prosa y no son consultas.
+            texto = "\n".join(
+                "" if l.lstrip().startswith("#") else l
+                for l in open(ruta, encoding="utf-8").read().splitlines())
+            for m in _re.finditer(r"is_tracked\s*=\s*0", texto):
+                trozo = texto[max(0, m.start() - 500):m.start() + 500]
+                if "UPDATE wallets" not in trozo:
+                    continue        # no es una degradacion
+                if "turno_desde" not in trozo:
+                    linea = texto[:m.start()].count("\n") + 1
+                    huerfanos.append(f"{arch}:{linea}")
+        comprobar("ningun UPDATE con `is_tracked = 0` literal deja el "
+                  "reloj del turno puesto (los de `is_tracked = ?` los "
+                  "cubren las pruebas de comportamiento de 18-O/2)",
+                  not huerfanos, ", ".join(huerfanos))
+
+        # Y al arrancar se REPARAN las filas viejas que quedaron con la
+        # confirmacion puesta sin estrella: sin eso, la primera
+        # re-promocion de la IA las metia al altavoz sin puertas.
+        import db as _dbrep
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, confirmada, "
+            "prueba_desde, turno_desde) VALUES ('HUERFANA',0,0,1,111,222)")
+        conn.commit()
+        _dbrep._preparar_sqlite(conn)
+        _fh = conn.execute(
+            "SELECT confirmada, prueba_desde, turno_desde FROM wallets "
+            "WHERE address='HUERFANA'").fetchone()
+        comprobar("el arranque limpia la confirmacion huerfana",
+                  not _fh["confirmada"] and _fh["prueba_desde"] is None
+                  and _fh["turno_desde"] is None, str(dict(_fh)))
+
+        # El export es lo que el dueño (o quien le ayude) analiza fuera:
+        # sin las columnas de fase no se puede saber que ⭐ alertaban ni
+        # sobre que ventana se las juzgaba, y cualquier recalculo daria
+        # numeros distintos a los del bot.
+        _exp = open(os.path.join(_raiz, "exportar.py"),
+                    encoding="utf-8").read()
+        _faltan = [c for c in ("confirmada", "prueba_desde", "turno_desde")
+                   if c not in _exp]
+        comprobar("el export lleva las columnas de fase de la ⭐",
+                  not _faltan, str(_faltan))
+
+        # 2) Y tres caminos de degradacion, ejercitados de verdad.
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+
+        def estrella(w, grade=None):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "confirmada, turno_desde, grade) VALUES (?,1,0,0,?,?)",
+                (w, ahora - 5 * 86400, grade))
+
+        estrella("DEG_REEMBUDO")          # sin historial: /reembudo la echa
+        estrella("DEG_GRADO", "Descartada")
+        conn.commit()
+
+        import wallet_funding as _wf
+        _fam_real = _wf.familia
+        _wf.familia = lambda a: []
+        try:
+            aa.depurar_estrellas(conn)
+        finally:
+            _wf.familia = _fam_real
+        fg = conn.execute(
+            "SELECT is_tracked, turno_desde FROM wallets "
+            "WHERE address='DEG_GRADO'").fetchone()
+        comprobar("la depuracion por nota borra el reloj del turno",
+                  fg["is_tracked"] == 0 and fg["turno_desde"] is None,
+                  str(dict(fg)))
+
+        conn.execute("UPDATE wallets SET is_tracked=1, turno_desde=? "
+                     "WHERE address='DEG_REEMBUDO'", (ahora - 5 * 86400,))
+        conn.commit()
+        fc.reevaluacion(conn, ejecutar=True)
+        fr = conn.execute(
+            "SELECT is_tracked, turno_desde FROM wallets "
+            "WHERE address='DEG_REEMBUDO'").fetchone()
+        comprobar("/reembudo borra el reloj del turno",
+                  fr["is_tracked"] == 0 and fr["turno_desde"] is None,
+                  str(dict(fr)))
+
+        # 3) La guarda anti-re-promocion SI corta por el turno.
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        estrella("GUARDA")
+        for i in range(12):        # 12 medidas malas ANTERIORES al turno
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?, 'GUARDA', ?, 1, ?, "
+                "'compra', -50)",
+                (f"g{i}", f"GM{i}", ahora - 30 * 86400 + i))
+        conn.commit()
+        comprobar("con la ⭐ puesta, la guarda no le saca el expediente "
+                  "de su turno anterior",
+                  pv.perdedora_confirmada(conn, "GUARDA") is None,
+                  str(pv.perdedora_confirmada(conn, "GUARDA")))
+        conn.execute("UPDATE wallets SET is_tracked=0, turno_desde=NULL "
+                     "WHERE address='GUARDA'")
+        conn.commit()
+        comprobar("pero degradada (sin reloj) la guarda las ve TODAS: la "
+                  "IA no puede re-promoverla",
+                  pv.perdedora_confirmada(conn, "GUARDA") is not None,
+                  str(pv.perdedora_confirmada(conn, "GUARDA")))
+    finally:
+        cfg.FILTRO_MIN_CERRADAS = cer_previo
+        conn.close()
+
+
+def prueba_18o_quorum():
+    bloque("18-O/5 - el quorum de salida cuenta solo ⭐ confirmadas")
+    import time as _t
+    import paper_trading as pt
+    from db import get_conn, get_setting, set_setting
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    _fill_real = pt._fill_nuevo
+    _quorum_previo = str(get_setting(conn, "consenso_salida_n", "2") or "2")
+    llamadas = []
+    try:
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM paper_trades")
+        conn.execute("DELETE FROM paper_fills")
+        set_setting(conn, "consenso_salida_n", "2")
+        ent = ahora - 600
+        # LIDER y Q2 confirmadas; Q3 EN PRUEBA (medida en silencio).
+        for w, conf in (("LIDER", 1), ("Q2", 1), ("Q3", 0)):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "confirmada) VALUES (?,1,0,?)", (w, conf))
+            conn.execute(       # las tres compraron dentro de la ventana
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side) VALUES (?,?,'QM',1,?,'compra')",
+                (f"qc{w}", w, ent - 600))
+        # Posicion viva abierta por CONSENSO, a nombre de la lider.
+        conn.execute(
+            "INSERT INTO paper_trades (id, signature, wallet, mint, "
+            "symbol, stake_sol, entry_price, entry_ts, status, origen) "
+            "VALUES (1,'sig0','LIDER','QM','QM',1,1.0,?, 'abierta', "
+            "'consenso')", (ent,))
+        conn.commit()
+
+        def _fill_espia(conn_, trade_id, firma):
+            llamadas.append((trade_id, firma))
+            return False        # corta ahi: solo interesa si SE LLEGO
+        pt._fill_nuevo = _fill_espia
+
+        def vende(w, k):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side) VALUES (?,?,'QM',1,?,'venta')",
+                (f"qv{w}{k}", w, ent + 60 + k))
+            conn.commit()
+
+        # Vende SOLO la que esta en prueba: no debe contar para nada.
+        vende("Q3", 1)
+        pt.close_on_wallet_sell(
+            conn, {"mint": "QM", "wallet": "Q3", "signature": "v1"},
+            {"price": 2.0})
+        comprobar("la ⭐ EN PRUEBA sola no alcanza el quorum de salida",
+                  llamadas == [], str(llamadas))
+        comprobar("y la posicion sigue abierta",
+                  conn.execute("SELECT status FROM paper_trades WHERE id=1")
+                  .fetchone()["status"] == "abierta")
+
+        # Ahora vende una confirmada: 1 confirmada < quorum 2.
+        vende("Q2", 2)
+        pt.close_on_wallet_sell(
+            conn, {"mint": "QM", "wallet": "Q3", "signature": "v2"},
+            {"price": 2.0})
+        comprobar("una sola confirmada tampoco (el quorum es 2)",
+                  llamadas == [], str(llamadas))
+
+        # Y con dos confirmadas vendiendo, si se llega a la salida.
+        vende("LIDER", 3)
+        pt.close_on_wallet_sell(
+            conn, {"mint": "QM", "wallet": "Q3", "signature": "v3"},
+            {"price": 2.0})
+        comprobar("con DOS confirmadas vendiendo si se llega a la salida",
+                  len(llamadas) == 1, str(llamadas))
+
+        # Si una de la manada pierde la confirmacion, deja de sumar al
+        # quorum. Eso es lo buscado, y NO atrapa la posicion: la venta de
+        # la LIDER (la que abrio) cierra por su propia via, sin quorum.
+        llamadas.clear()
+        conn.execute("DELETE FROM paper_fills")
+        conn.execute("UPDATE wallets SET confirmada=0 WHERE address='Q2'")
+        conn.commit()
+        pt.close_on_wallet_sell(
+            conn, {"mint": "QM", "wallet": "Q3", "signature": "v4"},
+            {"price": 2.0})
+        comprobar("si una de la manada se desconfirma, deja de sumar",
+                  llamadas == [], str(llamadas))
+        pt.close_on_wallet_sell(
+            conn, {"mint": "QM", "wallet": "LIDER", "signature": "v5"},
+            {"price": 2.0})
+        comprobar("pero la venta de la LIDER cierra igual: la posicion "
+                  "nunca queda atrapada por el quorum",
+                  len(llamadas) == 1, str(llamadas))
+        conn.execute("UPDATE wallets SET confirmada=1 WHERE address='Q2'")
+        conn.commit()
+    finally:
+        pt._fill_nuevo = _fill_real
+        set_setting(conn, "consenso_salida_n", _quorum_previo)
+        conn.close()
+
+
+def prueba_18o_medidas():
+    bloque("18-O/6 - la puerta 3 NO caduca (olvidar premiaria a la mala)")
+    import time as _t
+    import config as cfg
+    import filtro_calidad as fc
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    ven_previo = cfg.FILTRO_VENTANA_DIAS
+    prov_previo = cfg.FILTRO_PROVISIONAL
+    cfg.FILTRO_VENTANA_DIAS = 90
+    cfg.FILTRO_PROVISIONAL = 1
+    try:
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot) "
+            "VALUES ('VENTANA',1,0)")
+        for i in range(8):         # 8 medidas MALAS y viejas
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                "side, chg_24h) VALUES (?, 'VENTANA', ?, 1, ?, "
+                "'compra', -60)",
+                (f"vv{i}", f"VM{i}", ahora - 200 * 86400 + i))
+        conn.commit()
+        m = fc.medidas(conn).get("VENTANA") or {}
+        comprobar("las medidas malas NO caducan (si caducaran, la "
+                  "billetera volveria al altavoz como 'provisional')",
+                  m.get("n") == 8, str(m))
+        m1 = fc.medidas(conn, "VENTANA").get("VENTANA") or {}
+        comprobar("ni pidiendo la billetera suelta (las dos consultas "
+                  "tienen que decir lo mismo)",
+                  m1.get("n") == 8, str(m1))
+        buena = {"cerradas": 12, "wr": 70.0, "tokens": 12,
+                 "hold_min": 90.0, "neto": 5.0}
+        ok, motivo = fc.puertas(buena, m)
+        comprobar("y con ellas la puerta 3 la sigue suspendiendo",
+                  (not ok) and "medidas malas" in motivo, f"{ok} {motivo}")
+        comprobar("mientras que sin medidas pasaria como provisional "
+                  "(por eso olvidar seria peligroso)",
+                  fc.puertas(buena, None)[0] is True)
+    finally:
+        cfg.FILTRO_VENTANA_DIAS = ven_previo
+        cfg.FILTRO_PROVISIONAL = prov_previo
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -3655,6 +5042,13 @@ def main():
     prueba_filtro()
     prueba_18m()
     prueba_reembudo()
+    prueba_18o_rastrear()
+    prueba_18o_promocion()
+    prueba_18o_carrera()
+    prueba_18o_puertas12()
+    prueba_18o_turno()
+    prueba_18o_quorum()
+    prueba_18o_medidas()
 
     print("\n" + "─" * 60)
     if _FALLOS:

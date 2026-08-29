@@ -193,7 +193,17 @@ def historial(conn, wallet: str | None = None) -> dict:
 
 
 def medidas(conn, wallet: str | None = None) -> dict:
-    """{billetera: {"n", "acierto", "mediana"}} de sus compras medidas."""
+    """{billetera: {"n", "acierto", "mediana"}} de sus compras medidas.
+
+    SIN ventana temporal, y es DELIBERADO (18-O, ronda 2). Se probó a
+    ponerle la misma ventana que al historial y la auditoría demostró
+    que ahí la caducidad juega al revés: con FILTRO_PROVISIONAL=1 (lo
+    que eligió el dueño), "pocas medidas" NO significa suspenso, sino
+    aprobado provisional. Es decir, dejar caducar unas medidas malas no
+    baja la nota: la SUBE, y una billetera silenciada por sus resultados
+    reales volvía al altavoz sola con solo pasar el tiempo. Olvidar es
+    peligroso cuando la ausencia de datos se premia.
+    """
     if wallet:
         rows = conn.execute(
             """SELECT wallet, chg_24h FROM signals
@@ -215,11 +225,23 @@ def medidas(conn, wallet: str | None = None) -> dict:
             for w, v in por.items()}
 
 
-def puertas(hist: dict | None, med: dict | None) -> tuple:
-    """(pasa_todo, motivo). El motivo dice SIEMPRE en qué puerta se queda.
+# Palabras que solo aparecen en los motivos de la PUERTA 2. `resumen()`
+# (/filtro) las usa para saber si una billetera se quedó en la puerta 1 o
+# en la 2 sin volver a escribir las condiciones. Si se cambia el texto de
+# un motivo, hay que mirar aquí (y la suite lo caza).
+_PALABRAS_PUERTA2 = ("retención", "tokens operados")
 
-    `hist`/`med` son las entradas de historial()/medidas() para UNA
-    billetera (None = sin datos en esa fuente).
+
+def puertas_historial(hist: dict | None) -> tuple:
+    """(pasa, motivo) de las puertas 1 y 2 SOLAS — las que se juzgan con
+    el historial guardado en `trades`, sin señales medidas.
+
+    (18-O) Existe para que haya UNA sola versión de las puertas 1-2.
+    Antes vivían escritas tres veces: dentro de `puertas`, copiadas a
+    mano en `reevaluacion` (/reembudo) y ausentes en la promoción de la
+    IA — y esa ausencia era el agujero que metió 17 ⭐ malas en un día
+    (medido en la base del dueño el 28/8: de 24 ⭐, 7 pasaban; las 17
+    restantes las había promovido la IA sin pasar por aquí).
     """
     cfg = _cfg()
     h = hist or {"cerradas": 0, "wr": None, "tokens": 0, "hold_min": None,
@@ -260,6 +282,21 @@ def puertas(hist: dict | None, med: dict | None) -> tuple:
         return (False, f"solo {h['tokens']} tokens operados "
                        f"(mínimo {cfg['min_tokens']}: un trader real "
                        f"diversifica)")
+    return (True, "historial y copiabilidad OK")
+
+
+def puertas(hist: dict | None, med: dict | None) -> tuple:
+    """(pasa_todo, motivo). El motivo dice SIEMPRE en qué puerta se queda.
+
+    `hist`/`med` son las entradas de historial()/medidas() para UNA
+    billetera (None = sin datos en esa fuente).
+    """
+    cfg = _cfg()
+    ok12, motivo12 = puertas_historial(hist)
+    if not ok12:
+        return (False, motivo12)
+    h = hist or {"cerradas": 0, "wr": None, "tokens": 0, "hold_min": None,
+                 "neto": 0.0}
     # Puerta 3 — confirmación en vivo, el único predictor demostrado
     m = med or {"n": 0, "acierto": None, "mediana": None}
     if m["n"] < cfg["min_medidas"]:
@@ -331,42 +368,74 @@ def clasificar(conn) -> dict:
         if ok:
             n_conf += 1
             if not r["confirmada"]:
-                conn.execute(
+                # (18-O) `AND is_tracked = 1`: la lista `est` se leyó al
+                # empezar la pasada, y clasificar tarda. Si mientras
+                # tanto otro hilo le quita la ⭐ (racha perdedora,
+                # /descartar, revisión de rendimiento), sin esta
+                # condición la confirmación resucitaba media billetera:
+                # is_tracked=0 + confirmada=1. Ese estado imposible no
+                # alerta hoy (el conjunto operativo exige las dos), pero
+                # dejaba puesta la confirmación para la siguiente
+                # promoción, que entraría al altavoz SIN pasar puertas.
+                cur = conn.execute(
                     """UPDATE wallets SET confirmada = 1,
                        ai_reason = SUBSTR(? || COALESCE(ai_reason,''),
                                           1, 500)
-                       WHERE address = ?""",
+                       WHERE address = ? AND is_tracked = 1""",
                     (f"✅ confirmada: {motivo} · ", w))
+                if getattr(cur, "rowcount", 1) == 0:
+                    n_conf -= 1        # se la llevó otro hilo
             continue
         # No pasa: en prueba. El reloj de la prueba empieza la primera
         # vez que se la clasifica (prueba_desde), no al descubrirla.
         desde = r["prueba_desde"]
         if r["confirmada"]:
-            # Confirmada que dejó de cumplir: vuelve a prueba con motivo.
-            conn.execute(
+            # Confirmada que dejó de cumplir: vuelve a prueba con motivo
+            # y con el plazo de prueba fresco (como en 18-L: este reloj
+            # es el de la INACTIVIDAD, no el que decide qué señales la
+            # juzgan — eso vive en `turno_desde` y aquí no se toca).
+            cur = conn.execute(
                 """UPDATE wallets SET confirmada = 0, prueba_desde = ?,
                    ai_reason = SUBSTR(? || COALESCE(ai_reason,''), 1, 500)
-                   WHERE address = ?""",
+                   WHERE address = ? AND is_tracked = 1""",
                 (ahora, f"🔎 vuelve a prueba: {motivo} · ", w))
-            n_prueba += 1
+            if getattr(cur, "rowcount", 1) != 0:
+                n_prueba += 1
             continue
         if not desde:
-            conn.execute(
-                "UPDATE wallets SET prueba_desde = ? WHERE address = ?",
+            # (18-O) `AND is_tracked = 1` también aquí: sin ella, una ⭐
+            # degradada a mitad de la pasada acababa con
+            # is_tracked=0 + prueba_desde puesto — un estado que no
+            # existe en ningún otro sitio y que le regalaría el plazo de
+            # prueba entero si volviera a entrar.
+            cur = conn.execute(
+                "UPDATE wallets SET prueba_desde = ? "
+                "WHERE address = ? AND is_tracked = 1",
                 (ahora, w))
-            n_prueba += 1
+            if getattr(cur, "rowcount", 1) != 0:
+                n_prueba += 1
             continue
         # Retiro por inactividad: lleva toda la prueba sin operar.
         if desde < corte_prueba \
                 and (ult_senal.get(w) or 0) < corte_prueba:
-            conn.execute(
+            # `AND prueba_desde = ?` es un candado sobre el reloj que se
+            # acaba de leer: si entre el SELECT y este UPDATE el dueño
+            # hizo /rastrear (reloj nuevo), la billetera NO se retira con
+            # el reloj viejo. Es la misma carrera que 18-O cierra en la
+            # racha perdedora.
+            cur = conn.execute(
                 """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
-                   confirmada = 0, prueba_desde = NULL,
+                   confirmada = 0, prueba_desde = NULL, turno_desde = NULL,
                    ai_reason = SUBSTR(? || COALESCE(ai_reason,''), 1, 500)
-                   WHERE address = ?""",
-                (f"💤 sin ⭐: {cfg['prueba_dias']} días en prueba sin "
-                 f"operar · ", w))
-            n_ret += 1
+                   WHERE address = ? AND is_tracked = 1
+                     AND prueba_desde = ?""",
+                (f"💤 sin ⭐: {cfg['prueba_dias']} días con ⭐ sin "
+                 f"operar · ", w, desde))
+            # Si no tocó ninguna fila, otro hilo se la llevó (o el
+            # dueño la restauró): no se cuenta ni como retirada ni como
+            # en prueba, porque esta pasada no hizo ni una cosa ni otra.
+            if getattr(cur, "rowcount", 1) != 0:
+                n_ret += 1
         else:
             n_prueba += 1
       except Exception as _e:
@@ -387,12 +456,19 @@ def resumen(conn) -> str:
     for w in est:
         h = hist.get(w) or {"cerradas": 0, "wr": None, "tokens": 0,
                             "hold_min": None, "neto": 0.0}
-        if h["cerradas"] >= cfg["min_cerradas"] \
-                and h["wr"] is not None and h["wr"] >= cfg["wr_min"] \
-                and h.get("neto", 0.0) > cfg["neto_min"]:
+        # (18-O, ronda 3) El veredicto de las puertas 1-2 lo da SIEMPRE
+        # `puertas_historial`. Aquí estaba copiado a mano y /filtro podía
+        # acabar contando con un criterio distinto del que decide de
+        # verdad — el mando que el dueño usa para entender el embudo
+        # mostrando otra cosa que el embudo.
+        _ok12, _m12 = puertas_historial(h)
+        # El desglose 1 vs 2 se saca del MOTIVO que devuelve esa misma
+        # función; las palabras que lo delatan viven en UNA constante
+        # (_PALABRAS_PUERTA2) y hay prueba que las fija.
+        _es_p2 = any(p in _m12 for p in _PALABRAS_PUERTA2)
+        if _ok12 or _es_p2:
             p1 += 1
-            if (h["hold_min"] or 0) >= cfg["hold_min_min"] \
-                    and h["tokens"] >= cfg["min_tokens"]:
+            if _ok12:
                 p2 += 1
                 ok, motivo = puertas(h, med.get(w))
                 if ok and motivo.startswith("provisional"):
@@ -463,24 +539,14 @@ def reevaluacion(conn, ejecutar: bool = False) -> dict:
         w = r["address"]
         h = hist.get(w) or {"cerradas": 0, "wr": None, "tokens": 0,
                             "hold_min": None, "neto": 0.0}
-        # Solo puertas 1-2: el motivo que devuelva puertas() con las
-        # medidas en None es exactamente el veredicto del HISTORIAL
-        # (si llega a la puerta 3 sin medidas, en modo estricto diría
-        # "en prueba" y en provisional pasaría — ambos = sobrevive).
-        pasa_12 = (h["cerradas"] >= cfg["min_cerradas"]
-                   and h["wr"] is not None and h["wr"] >= cfg["wr_min"]
-                   and h.get("neto", 0.0) > cfg["neto_min"]
-                   and h["hold_min"] is not None
-                   and h["hold_min"] >= cfg["hold_min_min"]
-                   and h["tokens"] >= cfg["min_tokens"])
+        # Solo puertas 1-2 (la 3 se gana midiendo en vivo, no se le
+        # puede exigir a quien acaba de sobrevivir al re-embudo).
+        # (18-O) Antes esta condicion estaba copiada a mano aqui y podia
+        # separarse de puertas(); ahora las dos leen la MISMA funcion.
+        pasa_12, motivo = puertas_historial(h)
         if pasa_12:
             sobreviven.append((w, r["alias"]))
             continue
-        # El motivo es el veredicto del HISTORIAL: como pasa_12 es
-        # False, puertas() corta en la puerta 1 o en la 2 y nunca llega
-        # a la 3 (ni al modo provisional), asi que el texto siempre
-        # explica que le falta al historial.
-        _, motivo = puertas(h, None)
         caen.append((w, r["alias"], motivo))
     res = {"total": len(est), "caen": len(caen),
            "sobreviven": len(sobreviven),
@@ -492,7 +558,7 @@ def reevaluacion(conn, ejecutar: bool = False) -> dict:
         try:
             conn.execute(
                 """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
-                   confirmada = 0, prueba_desde = NULL,
+                   confirmada = 0, prueba_desde = NULL, turno_desde = NULL,
                    ai_reason = SUBSTR(? || COALESCE(ai_reason,''), 1, 500)
                    WHERE address = ? AND is_tracked = 1""",
                 (f"🧹 re-evaluación del embudo ({ahora}): {motivo} · ", w))

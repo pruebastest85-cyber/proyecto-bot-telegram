@@ -254,7 +254,7 @@ def destronar_hermanas(conn, address: str) -> list[str]:
             conn.execute(
                 """UPDATE wallets
                    SET is_tracked = 0, ai_follow = 0, confirmada = 0,
-                       prueba_desde = NULL,
+                       prueba_desde = NULL, turno_desde = NULL,
                        ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ?""", (motivo, a))
         conn.commit()

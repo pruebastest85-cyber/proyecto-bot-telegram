@@ -35,7 +35,53 @@ REVIEW_MIN_SIGNALS = _int_env("REVIEW_MIN_SIGNALS", 8)
 REVIEW_MIN_WR = _int_env("REVIEW_MIN_WR", 35)
 
 
-def _stats(conn, wallet: str):
+def inicio_del_turno(conn, wallet: str) -> int:
+    """Momento (epoch) desde el que cuentan las señales de esta ⭐.
+
+    (18-O) Es `wallets.turno_desde`: se pone al DAR la estrella (la IA
+    al promover, el dueño con /rastrear) y se borra al quitarla — queda
+    NULL = 0 = "cuenta toda su vida". Es una columna APARTE de
+    `prueba_desde` a propósito: aquel es el plazo de inactividad, que la
+    clasificación reinicia cada vez que una ⭐ vuelve a prueba, y usar el
+    mismo número para las dos cosas hacía que una ⭐ se blindara justo al
+    empezar a fallar (se le renovaba el reloj y con él el expediente).
+
+    Existe porque sin esto /rastrear se deshacía solo: el dueño
+    restauraba una billetera y, en menos de 15 minutos, la revisión de
+    rachas la degradaba OTRA VEZ con las MISMAS cuatro señales viejas
+    que ya la habían degradado. El dueño no puede corregir al bot si el
+    bot vuelve a juzgar con el expediente de antes. Con la marca puesta,
+    la estrella se juzga por lo que hace DESDE que empieza su turno.
+
+    Alcance exacto, sin adornos: mientras la billetera está DEGRADADA la
+    marca vale NULL, así que la guarda que impide a la IA re-promoverla
+    (`perdedora_confirmada`) sigue viendo todo su historial de señales —
+    que es su razón de ser. Si la billetera TIENE la ⭐, esa misma guarda
+    pasa a mirar solo su turno, igual que los demás jueces.
+    """
+    try:
+        r = conn.execute(
+            "SELECT turno_desde FROM wallets WHERE address = ?",
+            (wallet,)).fetchone()
+    except Exception:
+        return 0
+    if not r:
+        return 0
+    try:
+        return int(r["turno_desde"] or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _desde(row) -> int:
+    """`turno_desde` de una fila ya leída, a prueba de bases viejas."""
+    try:
+        return int(row["turno_desde"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return 0
+
+
+def _stats(conn, wallet: str, desde: int | None = None):
     """Señales de compra ya medidas de una billetera (hasta 30).
 
     (Ola 17-A) Antes esto metía en el MISMO saco los rendimientos medidos
@@ -43,12 +89,18 @@ def _stats(conn, wallet: str):
     y esa media mezclada era el criterio que RETIRA la ⭐. Ahora los dos
     horizontes se calculan por separado y se usa uno solo — el de 24 h si
     hay muestra suficiente, el de 1 h si no — diciendo siempre cuál.
+
+    (18-O) Solo cuentan las señales del TURNO ACTUAL de la estrella (ver
+    `inicio_del_turno`). `desde` se puede pasar ya calculado para no
+    repetir la consulta billetera a billetera.
     """
+    if desde is None:
+        desde = inicio_del_turno(conn, wallet)
     rows = conn.execute(
         """SELECT chg_1h, chg_24h FROM signals
-           WHERE wallet=? AND side='compra'
+           WHERE wallet=? AND side='compra' AND ts >= ?
              AND (chg_1h IS NOT NULL OR chg_24h IS NOT NULL)
-           ORDER BY ts DESC LIMIT 30""", (wallet,)).fetchall()
+           ORDER BY ts DESC LIMIT 30""", (wallet, int(desde or 0))).fetchall()
     v24 = [float(r["chg_24h"]) for r in rows if r["chg_24h"] is not None]
     v1 = [float(r["chg_1h"]) for r in rows if r["chg_1h"] is not None]
 
@@ -243,11 +295,12 @@ def review_tracked(notify: bool = True) -> dict:
     revisadas = 0
     try:
         estrellas = conn.execute(
-            """SELECT address, alias FROM wallets
+            """SELECT address, alias, turno_desde FROM wallets
                WHERE is_tracked=1 AND COALESCE(is_bot,0)=0""").fetchall()
         for w in estrellas:
             addr = w["address"]
-            st = _stats(conn, addr)
+            # (18-O) Se la juzga por su turno actual, no por el anterior.
+            st = _stats(conn, addr, _desde(w))
             if not st or st["n"] < REVIEW_MIN_SIGNALS:
                 continue          # aún sin evidencia suficiente
             revisadas += 1
@@ -256,11 +309,27 @@ def review_tracked(notify: bool = True) -> dict:
                          f"{st['wr']}% de acierto y {st['media']:+.1f}% "
                          f"promedio en {st['n']} señales medidas a "
                          f"{st['horizonte']}")
-                conn.execute(
+                # (18-O) El motivo se ANTEPONE a la ficha en vez de
+                # borrarla: con el borrado se perdía el rastro de por qué
+                # la billetera había llegado hasta aquí (qué puertas
+                # pasó, quién la promovió), y el dueño solo tiene esa
+                # ficha para entender a una ⭐. (La re-evaluación de la
+                # IA sigue reescribiendo `ai_reason` entera; eso es de
+                # antes y queda fuera de esta ola.)
+                cur = conn.execute(
                     """UPDATE wallets SET is_tracked=0, ai_follow=0,
                        confirmada=0, prueba_desde=NULL,
-                       grade='Observación', ai_reason=?
-                       WHERE address=?""", (razon, addr))
+                       turno_desde=NULL,
+                       grade='Observación',
+                       ai_reason=SUBSTR(? || COALESCE(ai_reason,''), 1, 500)
+                       WHERE address=? AND is_tracked=1""",
+                    (f"📉 sin ⭐: {razon} · ", addr))
+                # (18-O) Solo se apunta la degradación si de verdad tocó
+                # una fila: si otro hilo ya le había quitado la ⭐, el
+                # resumen y el aviso al dueño contarían una degradación
+                # que esta revisión no hizo.
+                if getattr(cur, "rowcount", 1) == 0:
+                    continue
                 degradadas.append({"address": addr,
                                    "alias": w["alias"] or addr[:6],
                                    **st})
@@ -275,6 +344,20 @@ def review_tracked(notify: bool = True) -> dict:
                 "error": str(e)}
     finally:
         conn.close()
+
+    # (18-O) Sin esto, una ⭐ recién degradada seguía alertando y
+    # disparando copias hasta 60 s (el TTL de la caché del conjunto
+    # operativo) y hasta el siguiente barrido del webhook. Es el mismo
+    # remate que ya llevaban /descartar y /rastrear.
+    if degradadas:
+        try:
+            from db import invalidar_copiables
+            invalidar_copiables()
+            from realtime import invalidar_vigiladas, sync_helius_webhook
+            invalidar_vigiladas()
+            sync_helius_webhook()
+        except Exception as e:
+            print(f"· No pude invalidar cachés tras la revisión: {e}")
 
     print(f"🔍 Revisión de rendimiento: {revisadas} con datos, "
           f"{len(degradadas)} degradadas")
@@ -304,19 +387,23 @@ def review_text() -> str:
     conn = get_conn()
     try:
         estrellas = conn.execute(
-            """SELECT address, alias FROM wallets
+            """SELECT address, alias, turno_desde FROM wallets
                WHERE is_tracked=1 AND COALESCE(is_bot,0)=0""").fetchall()
         filas = []
         for w in estrellas:
-            st = _stats(conn, w["address"])
+            # (18-O) El turno viene en la misma fila: sin esto `_stats`
+            # hacía una consulta extra por cada ⭐ solo para leerlo.
+            st = _stats(conn, w["address"], _desde(w))
             if st:
                 filas.append((w["alias"] or w["address"][:6], st))
     finally:
         conn.close()
     if not filas:
         return ("📊 *Rendimiento de las ⭐*\n\nAún no hay señales medidas "
-                "suficientes. Vuelve cuando el sistema haya seguido más "
-                "señales.")
+                "suficientes _en el turno actual de cada estrella_ (solo "
+                "cuentan desde que recibió la ⭐, o desde que volvió a "
+                "recibirla tras un /rastrear). Vuelve cuando el sistema "
+                "haya seguido más señales.")
     filas.sort(key=lambda x: x[1]["media"], reverse=True)
     out = ["📊 *Rendimiento medido de las ⭐*\n"]
     for alias, st in filas[:15]:

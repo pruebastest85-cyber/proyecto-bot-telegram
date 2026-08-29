@@ -608,14 +608,27 @@ def _check_streaks(conn):
     for row in ws:
         w = row["wallet"]
         info = conn.execute(
-            "SELECT is_tracked, alias FROM wallets WHERE address=?",
-            (w,)).fetchone()
+            "SELECT is_tracked, alias, turno_desde FROM wallets "
+            "WHERE address=?", (w,)).fetchone()
         if not info or not info["is_tracked"]:
             continue
+        # (18-O) SOLO las señales del turno actual de la estrella.
+        # Este era el fallo que hacía que /rastrear se deshiciera solo:
+        # el dueño restauraba una billetera y esta misma función, en el
+        # barrido siguiente (15 min), la volvía a degradar con las
+        # MISMAS cuatro señales viejas — el bot le pisaba la mano al
+        # dueño con un expediente ya cerrado. `turno_desde` marca el
+        # inicio del turno (columna aparte del reloj de la prueba, que
+        # la clasificación reinicia); NULL (degradada) = cuenta todo,
+        # así que la guarda contra re-promociones no se afloja.
+        try:
+            desde = int(info["turno_desde"] or 0)
+        except (KeyError, IndexError, TypeError, ValueError):
+            desde = 0
         ult = conn.execute(
             "SELECT chg_24h FROM signals WHERE wallet=? AND side='compra' "
-            "AND chg_24h IS NOT NULL ORDER BY ts DESC LIMIT ?",
-            (w, STREAK_N)).fetchall()
+            "AND chg_24h IS NOT NULL AND ts>=? ORDER BY ts DESC LIMIT ?",
+            (w, desde, STREAK_N)).fetchall()
         if len(ult) < STREAK_N or any(r["chg_24h"] > 0 for r in ult):
             continue
         # RACHA ≠ RUINA (19/8): con el win rate tipico de memecoins
@@ -627,11 +640,33 @@ def _check_streaks(conn):
             (w,)).fetchone()
         if pnl30 and (pnl30["pnl_30d"] or 0) > 0:
             continue
-        conn.execute(
+        # (18-O) El motivo se antepone a la ficha en vez de borrarla, y
+        # el UPDATE exige is_tracked=1 (si otro hilo ya se la quitó, no
+        # se reescribe la ficha de una degradación que no ocurrió aquí).
+        cur = conn.execute(
             "UPDATE wallets SET is_tracked=0, ai_follow=0, confirmada=0, "
-            "prueba_desde=NULL, ai_reason=? WHERE address=?",
-            (f"Racha perdedora: últimas {STREAK_N} señales en negativo", w))
+            "prueba_desde=NULL, turno_desde=NULL, "
+            "ai_reason=SUBSTR(? || COALESCE(ai_reason,''), 1, 500) "
+            "WHERE address=? AND is_tracked=1",
+            (f"📉 sin ⭐: racha perdedora, últimas {STREAK_N} señales "
+             + ("de este turno " if desde else "")
+             + "en negativo · ", w))
         conn.commit()
+        # (18-O) Si otro hilo se le adelantó, el UPDATE no tocó ninguna
+        # fila: no se anuncia por Telegram una degradación que esta
+        # función no hizo (mismo patrón que la depuración de creadoras
+        # de mercado, que ya miraba el rowcount).
+        if getattr(cur, "rowcount", 1) == 0:
+            continue
+        # (18-O) El conjunto operativo se refresca YA: sin esto la
+        # billetera degradada seguía alertando y copiándose hasta 60 s.
+        try:
+            from db import invalidar_copiables
+            invalidar_copiables()
+            from realtime import invalidar_vigiladas
+            invalidar_vigiladas()
+        except Exception as e:
+            print(f"· No pude invalidar cachés tras la racha: {e}")
         alias = (info["alias"] or w[:8]).replace("*", "").replace("_", " ")
         print(f"📉 {alias} pierde la estrella por racha perdedora")
         try:

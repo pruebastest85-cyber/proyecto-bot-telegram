@@ -95,7 +95,8 @@ def _ensure_columns(conn):
                      # Ola 18-L: fase de la estrella (0 = en prueba,
                      # 1 = confirmada) y cuando empezo la prueba.
                      ("confirmada", "INTEGER"),
-                     ("prueba_desde", "BIGINT")]:
+                     ("prueba_desde", "BIGINT"),
+                     ("turno_desde", "BIGINT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {ine}{col} {typ}")
         except Exception:
@@ -355,6 +356,7 @@ def evaluate_tracked(conn) -> int:
                     conn.execute(
                         """UPDATE wallets SET is_bot=1, is_tracked=0,
                            confirmada=0, prueba_desde=NULL,
+                           turno_desde=NULL,
                            ai_follow=0, ai_class='entidad', ai_reason=?
                            WHERE address=?""",
                         (f"Excluida por identidad: {motivo}", a))
@@ -385,6 +387,27 @@ def evaluate_tracked(conn) -> int:
     except Exception:
         owner = {}
 
+    # (18-O) AVISO, no interruptor. `_podar_global` deja la tabla
+    # `trades` clavada EN el tope (borra justo lo que sobra), así que
+    # "estoy en el tope" es el estado permanente, no una excepción: usarlo
+    # para apagar la guarda de las puertas la habría apagado PARA SIEMPRE
+    # el día que la base creciera, y en silencio. Se avisa una vez por
+    # pasada y la guarda sigue haciendo su trabajo; si el aviso sale, el
+    # dueño tiene que subir MAX_TRADES_TOTAL — con la tabla podada, el
+    # historial viejo de las candidatas se pierde y el embudo se vuelve
+    # más severo de lo que dicen sus umbrales.
+    try:
+        from trades_store import MAX_TRADES_TOTAL as _tope_tr
+        _tot_tr = conn.execute(
+            "SELECT COUNT(*) AS c FROM trades").fetchone()["c"]
+        if _tot_tr >= _tope_tr:
+            print(f"  ⚠️ `trades` está en su tope ({_tot_tr}/{_tope_tr}): "
+                  f"a partir de aquí se poda historial viejo de las "
+                  f"candidatas y las puertas 1-2 las juzgarán con menos "
+                  f"datos. Sube MAX_TRADES_TOTAL.")
+    except Exception:
+        pass
+
     evaluated = 0
     for row in rows:
         addr = row["address"]
@@ -399,7 +422,7 @@ def evaluate_tracked(conn) -> int:
         if razon_bot:
             conn.execute(
                 """UPDATE wallets SET is_bot=1, is_tracked=0, confirmada=0,
-                   prueba_desde=NULL, ai_class='bot',
+                   prueba_desde=NULL, turno_desde=NULL, ai_class='bot',
                    ai_follow=0, ai_reason=?, alias=COALESCE(alias,'Bot Descartado'),
                    grade='Descartada',
                    pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?, pnl_updated=?
@@ -512,6 +535,16 @@ def evaluate_tracked(conn) -> int:
             print(f"· Señales de fondeo omitidas: {e}")
 
         seguir = 1 if verdict["seguir"] else 0
+        # ¿Tenia ya la estrella ANTES de esta evaluacion? Lo necesitan
+        # dos cosas: la guarda de las puertas (que no le quita la ⭐ a
+        # nadie) y el reloj del turno (que solo se estrena al DARLA).
+        try:
+            _fila_prev = conn.execute(
+                "SELECT is_tracked FROM wallets WHERE address = ?",
+                (addr,)).fetchone()
+            _era_estrella = bool(_fila_prev and _fila_prev["is_tracked"])
+        except Exception:
+            _era_estrella = False
         # Guarda de rendimiento MEDIDO: si sus señales ya emitidas perdieron
         # dinero de forma consistente, la IA NO puede devolverle la ⭐ (antes
         # la re-evaluación de 3 días revertía en silencio la degradación).
@@ -545,6 +578,47 @@ def evaluate_tracked(conn) -> int:
                     print(f"  ⛔ {addr[:8]}… no recibe ⭐: {_mm}")
             except Exception as e:
                 print(f"· guarda de creador de mercado omitida: {e}")
+
+        # Guarda de PUERTAS 1-2 (18-O): la ⭐ no se regala. Hasta ahora la
+        # IA podia promover a cualquiera y el filtro solo decidia despues
+        # si ALERTABA (columna `confirmada`). Resultado medido en la base
+        # del dueño el 28/8: 24 ⭐ vivas, 7 pasaban el embudo y 17 las
+        # habia metido esta re-evaluacion en un solo dia — ninguna con
+        # posibilidad de confirmarse nunca (la puerta 1 corta antes), asi
+        # que solo inflaban la lista y ocupaban sitio en el webhook.
+        # No gasta creditos: lee `trades`, que el perfilado acaba de
+        # guardar. Se apaga con FILTRO_PUERTA_PROMOCION=0.
+        if seguir:
+            try:
+                import config as _cfg_pp
+                # Solo se aplica a QUIEN NO TIENE la estrella todavia:
+                # esta guarda impide DARLA, no quitarla. Dos motivos:
+                #   · /rastrear del dueño tiene que valer. Si esta guarda
+                #     tocara tambien a las ⭐ vivas, la billetera que el
+                #     dueño acaba de restaurar a mano perderia la estrella
+                #     en el ciclo siguiente (2 h) y el mando volveria a
+                #     ser inutil, que es justo el fallo que arregla 18-O.
+                #   · A las ⭐ ya puestas que no pasan el embudo las
+                #     retira /reembudo, que es el mando que el dueño
+                #     dispara a proposito y le enseña la lista antes.
+                # (No hace falta comprobar `historial_entero`: cuando la
+                # descarga de Helius viene truncada, `_fetch_txs` devuelve
+                # la lista VACIA, `tx_sampled` es 0 y el bucle ya se salto
+                # esta billetera mucho antes de llegar aqui.)
+                if int(getattr(_cfg_pp, "FILTRO_PUERTA_PROMOCION", 1)) \
+                        and not _era_estrella:
+                    from filtro_calidad import (historial as _historial,
+                                                puertas_historial)
+                    _ok12, _m12 = puertas_historial(
+                        _historial(conn, addr).get(addr))
+                    if not _ok12:
+                        seguir = 0
+                        verdict["razon"] = (
+                            f"{verdict.get('razon', '')} · ⛔ sin ⭐: "
+                            f"{_m12}")[:500]
+                        print(f"  ⛔ {addr[:8]}… no recibe ⭐: {_m12}")
+            except Exception as e:
+                print(f"· guarda de puertas 1-2 omitida: {e}")
 
         if seguir:
             try:
@@ -608,15 +682,48 @@ def evaluate_tracked(conn) -> int:
         # aqui si no estaba ya corriendo) y solo la clasificacion de las
         # tres puertas la confirma. Una degradacion si retira la
         # confirmacion: sin estrella no hay fase que conservar.
+        # (18-O) `turno_desde` es OTRA cosa y va aparte: marca desde
+        # cuando cuentan las señales de esta ⭐ (ver
+        # performance_review.inicio_del_turno). Se pone al DAR la
+        # estrella, se borra al quitarla, y NADIE mas lo toca — el
+        # reloj de la prueba (prueba_desde) lo reinicia la clasificacion
+        # y mezclar los dos usos en una sola columna fue el fallo que
+        # destaparon las auditorias de esta ola.
         if seguir:
+            _ahora_t = int(_time_mod.time())
             conn.execute(
                 """UPDATE wallets SET prueba_desde = COALESCE(prueba_desde, ?)
-                   WHERE address = ? AND COALESCE(confirmada, 0) = 0""",
-                (int(_time_mod.time()), addr))
+                   WHERE address = ? AND is_tracked = 1
+                     AND COALESCE(confirmada, 0) = 0""",
+                (_ahora_t, addr))
+            # SOLO al DAR la estrella, nunca a quien ya la tenia. Si esto
+            # corriera para las ⭐ vivas, el dia del despliegue las 24 que
+            # hay se quedarian con `turno_desde` = hoy y con el expediente
+            # medido en blanco: la racha y la revision no podrian
+            # degradar a ninguna hasta que juntara señales nuevas. Una ⭐
+            # heredada se queda en NULL = se la juzga por toda su vida.
+            if not _era_estrella:
+                # `confirmada = 0` explícito: una fila que se quedó con
+                # la confirmación puesta sin estrella (estado que existió
+                # antes de 18-O) entraría al altavoz en el mismo instante
+                # de la promoción, sin puerta 3 y sin clasificar. La ⭐
+                # nueva SIEMPRE empieza en prueba.
+                conn.execute(
+                    """UPDATE wallets SET turno_desde = ?, confirmada = 0
+                       WHERE address = ? AND is_tracked = 1""",
+                    (_ahora_t, addr))
         else:
+            # `AND COALESCE(is_tracked,0) = 0`: si el dueño hizo
+            # /rastrear entre el UPDATE de arriba y este (en Postgres son
+            # dos escrituras confirmadas por separado), la billetera ya
+            # tiene la ⭐ otra vez y borrarle el reloj del turno la
+            # dejaría a merced de su expediente viejo — el fallo que
+            # arregla esta misma ola.
             conn.execute(
-                """UPDATE wallets SET confirmada = 0, prueba_desde = NULL
-                   WHERE address = ?""", (addr,))
+                """UPDATE wallets SET confirmada = 0, prueba_desde = NULL,
+                   turno_desde = NULL
+                   WHERE address = ? AND COALESCE(is_tracked, 0) = 0""",
+                (addr,))
         conn.commit()
         evaluated += 1
         _bump(conn, "funnel_profiled")
@@ -676,7 +783,7 @@ def depurar_estrellas(conn) -> dict:
                       f"{r['grade'] or 'sin nota'}")
             conn.execute(
                 """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
-                   confirmada = 0, prueba_desde = NULL,
+                   confirmada = 0, prueba_desde = NULL, turno_desde = NULL,
                    ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ?""", (motivo, r["address"]))
             fuera_grade.append(r["address"])
@@ -699,7 +806,8 @@ def depurar_estrellas(conn) -> dict:
             conn.execute(
                 """UPDATE wallets
                    SET is_tracked = 0, ai_follow = 0, confirmada = 0,
-                       prueba_desde = NULL, grade = 'Observación',
+                       prueba_desde = NULL, turno_desde = NULL,
+                       grade = 'Observación',
                        ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ?""", (motivo, r["address"]))
             fuera_hold.append(r["address"])
@@ -721,7 +829,8 @@ def depurar_estrellas(conn) -> dict:
             cur_mm = conn.execute(
                 """UPDATE wallets
                    SET is_tracked = 0, ai_follow = 0, confirmada = 0,
-                       prueba_desde = NULL, grade = 'Observación',
+                       prueba_desde = NULL, turno_desde = NULL,
+                       grade = 'Observación',
                        ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
                    WHERE address = ? AND is_tracked = 1""",
                 (f" · 🔁 sin ⭐: {motivo}", addr))
@@ -755,7 +864,7 @@ def depurar_estrellas(conn) -> dict:
                 conn.execute(
                     """UPDATE wallets
                        SET is_tracked = 0, ai_follow = 0, confirmada = 0,
-                           prueba_desde = NULL,
+                           prueba_desde = NULL, turno_desde = NULL,
                            ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?,
                                               1, 500)
                        WHERE address = ?""", (motivo, h))

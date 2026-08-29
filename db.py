@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS wallets (
     is_tracked      INTEGER DEFAULT 0,
     confirmada      INTEGER DEFAULT 0,
     prueba_desde    INTEGER,
+    turno_desde     INTEGER,
     score           REAL DEFAULT 0
 );
 
@@ -226,6 +227,7 @@ CREATE TABLE IF NOT EXISTS wallets (
     is_tracked       INTEGER DEFAULT 0,
     confirmada       INTEGER DEFAULT 0,
     prueba_desde     BIGINT,
+    turno_desde      BIGINT,
     score            DOUBLE PRECISION DEFAULT 0,
     ai_class         TEXT,
     ai_follow        INTEGER,
@@ -568,6 +570,15 @@ _INDICES_TARDIOS = (
     "ON predictions(mint, status)",
     "CREATE INDEX IF NOT EXISTS idx_pred_leader_eval "
     "ON predictions(leader, evaluated_ts)",
+    # (18-O) `signals` solo tenía índice por (mint, ts), así que toda
+    # consulta POR BILLETERA escaneaba la tabla entera y ordenaba en un
+    # árbol temporal — y hay dos por ⭐ y por pasada: la racha perdedora
+    # (cada 15 min) y el rendimiento medido. Con 188.000 señales ya se
+    # nota. NO arregla la consulta en LOTE de la puerta 3
+    # (`filtro_calidad.medidas` sin billetera), que recorre las señales
+    # de todas las ⭐ y seguirá escaneando.
+    "CREATE INDEX IF NOT EXISTS idx_signals_wallet_ts "
+    "ON signals(wallet, ts)",
 )
 
 
@@ -626,6 +637,7 @@ def _preparar_pg(pg):
             # cazado por la auditoria antes de subir).
             ("wallets", "confirmada", "INTEGER"),
             ("wallets", "prueba_desde", "BIGINT"),
+            ("wallets", "turno_desde", "BIGINT"),
             ("appearances", "delay_s", "INTEGER"),
             ("appearances", "price_at_buy", "DOUBLE PRECISION"),
             ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
@@ -723,6 +735,21 @@ def _preparar_pg(pg):
             pass
     _crear_indices_tardios(pg)
     _dedupe_aliases(pg)
+    # (18-O) REPARACION DE ESTADO. Una fila con la confirmacion puesta
+    # PERO sin estrella (is_tracked=0 + confirmada=1) no alerta hoy, pero
+    # si la IA la re-promueve entra al altavoz en ese mismo instante, sin
+    # puerta 3 y sin clasificar. Ese estado ya no se puede crear (18-O
+    # cerro los tres UPDATE de la clasificacion), pero las filas que se
+    # crearon antes siguen ahi: se limpian al arrancar, una vez.
+    try:
+        pg.execute(
+            "UPDATE wallets SET confirmada = 0, prueba_desde = NULL, "
+            "turno_desde = NULL "
+            "WHERE COALESCE(is_tracked, 0) = 0 "
+            "  AND COALESCE(confirmada, 0) = 1")
+        pg.commit()
+    except Exception as _e:
+        print(f"· reparacion de fases omitida: {_e}")
     # (18-L, auditoria ronda 2) Clasificar YA, no dentro de horas: la
     # migracion deja `confirmada` en NULL para todas las ⭐ y el unico
     # escritor era la depuracion del auto_cycle — hasta ese momento el
@@ -756,7 +783,8 @@ def _preparar_sqlite(conn):
                      ("hold_median_min", "REAL"), ("roi_median", "REAL"),
                      # (18-L) ver el comentario gemelo en _preparar_pg.
                      ("confirmada", "INTEGER"),
-                     ("prueba_desde", "INTEGER")]:
+                     ("prueba_desde", "INTEGER"),
+                     ("turno_desde", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -835,6 +863,21 @@ def _preparar_sqlite(conn):
     conn.commit()
     _crear_indices_tardios(conn)
     _dedupe_aliases(conn)
+    # (18-O) REPARACION DE ESTADO. Una fila con la confirmacion puesta
+    # PERO sin estrella (is_tracked=0 + confirmada=1) no alerta hoy, pero
+    # si la IA la re-promueve entra al altavoz en ese mismo instante, sin
+    # puerta 3 y sin clasificar. Ese estado ya no se puede crear (18-O
+    # cerro los tres UPDATE de la clasificacion), pero las filas que se
+    # crearon antes siguen ahi: se limpian al arrancar, una vez.
+    try:
+        conn.execute(
+            "UPDATE wallets SET confirmada = 0, prueba_desde = NULL, "
+            "turno_desde = NULL "
+            "WHERE COALESCE(is_tracked, 0) = 0 "
+            "  AND COALESCE(confirmada, 0) = 1")
+        conn.commit()
+    except Exception as _e:
+        print(f"· reparacion de fases omitida: {_e}")
     # (18-L, auditoria ronda 2) Clasificar YA, no dentro de horas: la
     # migracion deja `confirmada` en NULL para todas las ⭐ y el unico
     # escritor era la depuracion del auto_cycle — hasta ese momento el
@@ -1176,7 +1219,7 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
     # feed no se llena de decenas de wallets sin verificar comprando/vendiendo.
     conn.execute(
         "UPDATE wallets SET is_tracked = 0, confirmada = 0, "
-        "prueba_desde = NULL "
+        "prueba_desde = NULL, turno_desde = NULL "
         "WHERE is_tracked = 1 AND COALESCE(ai_follow, 0) <> 1")
     conn.commit()
     # Presupuesto de atención: si hay más ⭐ que el tope, las de menor

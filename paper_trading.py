@@ -975,9 +975,27 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             # compradora (compraron el mint en la ventana de consenso,
             # 45 min = la CONSENSUS_WINDOW_MIN de realtime, antes de la
             # entrada). Una ⭐ ajena que liquida una bolsa vieja no suma.
+            # (18-O) La VENDEDORA tiene que ser ⭐ confirmada, igual que
+            # lo era la manada al entrar (realtime exige confirmada=1
+            # para abrir por consenso). Antes bastaba con is_tracked=1,
+            # así que una billetera EN PRUEBA — a la que el dueño mandó
+            # medir en silencio, sin tocar el paper — podía empujar el
+            # quórum y sacar una posición. Medir en silencio es no tocar
+            # el paper nunca, ni para entrar ni para salir.
+            # La pertenencia a la manada (la subconsulta) es un HECHO
+            # PASADO y se deja sin filtrar: repetir ahí el filtro sería
+            # redundante (la vendedora ya tiene que ser confirmada) y
+            # confundiría un hecho de ayer con un estado de hoy.
+            # SÍ hay un efecto asumido: si una de la manada se
+            # desconfirma, deja de sumar al quórum. La posición no se
+            # queda atrapada por eso — la venta de la LÍDER cierra por su
+            # propia vía, y TP/SL/vencimiento siguen mandando — y la
+            # alternativa (que una ⭐ en prueba fuerce salidas) contradice
+            # la orden del dueño de medirla EN SILENCIO.
             vendedoras = conn.execute(
                 "SELECT COUNT(DISTINCT s.wallet) c FROM signals s "
                 "JOIN wallets w ON w.address=s.wallet AND w.is_tracked=1 "
+                "AND COALESCE(w.confirmada, 0) = 1 "
                 "WHERE s.mint=? AND s.side='venta' AND s.ts>=? "
                 "AND s.wallet IN (SELECT s2.wallet FROM signals s2 "
                 "  WHERE s2.mint=? AND s2.side='compra' "

@@ -92,7 +92,7 @@ def enforce_budget(conn, max_elite: int) -> int:
         # como el resto de escritores, para no crecer sin tope.
         conn.execute(
             "UPDATE wallets SET is_tracked=0, ai_follow=0, "
-            "confirmada=0, prueba_desde=NULL, "
+            "confirmada=0, prueba_desde=NULL, turno_desde=NULL, "
             "ai_reason=SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500) "
             "WHERE address=?",
             (" · descendida por presupuesto de atención", r["address"]))

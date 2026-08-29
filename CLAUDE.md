@@ -209,6 +209,44 @@ descarta `_weight`, o sea que no se pierde nada que se use).
   supongas nunca nada, siempre busca la evidencia"** — medir contra la
   base real ANTES de leer el código, y nunca proponer sin datos.
 
+### 6.1 DOS relojes distintos, no los mezcles (ola 18-O, 29/8)
+
+Son dos columnas a propósito. Mezclarlas en una sola fue el fallo que
+tres auditorías seguidas destaparon en esta ola:
+
+- **`wallets.prueba_desde` = plazo de INACTIVIDAD.** Lo reinicia la
+  clasificación cada vez que una ⭐ vuelve a prueba. Sirve para retirar a
+  la que lleva `FILTRO_PRUEBA_DIAS` sin operar, y para nada más.
+- **`wallets.turno_desde` = desde cuándo cuentan sus SEÑALES.** Solo lo
+  escriben los dos sitios que DAN la estrella: `ai_analyst` al promover
+  a quien NO la tenía (a una ⭐ viva no se lo toca: si no, el primer
+  ciclo tras desplegar amnistiaría a toda la población de golpe) y
+  `wallet_admin.restore_wallet`, que lo estrena SIEMPRE porque eso es
+  justo lo que el dueño pide con `/rastrear` — y el mensaje se lo dice.
+  Se borra en TODA degradación. NULL = "se la juzga por toda su vida",
+  que es la dirección segura y es el estado de las ⭐ heredadas de antes
+  de esta ola hasta que el dueño o una re-promoción las toque.
+
+Quien lo lee: `signal_tracker._check_streaks` y `performance_review._stats`
+(y por ella `review_tracked`, `perdedora_confirmada`, `review_text`).
+Sin esto, `/rastrear` se deshacía solo: el dueño restauraba una billetera
+y la racha la volvía a degradar en 15 min con las MISMAS señales viejas.
+`filtro_calidad.medidas()` (la puerta 3) **no** mira el turno y es
+deliberado: con `FILTRO_PROVISIONAL=1`, olvidar medidas malas ASCIENDE a
+la billetera a "provisional", así que ahí la caducidad juega al revés.
+
+- La IA **no puede DAR** la ⭐ a quien no pasa las puertas 1-2
+  (`FILTRO_PUERTA_PROMOCION=0` lo apaga). Se abstiene **solo** si el
+  historial de Helius vino truncado. **No quita** estrellas ya puestas:
+  de eso se encarga `/reembudo`. Si la tabla `trades` llega a su tope,
+  la guarda NO se apaga (la poda deja la tabla clavada EN el tope, así
+  que apagarse ahí sería apagarse para siempre): avisa por el log una
+  vez por pasada y hay que subir `MAX_TRADES_TOTAL`. **Ese aviso va al
+  log del supervisor, no a Telegram.**
+- `filtro_calidad.puertas_historial()` es la ÚNICA versión de las puertas
+  1-2. La usan `puertas()`, `reevaluacion()` (/reembudo), `resumen()`
+  (/filtro), la guarda de promoción y el aviso de `/rastrear`.
+
 ## 7. Cómo trabajar aquí
 
 - **Explica cada decisión técnica en lenguaje sencillo.** El usuario no

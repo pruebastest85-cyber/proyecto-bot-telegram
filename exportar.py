@@ -68,7 +68,8 @@ def exportar(ruta: str | None = None, max_ops: int = 2_000_000,
             SELECT address, alias, grade, consistency, wallet_score,
                    pnl_total, pnl_net, pnl_30d, winning_tokens_count,
                    score, ai_class, ai_reason, is_tracked, is_bot,
-                   hold_median_min, roi_median
+                   hold_median_min, roi_median,
+                   confirmada, prueba_desde, turno_desde
             FROM wallets WHERE COALESCE(is_bot,0)=0""")
         apariciones = _filas(conn, """
             SELECT wallet, mint, buy_sol, buy_time, buy_rank, delay_s,
