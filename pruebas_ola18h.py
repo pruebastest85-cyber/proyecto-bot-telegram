@@ -23,6 +23,10 @@ os.environ["DB_PATH"] = os.path.join(_TMP, "pruebas.db")
 # irian contra una base REAL. Se quita SIEMPRE: las pruebas son de
 # SQLite temporal, sin excepciones.
 os.environ.pop("DATABASE_URL", None)
+# (18-P) Y RADAR_SILENCIOSO: la suite fija que el radar viene DE FÁBRICA
+# en modo oculto, y eso solo se puede comprobar si el entorno de quien
+# ejecuta las pruebas no lo ha cambiado.
+os.environ.pop("RADAR_SILENCIOSO", None)
 os.environ.setdefault("HELIUS_API_KEY", "clave-de-prueba")
 os.environ.setdefault("TELEGRAM_TOKEN", "0:token-de-prueba")
 os.environ.setdefault("TELEGRAM_CHAT_ID", "1")
@@ -5021,6 +5025,410 @@ def prueba_18o_medidas():
         conn.close()
 
 
+# ---------------------------------------------------------------------
+# OLA 18-P - el radar trabaja en silencio (pedido del dueno 29/8).
+# ---------------------------------------------------------------------
+def prueba_18p_radar():
+    bloque("18-P - el radar trabaja oculto: ni un mensaje, mismo trabajo")
+    import asyncio as _aio
+    import time as _t
+    import types as _ty
+    import radar as rd
+    import realtime as rt
+    import telegram_bot as tb
+    from db import get_conn, get_setting, set_setting
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    enviados = []
+    _tg_prev = rt.tg_send
+    rt.tg_send = lambda *a, **k: enviados.append(a[0] if a else "")
+    _sil_prev = get_setting(conn, "radar_silencioso", None)
+    _def_prev = rd.SILENCIOSO_DEF
+    try:
+        conn.execute("DELETE FROM radar_tokens")
+        conn.commit()
+
+        # 1) El interruptor: por defecto MUDO, y el ajuste manda sobre el
+        # valor de arranque (para que /radarsilencio no pida reinicio).
+        set_setting(conn, "radar_silencioso", "")
+        conn.commit()
+        comprobar("de fabrica (sin RADAR_SILENCIOSO en el entorno) el "
+                  "radar viene en modo oculto",
+                  _def_prev == 1, str(_def_prev))
+        rd.SILENCIOSO_DEF = 1
+        comprobar("por defecto el radar esta en modo oculto",
+                  rd.silencioso(conn) is True)
+        rd.SILENCIOSO_DEF = 0
+        comprobar("con RADAR_SILENCIOSO=0 de arranque, avisa",
+                  rd.silencioso(conn) is False)
+        set_setting(conn, "radar_silencioso", "1")
+        conn.commit()
+        comprobar("el ajuste guardado manda sobre el valor de arranque",
+                  rd.silencioso(conn) is True)
+        set_setting(conn, "radar_silencioso", "0")
+        conn.commit()
+        comprobar("y tambien para volver a encenderlo",
+                  rd.silencioso(conn) is False)
+        set_setting(conn, "radar_silencioso", "no-es-un-numero")
+        conn.commit()
+        rd.SILENCIOSO_DEF = 1
+        comprobar("un ajuste ilegible cae al valor de arranque, no revienta",
+                  rd.silencioso(conn) is True)
+
+        # 2) El mando /radarsilencio cambia el ajuste EN CALIENTE.
+        mensajes = []
+
+        class _Chat:
+            async def send_message(self, text, **kw):
+                mensajes.append(text)
+
+        class _Msg:
+            chat = _Chat()
+
+            async def reply_text(self, text, **kw):
+                mensajes.append(text)
+
+        upd = _ty.SimpleNamespace(message=_Msg(),
+                                  effective_user=_ty.SimpleNamespace(id=1))
+        set_setting(conn, "radar_silencioso", "0")
+        conn.commit()
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=["on"])))
+        comprobar("/radarsilencio on lo deja mudo al instante",
+                  rd.silencioso(conn) is True, str(mensajes[-1])[:80])
+        mensajes.clear()
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=["off"])))
+        comprobar("/radarsilencio off le devuelve la voz",
+                  rd.silencioso(conn) is False, str(mensajes[-1])[:80])
+        mensajes.clear()
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=[])))
+        comprobar("/radarsilencio a secas dice en que modo esta",
+                  "Radar con avisos" in mensajes[-1]
+                  and "modo oculto" not in mensajes[-1].lower(),
+                  str(mensajes[-1])[:110])
+        mensajes.clear()
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=["on"])))
+        mensajes.clear()
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=[])))
+        comprobar("y lo dice distinto cuando esta callado",
+                  "modo oculto" in mensajes[-1].lower()
+                  and "Radar con avisos" not in mensajes[-1],
+                  str(mensajes[-1])[:110])
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=["off"])))
+        mensajes.clear()
+        _aio.run(tb.cmd_radar_silencio(upd, _ty.SimpleNamespace(args=["xy"])))
+        comprobar("y un argumento raro solo explica el uso",
+                  "Uso:" in mensajes[-1], str(mensajes[-1])[:90])
+
+        # 3) La promocion al embudo SE HACE igual con el radar mudo: es lo
+        # valioso: mete al ciclo a los compradores tempranos del token.
+        def _sembrar():
+            conn.execute("DELETE FROM radar_tokens")
+            conn.execute(
+                "INSERT INTO radar_tokens (mint, ts, symbol, liq, "
+                "resultado, price0) VALUES ('RMINT',?,'RSYM',9000,"
+                "'sin_conocidas',1.0)", (ahora - 7200,))
+            conn.execute("DELETE FROM winning_tokens")
+            conn.commit()
+
+        # Sin red: se sustituyen las dos fuentes que consulta el
+        # seguimiento (precio y ficha del token) por dobles que dicen
+        # "x5 y con talla de ganador".
+        import signal_tracker as _st
+        import token_check as _tc
+        _px_prev, _an_prev = _st._price_mc_ex, _tc.analyze_token
+        _st._price_mc_ex = lambda m: (5.0, 900000.0, False, 90000.0)
+        _tc.analyze_token = lambda m: {"liq": 90000.0, "mc": 900000.0,
+                                       "vol24": 300000.0, "symbol": "RSYM",
+                                       "pair": "P1"}
+        try:
+          for mudo, etiqueta in ((True, "mudo"), (False, "con voz")):
+            _sembrar()
+            enviados.clear()
+            set_setting(conn, "radar_silencioso", "1" if mudo else "0")
+            conn.commit()
+            rd._seguimiento(conn)
+            fila = conn.execute(
+                "SELECT resultado FROM radar_tokens "
+                "WHERE mint='RMINT'").fetchone()
+            gan = conn.execute(
+                "SELECT COUNT(*) AS c FROM winning_tokens "
+                "WHERE mint='RMINT'").fetchone()["c"]
+            comprobar(f"({etiqueta}) el ganador se promueve al embudo igual",
+                      fila["resultado"] == "ganador_promovido" and gan == 1,
+                      f"{dict(fila)} winning={gan}")
+            if mudo:
+                comprobar("(mudo) y NO se manda ningun mensaje",
+                          enviados == [], str(enviados)[:120])
+            else:
+                comprobar("(con voz) si se manda el aviso",
+                          any("Radar" in m for m in enviados),
+                          str(enviados)[:120])
+        finally:
+            _st._price_mc_ex, _tc.analyze_token = _px_prev, _an_prev
+
+        # 3b) LO IMPORTANTE: la alerta de smart money (53 al dia en la
+        # base del dueño) se calla, pero el hallazgo se REGISTRA igual —
+        # /radar y el resumen tienen que seguir contandolo.
+        import helius_budget as _hb
+        _puede_prev = _hb.puede_llamar
+        _hb.puede_llamar = lambda *a, **k: True
+        _fr_prev, _cp_prev, _co_prev = (rd._frescos, rd._compradores,
+                                        rd._conocidas)
+        rd._frescos = lambda: [{"mint": "SMART1", "symbol": "SM",
+                                "liq": 20000.0, "edad_min": 10}]
+        rd._compradores = lambda m: {"W1"}
+        _conocidas_hay = [{"address": "W1", "alias": "Conocida",
+                           "is_tracked": 1, "grade": "Elite"}]
+        rd._conocidas = lambda conn_, buyers: _conocidas_hay
+        _tc.analyze_token = lambda m: {"price": 1.0, "liq": 20000.0,
+                                       "mc": 500000.0, "vol24": 100000.0,
+                                       "symbol": "SM", "rug_ok": True,
+                                       "score": 90}
+        _sem_prev = rd._semaforo
+        rd._semaforo = lambda t: (True, "seguridad OK")
+        # `escanear` llama a `_seguimiento` al final: se le pone tambien
+        # el doble del precio para que la suite no dependa NUNCA de que
+        # la fila sembrada caiga fuera de su ventana.
+        _px_prev2 = _st._price_mc_ex
+        _st._price_mc_ex = lambda m: (1.0, 100.0, False, 100.0)
+        try:
+            for mudo, etiqueta in ((True, "mudo"), (False, "con voz")):
+                conn.execute("DELETE FROM radar_tokens")
+                conn.commit()
+                enviados.clear()
+                set_setting(conn, "radar_silencioso", "1" if mudo else "0")
+                conn.commit()
+                n = rd.escanear()
+                fila = conn.execute(
+                    "SELECT resultado, smart FROM radar_tokens "
+                    "WHERE mint='SMART1'").fetchone()
+                comprobar(f"({etiqueta}) el hallazgo se registra igual",
+                          fila is not None
+                          and str(fila["resultado"]).startswith("alertado")
+                          and fila["smart"] == 1 and n == 1,
+                          f"{dict(fila) if fila else None} n={n}")
+                if mudo:
+                    comprobar("(mudo) y NO llega ni un mensaje al chat",
+                              enviados == [], str(enviados)[:150])
+                else:
+                    comprobar("(con voz) el aviso si sale",
+                              any("RADAR" in m for m in enviados),
+                              str(enviados)[:150])
+            # Y un token SIN conocidas deja `smart` en 0, no en NULL:
+            # NULL tiene que significar solo "fila anterior a 18-P".
+            conn.execute("DELETE FROM radar_tokens")
+            conn.commit()
+            _conocidas_hay.clear()
+            rd.escanear()
+            _fsc = conn.execute(
+                "SELECT resultado, smart FROM radar_tokens "
+                "WHERE mint='SMART1'").fetchone()
+            comprobar("un token sin conocidas queda con smart=0, no NULL",
+                      _fsc is not None and _fsc["smart"] == 0
+                      and str(_fsc["resultado"]).startswith("sin_conocidas"),
+                      str(dict(_fsc)) if _fsc else "sin fila")
+        finally:
+            _hb.puede_llamar = _puede_prev
+            rd._frescos, rd._compradores = _fr_prev, _cp_prev
+            rd._conocidas, rd._semaforo = _co_prev, _sem_prev
+            _tc.analyze_token = _an_prev      # se re-parcheo aqui arriba
+            _st._price_mc_ex = _px_prev2
+
+        # 4) La linea del resumen diario cuenta lo que paso.
+        conn.execute("DELETE FROM radar_tokens")
+        for k, (res, sm) in enumerate((("murio", 2), ("alertado:2", 2),
+                                       ("alertado:1", 1),
+                                       ("ganador_promovido", 3),
+                                       ("sin_conocidas", None))):
+            conn.execute(
+                "INSERT INTO radar_tokens (mint, ts, symbol, liq, "
+                "resultado, smart) VALUES (?,?,?,1000,?,?)",
+                (f"M{k}", ahora - 600, f"S{k}", res, sm))
+        conn.commit()
+        linea = rd.resumen_linea(conn)
+        comprobar("la linea del resumen cuenta examinados, con smart money "
+                  "y promovidos",
+                  linea and "5 tokens" in linea and "4 con" in linea
+                  and "1 promovido al embudo" in linea, str(linea))
+        conn.execute("DELETE FROM radar_tokens")
+        conn.commit()
+        comprobar("si el radar esta encendido y no examino NADA en 24 h, "
+                  "la linea AVISA (es la unica alarma que queda al "
+                  "quitarle la voz)",
+                  "0 tokens nuevos" in (rd.resumen_linea(conn) or "")
+                  and "revisa" in (rd.resumen_linea(conn) or ""),
+                  str(rd.resumen_linea(conn)))
+
+        # 4b) Y esa linea tiene que llegar de verdad al resumen diario:
+        # con el radar mudo es lo unico que el dueño ve sin preguntar.
+        conn.execute("DELETE FROM radar_tokens")
+        for k, (res, sm) in enumerate((("alertado:3", 3), ("murio", None))):
+            conn.execute(
+                "INSERT INTO radar_tokens (mint, ts, symbol, liq, "
+                "resultado, smart) VALUES (?,?,?,1000,?,?)",
+                (f"D{k}", ahora - 600, f"DS{k}", res, sm))
+        conn.commit()
+        import digest as _dg
+        _txt_res = _dg.resumen_text()
+        comprobar("el resumen diario lleva la linea del radar",
+                  "Radar de tokens recién nacidos" in _txt_res
+                  and "2 tokens nuevos examinados" in _txt_res,
+                  _txt_res[-260:])
+
+        # 4b-bis) Con el radar APAGADO del todo, el resumen no habla de
+        # el en presente, y /radarsilencio lo dice.
+        _act_prev = rd.ACTIVO
+        rd.ACTIVO = 0
+        try:
+            comprobar("con el radar apagado no sale linea en el resumen",
+                      rd.resumen_linea(conn) is None)
+            mensajes.clear()
+            _aio.run(tb.cmd_radar_silencio(upd,
+                                           _ty.SimpleNamespace(args=[])))
+            comprobar("y /radarsilencio avisa de que esta apagado",
+                      "APAGADO" in mensajes[-1], str(mensajes[-1])[-160:])
+        finally:
+            rd.ACTIVO = _act_prev
+
+        # 4c) La coletilla del resumen dice la verdad en los dos modos.
+        set_setting(conn, "radar_silencioso", "0")
+        conn.commit()
+        comprobar("con el radar avisando, el resumen NO dice 'en silencio'",
+                  "trabaja en silencio" not in _dg.resumen_text(),
+                  _dg.resumen_text()[-200:])
+        set_setting(conn, "radar_silencioso", "1")
+        conn.commit()
+        comprobar("y callado si lo dice",
+                  "trabaja en silencio" in _dg.resumen_text(),
+                  _dg.resumen_text()[-200:])
+
+        # 4d) El hallazgo que luego MURIO sigue saliendo en /radar: la
+        # lista va por `smart`, no por el estado (y sin LIKE '...%' con
+        # parametros, que en Postgres revienta la consulta).
+        conn.execute("DELETE FROM radar_tokens")
+        conn.execute(
+            "INSERT INTO radar_tokens (mint, ts, symbol, liq, resultado, "
+            "smart) VALUES ('MUERTO1',?,'MSYM',5000,'murio',4)",
+            (ahora - 3600,))
+        conn.commit()
+        _rt = rd.radar_text()
+        comprobar("el hallazgo que murio despues sigue en /radar",
+                  "MSYM" in _rt and "4 conocida" in _rt, _rt[-260:])
+        comprobar("y se ve QUE murio (si no, el dueño copiaria el mint de "
+                  "un token muerto)",
+                  "murió" in _rt, _rt[-260:])
+        # Una fila vieja con `smart` en NULL (relleno no llegado) no puede
+        # descuadrar el total con el desglose de arriba.
+        conn.execute("DELETE FROM radar_tokens")
+        conn.execute(
+            "INSERT INTO radar_tokens (mint, ts, symbol, liq, resultado) "
+            "VALUES ('VIEJA1',?,'VSYM',5000,'alertado:2')", (ahora - 600,))
+        conn.commit()
+        _rtv = rd.radar_text()
+        comprobar("una fila sin `smart` cuenta igual en el total de /radar",
+                  "Hallazgos de smart money en 24 h: 1" in _rtv, _rtv[:400])
+        comprobar("y la lista saca su numero del `resultado`, no un None",
+                  "2 conocida(s)" in _rtv and "None conocida" not in _rtv,
+                  _rtv[-260:])
+        comprobar("a un hallazgo aun sin comprobar no se le llama 'vivo' "
+                  "(el seguimiento mira 15 al azar por pasada)",
+                  "en seguimiento" in _rtv and "🟢 vivo" not in _rtv,
+                  _rtv[-260:])
+        comprobar("y con un solo token la linea del resumen va en "
+                  "singular",
+                  "1 token nuevo examinado ·" in (rd.resumen_linea(conn)
+                                                  or ""),
+                  str(rd.resumen_linea(conn)))
+        comprobar("y tambien en la linea del resumen",
+                  "1 con billeteras" in (rd.resumen_linea(conn) or ""),
+                  str(rd.resumen_linea(conn)))
+
+        # 4e) La columna `smart` se migra —y se RELLENA— en una base que
+        # ya existía. Va sobre una base temporal propia: `_preparar_sqlite`
+        # hace mucho más que el ALTER (repara fases y clasifica), y sobre
+        # la base compartida de la suite dejaría a las billeteras de otras
+        # pruebas reclasificadas.
+        import sqlite3 as _sq
+        import db as _dbm
+        _tmp = os.path.join(_TMP, "migra18p.db")
+        _cx = _sq.connect(_tmp)
+        _cx.row_factory = _sq.Row
+        _cx.executescript(
+            "CREATE TABLE radar_tokens (mint TEXT PRIMARY KEY, ts INTEGER, "
+            "symbol TEXT, liq REAL, resultado TEXT);"
+            "INSERT INTO radar_tokens VALUES "
+            "('V1', 1, 'VS1', 100, 'alertado:4'),"
+            "('V2', 1, 'VS2', 100, 'murio'),"
+            "('V3', 1, 'VS3', 100, 'alertado:');")
+        _cx.commit()
+        try:
+            _dbm._preparar_sqlite(_cx)
+            _cols = [r[1] for r in _cx.execute(
+                "PRAGMA table_info(radar_tokens)").fetchall()]
+            comprobar("una base vieja recibe la columna `smart` al arrancar",
+                      "smart" in _cols, str(_cols))
+            _v = {r["mint"]: r["smart"] for r in _cx.execute(
+                "SELECT mint, smart FROM radar_tokens").fetchall()}
+            comprobar("y las filas que ya decian 'alertado:N' recuperan el "
+                      "numero (si no, el dia del despliegue el resumen "
+                      "diria 0 justo cuando el radar deja de avisar)",
+                      _v.get("V1") == 4, str(_v))
+            comprobar("las que no lo dicen se quedan sin dato, no en 0 "
+                      "falso", _v.get("V2") is None, str(_v))
+            comprobar("y un 'alertado:' sin numero no revienta la "
+                      "migracion", _v.get("V3") is None, str(_v))
+        finally:
+            _cx.close()
+
+        # 4f) /radar: el desglose por estado y el TOTAL de hallazgos son
+        # dos numeros distintos y ninguno puede mentir. Antes "alertados"
+        # salia del estado y encogia solo cuando el token moria.
+        conn.execute("DELETE FROM radar_tokens")
+        for mint, res, sm in (("R1", "alertado:2", 2), ("R2", "murio", 3),
+                              ("R3", "ganador_promovido", 1),
+                              ("R4", "sin_conocidas", 0)):
+            conn.execute(
+                "INSERT INTO radar_tokens (mint, ts, symbol, liq, "
+                "resultado, smart) VALUES (?,?,?,1000,?,?)",
+                (mint, ahora - 3600, mint + "S", res, sm))
+        conn.commit()
+        _rt2 = rd.radar_text()
+        comprobar("/radar da el TOTAL de hallazgos por `smart`, no el "
+                  "estado (3, no 1)",
+                  "Hallazgos de smart money en 24 h: 3" in _rt2,
+                  _rt2[:400])
+        comprobar("y el desglose por estado ya no se llama 'alertados'",
+                  "aún en seguimiento: 1" in _rt2 and "🎯 alertados" not in _rt2,
+                  _rt2[:400])
+
+        # 5) /radar dice en que modo esta (es como el dueño lo comprueba).
+        set_setting(conn, "radar_silencioso", "1")
+        conn.commit()
+        comprobar("/radar avisa de que esta en modo oculto",
+                  "Modo oculto" in rd.radar_text())
+        set_setting(conn, "radar_silencioso", "0")
+        conn.commit()
+        comprobar("y de que esta avisando cuando lo esta",
+                  "Avisa por Telegram" in rd.radar_text())
+    finally:
+        rt.tg_send = _tg_prev
+        rd.SILENCIOSO_DEF = _def_prev
+        try:                    # no dejar rastro para las que vengan
+            conn.execute("DELETE FROM radar_tokens")
+            conn.execute("DELETE FROM winning_tokens")
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            set_setting(conn, "radar_silencioso",
+                        _sil_prev if _sil_prev is not None else "")
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -5049,6 +5457,7 @@ def main():
     prueba_18o_turno()
     prueba_18o_quorum()
     prueba_18o_medidas()
+    prueba_18p_radar()
 
     print("\n" + "─" * 60)
     if _FALLOS:

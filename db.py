@@ -184,7 +184,8 @@ CREATE TABLE IF NOT EXISTS radar_tokens (
     ts              INTEGER,
     symbol          TEXT,
     liq             REAL,
-    resultado       TEXT
+    resultado       TEXT,
+    smart           INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
@@ -376,7 +377,8 @@ CREATE TABLE IF NOT EXISTS radar_tokens (
     ts              BIGINT,
     symbol          TEXT,
     liq             DOUBLE PRECISION,
-    resultado       TEXT
+    resultado       TEXT,
+    smart           INTEGER
 );
 """
 
@@ -722,6 +724,12 @@ def _preparar_pg(pg):
             ("paper_trades", "muerto_desde", "BIGINT"),
             # Radar 14b: precio al examinar, para promover ganadores
             ("radar_tokens", "price0", "DOUBLE PRECISION"),
+            # (18-P) Cuantas billeteras conocidas se vieron dentro. Es un
+            # HECHO, no un estado: `resultado` lo pisa el seguimiento
+            # (murio/expirado/ganador_promovido) y con el se perdia la
+            # cuenta de hallazgos justo el dia que el radar dejo de
+            # avisar y esa cifra pasó a ser lo unico que el dueño ve.
+            ("radar_tokens", "smart", "INTEGER"),
             # (Ola 17-J) Retraso en segundos con que se consiguio el
             # precio de entrada de la señal. Ver el bloque de SQLite.
             ("signals", "price_lag_s", "INTEGER"),
@@ -735,6 +743,26 @@ def _preparar_pg(pg):
             pass
     _crear_indices_tardios(pg)
     _dedupe_aliases(pg)
+    # (18-P) Relleno hacia atrás de `smart`. La columna acaba de nacer y
+    # las filas que ya estaban se quedarían en NULL: el mismo día en que
+    # el radar deja de avisar, la línea del resumen —que es justo la
+    # compensación de ese silencio— diría "0 con billeteras de tu base
+    # dentro" y /radar se contradiría consigo mismo. El número vive en el
+    # propio `resultado` ('alertado:3'), así que se recupera de ahí. El
+    # `_` del patrón exige al menos un carácter: sin él, un 'alertado:' a
+    # secas intentaría convertir una cadena vacía en número (SQLite daría
+    # 0 y Postgres abortaría el UPDATE). Va SIN
+    # parámetros a propósito: así el `%` literal es seguro en los dos
+    # motores. Solo se recupera lo que aún dice `alertado:` — lo que el
+    # seguimiento ya pisó no está en ningún sitio.
+    try:
+        pg.execute(
+            "UPDATE radar_tokens SET smart = "
+            "CAST(SUBSTR(resultado, 10) AS INTEGER) "
+            "WHERE smart IS NULL AND resultado LIKE 'alertado:_%'")
+        pg.commit()
+    except Exception as _e:
+        print(f"· relleno de radar.smart omitido: {_e}")
     # (18-O) REPARACION DE ESTADO. Una fila con la confirmacion puesta
     # PERO sin estrella (is_tracked=0 + confirmada=1) no alerta hoy, pero
     # si la IA la re-promueve entra al altavoz en ese mismo instante, sin
@@ -847,6 +875,11 @@ def _preparar_sqlite(conn):
         conn.execute("ALTER TABLE radar_tokens ADD COLUMN price0 REAL")
     except sqlite3.OperationalError:
         pass
+    # (18-P) Hallazgo de smart money: ver el comentario del bloque de PG.
+    try:
+        conn.execute("ALTER TABLE radar_tokens ADD COLUMN smart INTEGER")
+    except sqlite3.OperationalError:
+        pass
     # Tabla predictions (motor predictivo): columnas añadidas después de
     # su creación inicial.
     for col, typ in [("stage", "INTEGER DEFAULT 1"), ("confidence", "INTEGER"),
@@ -863,6 +896,26 @@ def _preparar_sqlite(conn):
     conn.commit()
     _crear_indices_tardios(conn)
     _dedupe_aliases(conn)
+    # (18-P) Relleno hacia atrás de `smart`. La columna acaba de nacer y
+    # las filas que ya estaban se quedarían en NULL: el mismo día en que
+    # el radar deja de avisar, la línea del resumen —que es justo la
+    # compensación de ese silencio— diría "0 con billeteras de tu base
+    # dentro" y /radar se contradiría consigo mismo. El número vive en el
+    # propio `resultado` ('alertado:3'), así que se recupera de ahí. El
+    # `_` del patrón exige al menos un carácter: sin él, un 'alertado:' a
+    # secas intentaría convertir una cadena vacía en número (SQLite daría
+    # 0 y Postgres abortaría el UPDATE). Va SIN
+    # parámetros a propósito: así el `%` literal es seguro en los dos
+    # motores. Solo se recupera lo que aún dice `alertado:` — lo que el
+    # seguimiento ya pisó no está en ningún sitio.
+    try:
+        conn.execute(
+            "UPDATE radar_tokens SET smart = "
+            "CAST(SUBSTR(resultado, 10) AS INTEGER) "
+            "WHERE smart IS NULL AND resultado LIKE 'alertado:_%'")
+        conn.commit()
+    except Exception as _e:
+        print(f"· relleno de radar.smart omitido: {_e}")
     # (18-O) REPARACION DE ESTADO. Una fila con la confirmacion puesta
     # PERO sin estrella (is_tracked=0 + confirmada=1) no alerta hoy, pero
     # si la IA la re-promueve entra al altavoz en ese mismo instante, sin

@@ -24,6 +24,18 @@ Ajustes por variable de entorno (sin tocar código):
   RADAR_TOKENS_PASADA=8     tokens examinados por pasada (cada 15 min)
   RADAR_TXS=500             transacciones del inicio a revisar por token
   RADAR_MIN_CONOCIDAS=1     billeteras conocidas mínimas para alertar
+  RADAR_SILENCIOSO=1        MODO OCULTO (por defecto): el radar trabaja
+                            igual pero NO escribe en Telegram
+
+MODO OCULTO (Ola 18-P, 29/8/2026, pedido del dueño). Medido en su base
+antes de tocarlo: 53 avisos de smart money en 24 h más 2-3 de "hizo xN".
+Ese caudal tapaba las alertas de las ⭐, que son las que se copian. En
+silencio el radar hace EXACTAMENTE lo mismo — examina, pasa el semáforo
+de seguridad, registra en `radar_tokens` y promueve al embudo los que
+hacen xN, que es de donde salen candidatas horas antes — pero no manda
+mensajes. Lo que vio se consulta con /radar, y el resumen diario lleva
+una línea con los números del día. Se enciende y se apaga en caliente
+con /radarsilencio, sin reiniciar y sin tocar el entorno.
 """
 
 import os
@@ -46,12 +58,87 @@ MIN_LIQ = _int_env("RADAR_MIN_LIQ", 8000)
 TOKENS_PASADA = _int_env("RADAR_TOKENS_PASADA", 8)
 RADAR_TXS = _int_env("RADAR_TXS", 500)
 MIN_CONOCIDAS = _int_env("RADAR_MIN_CONOCIDAS", 1)
+# Valor de arranque del modo oculto. Manda el ajuste guardado en la base
+# (`radar_silencioso`), que el dueño cambia con /radarsilencio; esto solo
+# decide qué pasa cuando ese ajuste todavía no existe.
+SILENCIOSO_DEF = _int_env("RADAR_SILENCIOSO", 1)
 # Conexion con el embudo (14b): si el token del radar hace xN, se promueve
 # al catalogo de ganadores y el ciclo analiza a TODOS sus compradores
 # tempranos — los desconocidos que compraron junto a tus conocidas entran
 # al embudo horas antes que con el descubrimiento clasico.
 GANADOR_X = float(os.getenv("RADAR_GANADOR_X", "3.0") or 3.0)
 SEG_MAX_H = _int_env("RADAR_SEG_MAX_H", 48)
+
+
+def _plural(n: int, uno: str, varios: str) -> str:
+    return uno if n == 1 else varios
+
+
+def silencioso(conn) -> bool:
+    """¿El radar trabaja en silencio? Se lee EN CADA pasada, no al
+    importar: así /radarsilencio hace efecto al instante y no hay que
+    reiniciar el bot. Ante cualquier duda (ajuste ilegible, base rara)
+    manda el valor de arranque, que por defecto es SÍ."""
+    try:
+        from db import get_setting
+        v = get_setting(conn, "radar_silencioso", None)
+    except Exception:
+        return bool(SILENCIOSO_DEF)
+    if v is None or str(v).strip() == "":
+        return bool(SILENCIOSO_DEF)
+    try:
+        return bool(int(float(v)))
+    except (TypeError, ValueError):
+        return bool(SILENCIOSO_DEF)
+
+
+def resumen_linea(conn) -> str | None:
+    """Una línea con lo que hizo el radar en 24 h, para el resumen diario.
+
+    Con el radar apagado del todo devuelve None (no hay nada que contar).
+    Encendido devuelve SIEMPRE algo: si no examinó ni un token en 24 h,
+    la línea lo dice como aviso — desde que el radar no escribe, esa es
+    la única señal de que se haya parado.
+    """
+    if not ACTIVO:
+        return None            # apagado del todo: no hay nada que contar
+    ahora = int(time.time())
+    corte = ahora - 86400
+    try:
+        tot = conn.execute(
+            "SELECT COUNT(*) AS c FROM radar_tokens WHERE ts >= ?",
+            (corte,)).fetchone()["c"]
+        # Se cuenta la columna `smart` (un HECHO que no se pisa), no el
+        # estado `resultado`: el seguimiento lo reescribe a
+        # murio/expirado/ganador_promovido, y con tokens de minutos de
+        # vida eso hacía que la cifra ENCOGIERA sola dentro de las mismas
+        # 24 h. Justo la cifra que compensa el silencio.
+        con_smart = conn.execute(
+            "SELECT COUNT(*) AS c FROM radar_tokens WHERE ts >= ? "
+            "AND (COALESCE(smart, 0) > 0 "
+            "     OR SUBSTR(COALESCE(resultado, ''), 1, 9) = 'alertado:')",
+            (corte,)).fetchone()["c"]
+        # Los promovidos van a 7 días, como en /radar: una promoción
+        # ocurre entre 1 h y 48 h DESPUÉS de ver el token, así que
+        # contarla en la ventana de 24 h del descubrimiento se dejaría
+        # fuera la mitad. Se dice la ventana para no confundir.
+        prom = conn.execute(
+            "SELECT COUNT(*) AS c FROM radar_tokens WHERE ts >= ? "
+            "AND resultado = 'ganador_promovido'",
+            (ahora - 7 * 86400,)).fetchone()["c"]
+    except Exception:
+        return None
+    if not tot:
+        # NO se calla. Con el radar encendido, 24 h sin examinar ni un
+        # token no es "nada que contar": es que el radar está parado, y
+        # antes eso se notaba porque dejaban de llegar los 53 avisos.
+        # Ahora esta línea es la única alarma que queda.
+        return ("  ⚠️ 0 tokens nuevos examinados en 24 h — el radar "
+                "debería ver decenas; revisa /radar y /errores")
+    return (f"  • {tot} {_plural(tot, 'token nuevo examinado', 'tokens nuevos examinados')} · {con_smart} con "
+            f"billeteras de tu base dentro · {prom} "
+            f"{_plural(prom, 'promovido', 'promovidos')} al embudo "
+            f"(7 días)")
 
 
 def _frescos() -> list[dict]:
@@ -156,7 +243,9 @@ def _semaforo(t: dict) -> tuple[bool, str]:
 
 
 def escanear() -> int:
-    """Una pasada del radar. Devuelve cuántas alertas mandó."""
+    """Una pasada del radar. Devuelve cuántos HALLAZGOS hubo (tokens
+    nuevos con billeteras conocidas dentro), se hayan avisado o no: en
+    modo oculto el radar encuentra lo mismo, solo que en silencio."""
     if not ACTIVO:
         return 0
     try:
@@ -176,11 +265,16 @@ def escanear() -> int:
         return 0
 
     conn = get_conn()
-    alertas = 0
+    hallazgos = 0
     # (Ola 17-I) Tokens cuya seguridad NO se pudo comprobar (la fuente no
     # respondio). No se queman: vuelven a la cola y se cuentan aqui.
     _sin_chequear = 0
+    _mudo = True
     try:
+        # Una lectura por pasada, no una por token. Va DENTRO del try que
+        # cierra la conexión: si fallara aquí fuera, la conexión quedaría
+        # abierta reteniendo el candado de SQLite.
+        _mudo = silencioso(conn)
         # Poda de registros viejos (14 días): la tabla no crece sin tope.
         conn.execute("DELETE FROM radar_tokens WHERE ts < ?",
                      (int(time.time()) - 14 * 86400,))
@@ -253,7 +347,8 @@ def escanear() -> int:
             conocidas = _conocidas(conn, buyers)
             if len(conocidas) < MIN_CONOCIDAS:
                 conn.execute(
-                    "UPDATE radar_tokens SET resultado=? WHERE mint=?",
+                    "UPDATE radar_tokens SET resultado=?, smart=0 "
+                    "WHERE mint=?",
                     (f"sin_conocidas:{len(buyers)}", c["mint"]))
                 conn.commit()
                 continue
@@ -266,25 +361,31 @@ def escanear() -> int:
                 nombres.append(f"{icono} {w['alias'] or w['address'][:8]}")
             sym = t.get("symbol") if t.get("symbol") not in (None, "?") \
                 else c["symbol"]
+            # MODO OCULTO: el hallazgo se registra igual (la fila queda
+            # con `smart` y sale en /radar y en el resumen diario), pero
+            # no se escribe en Telegram. El contador cuenta HALLAZGOS, no
+            # mensajes: apagar el aviso no puede cambiar lo que el radar
+            # dice haber encontrado.
             try:
-                from realtime import tg_send
-                tg_send(
-                    f"📡 *RADAR: smart money en token recién nacido*\n"
-                    f"💎 *{sym}* · {c['edad_min']} min de vida · "
-                    f"liq ${c['liq']:,.0f}\n"
-                    f"{linea_seg}\n"
-                    f"👥 De tu base ({len(conocidas)}): "
-                    + ", ".join(nombres) + "\n"
-                    f"`{c['mint']}`\n"
-                    f"📊 [DexScreener](https://dexscreener.com/solana/"
-                    f"{c['mint']})")
+                if not _mudo:
+                    from realtime import tg_send
+                    tg_send(
+                        f"📡 *RADAR: smart money en token recién nacido*\n"
+                        f"💎 *{sym}* · {c['edad_min']} min de vida · "
+                        f"liq ${c['liq']:,.0f}\n"
+                        f"{linea_seg}\n"
+                        f"👥 De tu base ({len(conocidas)}): "
+                        + ", ".join(nombres) + "\n"
+                        f"`{c['mint']}`\n"
+                        f"📊 [DexScreener](https://dexscreener.com/solana/"
+                        f"{c['mint']})")
             except Exception as e:
                 print(f"· Radar: alerta falló: {e}")
             conn.execute(
-                "UPDATE radar_tokens SET resultado=? WHERE mint=?",
-                (f"alertado:{len(conocidas)}", c["mint"]))
+                "UPDATE radar_tokens SET resultado=?, smart=? WHERE mint=?",
+                (f"alertado:{len(conocidas)}", len(conocidas), c["mint"]))
             conn.commit()
-            alertas += 1
+            hallazgos += 1
         # ── 14b: seguimiento de los ya examinados → promover ganadores ──
         try:
             _seguimiento(conn)
@@ -292,8 +393,9 @@ def escanear() -> int:
             print(f"· Radar: seguimiento falló: {e}")
     finally:
         conn.close()
-    if alertas:
-        print(f"📡 Radar: {alertas} alertas de smart money temprana")
+    if hallazgos:
+        print(f"📡 Radar: {hallazgos} hallazgo(s) de smart money temprana"
+              + (" (en silencio)" if _mudo else ""))
     if _sin_chequear:
         # (Ola 17-I) Se DICE. Antes esto no aparecia en ningun sitio: ni
         # en el log ni en /radar, asi que un rato de RugCheck caido era
@@ -310,7 +412,7 @@ def escanear() -> int:
                 _c2.close()
         except Exception:
             pass
-    return alertas
+    return hallazgos
 
 
 def _seguimiento(conn) -> int:
@@ -319,6 +421,7 @@ def _seguimiento(conn) -> int:
     compradores tempranos con la semantica de siempre. Devuelve cuantos
     promovio."""
     ahora = int(time.time())
+    _mudo_seg = silencioso(conn)   # una lectura por pasada
     # (Ola 15) Muestreo ALEATORIO, no "los 15 mas viejos": con volumen,
     # el orden fijo hacia que un token que hizo x5 a la hora 3 no se
     # re-visitara hasta casi expirar (inanicion). RANDOM() existe igual
@@ -381,16 +484,21 @@ def _seguimiento(conn) -> int:
                          "WHERE mint=?", ("ganador_promovido", r["mint"]))
             conn.commit()
             promovidos += 1
-            try:
-                from realtime import tg_send
-                tg_send(f"🏆 *Radar → embudo*: *{r['symbol']}* hizo "
-                        f"x{mult:.1f} desde el radar Y da la talla de "
-                        f"ganador (vol ${vol:,.0f} · liq "
-                        f"${liq_full:,.0f} · MC ${mc_full:,.0f}). "
-                        f"El próximo ciclo analizará a sus compradores "
-                        f"tempranos.\n`{r['mint']}`")
-            except Exception:
-                pass
+            # MODO OCULTO: la promoción al embudo SE HACE igual (es lo
+            # valioso del radar: mete al ciclo a los compradores
+            # tempranos de un token que ya hizo xN); lo único que se
+            # calla es el mensaje.
+            if not _mudo_seg:
+                try:
+                    from realtime import tg_send
+                    tg_send(f"🏆 *Radar → embudo*: *{r['symbol']}* hizo "
+                            f"x{mult:.1f} desde el radar Y da la talla de "
+                            f"ganador (vol ${vol:,.0f} · liq "
+                            f"${liq_full:,.0f} · MC ${mc_full:,.0f}). "
+                            f"El próximo ciclo analizará a sus compradores "
+                            f"tempranos.\n`{r['mint']}`")
+                except Exception:
+                    pass
         elif ahora - r["ts"] > SEG_MAX_H * 3600 - 3600:
             conn.execute("UPDATE radar_tokens SET resultado=? "
                          "WHERE mint=?", ("expirado", r["mint"]))
@@ -417,9 +525,14 @@ def radar_text() -> str:
         otros = conn.execute(
             "SELECT resultado, COUNT(*) c FROM radar_tokens WHERE ts >= ? "
             "GROUP BY resultado", (corte,)).fetchall()
+        # (18-P) Por `smart`, no por el estado: el que se alertó y luego
+        # murió seguía siendo un hallazgo. Y sin LIKE '...%' con
+        # parámetros: en Postgres ese `%` literal revienta la consulta
+        # (psycopg2 interpola en cliente y esperaría `%%`).
         alertados = conn.execute(
-            "SELECT mint, symbol, resultado, ts FROM radar_tokens "
-            "WHERE ts >= ? AND resultado LIKE 'alertado%' "
+            "SELECT mint, symbol, resultado, ts, smart FROM radar_tokens "
+            "WHERE ts >= ? AND (COALESCE(smart, 0) > 0 "
+            "     OR SUBSTR(COALESCE(resultado, ''), 1, 9) = 'alertado:') "
             "ORDER BY ts DESC LIMIT 10", (corte,)).fetchall()
     finally:
         conn.close()
@@ -427,6 +540,17 @@ def radar_text() -> str:
         return "📡 El radar está APAGADO (RADAR_ACTIVO=0)."
     conn2 = get_conn()
     try:
+        _mudo = silencioso(conn2)
+        # `smart` O el estado: si el relleno de arranque no llegó a una
+        # fila (falló, o la escribió una versión anterior entre
+        # despliegues), el total y el desglose de arriba se
+        # contradecirían. SUBSTR en vez de LIKE '...%' porque esta
+        # consulta SÍ lleva parámetros y en Postgres ese `%` reventaría.
+        _hallazgos = conn2.execute(
+            "SELECT COUNT(*) AS c FROM radar_tokens WHERE ts >= ? "
+            "AND (COALESCE(smart, 0) > 0 "
+            "     OR SUBSTR(COALESCE(resultado, ''), 1, 9) = 'alertado:')",
+            (corte,)).fetchone()["c"]
         prom = conn2.execute(
             "SELECT COUNT(*) c FROM radar_tokens WHERE ts >= ? "
             "AND resultado='ganador_promovido'",
@@ -440,17 +564,31 @@ def radar_text() -> str:
     _res = {r["resultado"]: r["c"] for r in otros}
     _murio = _res.get("murio", 0)
     _sinc = sum(v for k, v in _res.items() if str(k).startswith("sin_conocidas"))
+    # OJO: esto es el ESTADO actual, no el total de hallazgos. En cuanto
+    # el seguimiento pisa la fila (murio/expirado/ganador_promovido) el
+    # token sale de aquí, así que este número solo sirve para que el
+    # desglose de abajo sume `tot`. El total de verdad va aparte, por
+    # `smart`, que no lo pisa nadie.
     _alert = sum(v for k, v in _res.items() if str(k).startswith("alertado"))
     _exam = _res.get("examinando", 0)
     _resto = tot - seg - _murio - _sinc - _alert - _exam
     out = ["📡 *Radar de pares recién nacidos* (24 h)\n",
+           ("🔇 *Modo oculto*: trabaja igual pero no avisa por Telegram "
+            "(encender los avisos: `/radarsilencio off`)"
+            if _mudo else
+            "🔔 *Avisa por Telegram* cuando entra smart money "
+            "(silenciar: `/radarsilencio on`)"),
+           "",
            f"Tokens examinados: {tot}",
            f"  ⛔ descartados por seguridad: {seg}",
            f"  💀 murieron: {_murio}",
            f"  👤 sin billeteras conocidas: {_sinc}",
-           f"  🎯 alertados: {_alert}"
+           f"  🎯 con smart money, aún en seguimiento: {_alert}"
            + (f"  ·  ⏳ en curso: {_exam}" if _exam else "")
            + (f"  ·  otros: {_resto}" if _resto > 0 else ""),
+           f"🎯 *Hallazgos de smart money en 24 h: {_hallazgos}* "
+           f"(cuenta los de arriba y también los que ya murieron o se "
+           f"promovieron)",
            f"🏆 Promovidos a ganadores (7 días): {prom} — sus compradores "
            f"tempranos entran al embudo"]
     # (Ola 17-K) Los que no se pudieron comprobar no estan en la tabla
@@ -471,12 +609,30 @@ def radar_text() -> str:
     if alertados:
         out.append("\n🎯 Con smart money de tu base:")
         for r in alertados:
-            n = r["resultado"].split(":")[-1]
+            # Mismo repliegue que en los conteos: si a la fila no le llegó
+            # el relleno de arranque, el número sigue en su `resultado`
+            # ('alertado:3'). Sin esto la lista imprimía "None conocida(s)".
+            n = r["smart"]
+            if n is None:
+                n = str(r["resultado"] or "").split(":")[-1] or "?"
             hace = (time.time() - r["ts"]) / 3600
+            # El ESTADO va en la línea: desde que la lista se saca de
+            # `smart` (un hecho) también salen los que ya murieron, y sin
+            # decirlo el dueño podría copiar el mint de un token muerto.
+            _e = str(r["resultado"] or "")
+            _ico = ("💀 murió" if _e == "murio" else
+                    "🏆 promovido al embudo" if _e == "ganador_promovido"
+                    else "⌛ expiró" if _e == "expirado"
+                    # "en seguimiento", no "vivo": el seguimiento revisa
+                    # 15 filas al azar por pasada y ninguna de menos de
+                    # 1 h, así que un token puede llevar horas muerto y
+                    # todavía no haberse comprobado. Decir "vivo" sería
+                    # afirmar más de lo que se sabe.
+                    else "🟢 en seguimiento")
             out.append(f"  • {r['symbol']} · {n} conocida(s) · "
-                       f"hace {hace:.1f}h\n    `{r['mint']}`")
+                       f"hace {hace:.1f}h · {_ico}\n    `{r['mint']}`")
     else:
-        out.append("\nSin coincidencias con tu base todavía — el radar "
-                   "solo alerta cuando billeteras conocidas entran a un "
-                   "token nuevo, no por 'pinta prometedora'.")
+        out.append("\nSin coincidencias con tu base todavía — solo "
+                   "cuentan como hallazgo los tokens nuevos donde entran "
+                   "billeteras conocidas, no los de 'pinta prometedora'.")
     return "\n".join(out)

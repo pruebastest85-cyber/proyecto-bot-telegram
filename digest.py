@@ -157,6 +157,28 @@ def resumen_text() -> str:
     except Exception:
         pass
 
+    # 📡 Radar (Ola 18-P). Va aquí porque el radar trabaja EN SILENCIO:
+    # esta línea es lo único que el dueño ve de él sin pedir /radar.
+    try:
+        conn = get_conn()
+        try:
+            from radar import resumen_linea, silencioso
+            _rad = resumen_linea(conn)
+            _rad_mudo = silencioso(conn)
+        finally:
+            conn.close()
+        if _rad:
+            algo = True
+            out.append("\n📡 *Radar de tokens recién nacidos (24h):*")
+            out.append(_rad)
+            # La coletilla se LEE del interruptor: si dijera siempre "en
+            # silencio", tras un /radarsilencio off le estaría mintiendo
+            # al dueño mientras el radar le escribe.
+            out.append("  _(trabaja en silencio · detalle: /radar)_"
+                       if _rad_mudo else "  _(detalle: /radar)_")
+    except Exception:
+        pass
+
     if not algo:
         return ("📋 *Resumen*\n\nEl sistema aún está acumulando datos — poco "
                 "que resumir todavía. Vuelve tras unos ciclos y verás Elite, "

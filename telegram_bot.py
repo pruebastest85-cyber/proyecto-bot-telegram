@@ -2569,6 +2569,81 @@ async def cmd_radar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_radar_silencio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enciende o apaga el MODO OCULTO del radar.
+
+    /radarsilencio on   → el radar trabaja pero no escribe en Telegram
+    /radarsilencio off  → vuelve a avisar
+    /radarsilencio      → dice en qué modo está
+
+    El modo no cambia NADA de lo que el radar hace: sigue examinando
+    tokens recién nacidos, pasándoles el semáforo de seguridad,
+    registrándolo en `radar_tokens` y promoviendo al embudo los que hacen
+    xN. Solo decide si además te escribe.
+    """
+    from db import set_setting
+
+    def _trabajo(accion: str) -> str:
+        return _decir(accion) + _nota_apagado()
+
+    def _nota_apagado() -> str:
+        # Si el radar está apagado del todo, cualquier frase en presente
+        # ("sigue trabajando igual") sería mentira: `escanear` sale en su
+        # primera línea. Se dice, y se aclara que el ajuste vale para
+        # cuando vuelva.
+        from radar import ACTIVO as _radar_activo
+        if _radar_activo:
+            return ""
+        return ("\n\n⚠️ Ojo: el radar está APAGADO del todo "
+                "(RADAR_ACTIVO=0), así que ahora mismo no examina nada. "
+                "Este ajuste solo decide si te escribirá cuando vuelva.")
+
+    def _decir(accion: str) -> str:
+        conn = get_conn()
+        try:
+            from radar import silencioso
+            mudo = silencioso(conn)
+            if not accion:
+                if mudo:
+                    return ("🔇 *Radar en modo oculto.*\nExamina, filtra y "
+                            "promueve al embudo igual que siempre, pero no "
+                            "te escribe. Lo que ha visto: /radar (y una "
+                            "línea en el resumen diario).\nVolver a los "
+                            "avisos: `/radarsilencio off`")
+                return ("🔔 *Radar con avisos.*\nTe escribe cuando "
+                        "billeteras de tu base entran en un token recién "
+                        "nacido, y cuando uno de ellos hace xN.\n"
+                        "Silenciar: `/radarsilencio on`")
+            quiere_mudo = (accion == "on")
+            # Se GUARDA siempre, aunque ya estuviera en ese modo: si el
+            # ajuste todavía no existe, el estado vendría del entorno y
+            # un cambio de `RADAR_SILENCIOSO` mañana desharía en silencio
+            # lo que el dueño acaba de pedir a mano.
+            set_setting(conn, "radar_silencioso", "1" if quiere_mudo else "0")
+            conn.commit()
+            if quiere_mudo == mudo:
+                return ("🔇 Ya estaba en modo oculto (queda fijado)."
+                        if mudo else
+                        "🔔 Ya estaba avisando (queda fijado).")
+            if quiere_mudo:
+                return ("🔇 *Radar en silencio desde ya.* Sigue trabajando "
+                        "igual; deja de escribirte. Lo que vea: /radar.")
+            return ("🔔 *Radar con avisos otra vez.* Te escribirá cuando "
+                    "entre smart money en un token nuevo.")
+        finally:
+            conn.close()
+
+    accion = (ctx.args[0].strip().lower() if ctx.args else "")
+    if accion and accion not in ("on", "off"):
+        await update.message.reply_text(
+            "Uso: `/radarsilencio on` · `/radarsilencio off` · "
+            "`/radarsilencio`", parse_mode="Markdown")
+        return
+    txt = await asyncio.to_thread(_trabajo, accion)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
 async def cmd_postmortem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/postmortem — decisiones vs resultado medido. 'ya' = regenerar."""
     fresco = bool(ctx.args and ctx.args[0].lower() in ("ya", "ahora"))
@@ -2717,6 +2792,7 @@ def main():
     app.add_handler(CommandHandler("salidas", cmd_salidas))
     app.add_handler(CommandHandler("postmortem", cmd_postmortem))
     app.add_handler(CommandHandler("radar", cmd_radar))
+    app.add_handler(CommandHandler("radarsilencio", cmd_radar_silencio))
     app.add_handler(CommandHandler("hermanas", cmd_hermanas))
     app.add_handler(CommandHandler("adn", cmd_adn))
     app.add_handler(CommandHandler("clusters", cmd_clusters))
