@@ -50,6 +50,17 @@ if ADMIN_ID <= 0:
         f"TELEGRAM_ADMIN_ID debe ser un ID de Telegram positivo, no "
         f"{ADMIN_ID}. Con 0 el filtro de administrador queda desactivado."
     )
+# (19-E) Mismo trato para la clave de Helius. Sin ella el bot arrancaba
+# "sano": LaserStream —la UNICA via de ingesta— fallaba en silencio, cada
+# llamada daba 401 y el sistema parecia vivo sin ingerir nada. Es el
+# escenario de un `.bat` que no llega a cargar `bot_local.env`. Mejor no
+# arrancar y decirlo que fingir que se esta trabajando.
+if not (os.getenv("HELIUS_API_KEY") or "").strip():
+    raise RuntimeError(
+        "Falta HELIUS_API_KEY: sin ella LaserStream no puede conectarse "
+        "y el bot arrancaría sin ingerir ni una transacción. Revisa que "
+        "bot_local.env se esté cargando."
+    )
 # (19-A) Conversion protegida. Dos fallos, no uno:
 #   · Una errata (`AUTO_CYCLE_HOURS=2h`, coma decimal) lanzaba ValueError
 #     EN EL IMPORT: el bot no arranca y el supervisor entra en bucle de

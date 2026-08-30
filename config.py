@@ -25,7 +25,18 @@ def _float(name, default):
 import os
 
 # ── Claves API ────────────────────────────────────────────────────────────
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "TU_CLAVE_AQUI")
+# (19-E) El defecto era la cadena "TU_CLAVE_AQUI", que es TRUTHY y ESTA
+# EN EL REPO PUBLICO. Dos consecuencias, las dos reales:
+#   · `if not config.HELIUS_API_KEY` (laserstream) era codigo muerto:
+#     nunca podia disparar, asi que LaserStream intentaba conectar con
+#     una clave falsa y todo daba 401 en silencio.
+#   · La ruta `/helius` autenticaba comparando contra ESA cadena, o sea
+#     con una contraseña publica: cualquiera que alcanzara el puerto
+#     podia inyectar transacciones falsas que acaban en `signals`,
+#     `positions` y `paper_trades` como si estuvieran medidas.
+# Vacio es falsy: el corte de LaserStream vuelve a funcionar y el
+# webhook rechaza todo (ver `realtime.helius_hook`).
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
 HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 HELIUS_PARSED_TX = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 

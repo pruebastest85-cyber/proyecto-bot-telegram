@@ -20,6 +20,7 @@ Variables de entorno usadas:
   + las ya existentes (HELIUS_API_KEY, TELEGRAM_*, ANTHROPIC_API_KEY)
 """
 
+import hmac          # (19-E) comparación en tiempo constante del webhook
 import json
 import os
 import threading
@@ -686,12 +687,39 @@ def _money_signed(sol, su) -> str:
 
 def _recarga_reciente(wallet: str, ts: int) -> float:
     """SOL recibido por transferencia directa en los ~30 min previos a la
-    compra. Una recarga justo antes de comprar suele indicar convicción."""
+    compra. Una recarga justo antes de comprar suele indicar convicción.
+
+    (19-E) AHORA CUENTA SUS CREDITOS Y RESPETA EL FRENO.
+
+    Usa la Enhanced Transactions API, que cuesta
+    `HELIUS_CREDITS_PER_CALL` (100) creditos por llamada, y se dispara en
+    CADA compra que supera todos los filtros. No llamaba a `_api_rec` ni
+    a `helius_budget.puede_llamar`, asi que ese gasto era invisible para
+    `creditos_usados()` — o sea, para el freno del 85% y para /salud.
+    Comparar con `wallet_analyzer`, que si hace las dos cosas.
+
+    Y devolver 0.0 en el `except` hacia que un fallo de red fuera
+    indistinguible de "no hubo recarga"; ahora al menos se dice.
+    """
+    try:
+        from helius_budget import puede_llamar as _puede
+        if not _puede():
+            print("· Recarga reciente omitida: freno de presupuesto de "
+                  "Helius activo")
+            return 0.0
+    except Exception as e:
+        print(f"· Recarga reciente: no pude leer el presupuesto ({e})")
     try:
         url = config.HELIUS_PARSED_TX.format(address=wallet)
         r = requests.get(url, params={"api-key": config.HELIUS_API_KEY,
                                       "limit": 50}, timeout=20)
         r.raise_for_status()
+        try:
+            from api_usage import record as _api_rec
+            _api_rec("helius")
+            _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
+        except Exception as e:
+            print(f"· Recarga reciente: no pude apuntar los créditos ({e})")
         total = 0.0
         for tx in r.json() or []:
             tts = tx.get("timestamp", 0)
@@ -702,7 +730,11 @@ def _recarga_reciente(wallet: str, ts: int) -> float:
                    nt.get("fromUserAccount") != wallet:
                     total += (nt.get("amount") or 0) / 1e9
         return total
-    except Exception:
+    except Exception as e:
+        # (19-E) Antes era `except Exception: return 0.0` mudo: un fallo
+        # de red se leia como "no hubo recarga" y la alerta lo afirmaba.
+        print(f"· Recarga reciente de {wallet[:8]}… falló ({e}); se "
+              f"informa 0, que puede no ser cierto")
         return 0.0
 
 
@@ -1494,10 +1526,26 @@ def health():
 @flask_app.post("/helius")
 def helius_hook():
     global LAST_HOOK_TS
-    LAST_HOOK_TS = time.time()
+    # ── (19-E) VALIDAR ANTES DE TOCAR NADA ───────────────────────────
+    # `LAST_HOOK_TS` se fijaba en la PRIMERA linea, antes de mirar la
+    # cabecera: cualquiera que alcanzara el puerto podia mantener
+    # "fresco" el reloj que /salud usa para juzgar la ingesta, sin
+    # autenticarse. Ahora solo lo mueve una peticion legitima.
+    #
+    # Y la comparacion va con `hmac.compare_digest`: `!=` sobre cadenas
+    # sale antes en el primer byte distinto, o sea que el tiempo de
+    # respuesta filtra cuanto prefijo has acertado.
     auth = request.headers.get("Authorization", "")
-    if auth != config.HELIUS_API_KEY:
+    esperado = config.HELIUS_API_KEY or ""
+    # Sin clave real no se autentica NADA. Con el centinela del repo
+    # (`TU_CLAVE_AQUI`, que es publico) la "contraseña" del webhook seria
+    # de dominio publico y cualquiera podria inyectar transacciones
+    # falsas que acaban en `signals`, `positions` y `paper_trades` como
+    # si estuvieran medidas.
+    if (not esperado or esperado == "TU_CLAVE_AQUI"
+            or not hmac.compare_digest(auth, esperado)):
         return jsonify({"error": "unauthorized"}), 401
+    LAST_HOOK_TS = time.time()
     txs = request.get_json(silent=True) or []
     if isinstance(txs, dict):
         txs = [txs]
@@ -1507,10 +1555,32 @@ def helius_hook():
 
 
 def start_webhook_server():
-    """Arranca Flask en un hilo demonio (no bloquea al bot)."""
+    """Arranca Flask en un hilo demonio (no bloquea al bot).
+
+    (19-E) DOS CAMBIOS DE SUPERFICIE DE RED.
+
+    1. Sin `PUBLIC_URL` no se arranca. En el PC del dueño no hay
+       `PUBLIC_URL` desde el 26/8, asi que Helius no tiene a donde
+       enviar y por esta ruta NO entra nada: el servidor no aportaba
+       nada y solo abria un puerto.
+    2. Si aun asi se arranca sin `PUBLIC_URL` (por `WEBHOOK_LOCAL=1`,
+       para depurar), escucha en `127.0.0.1` en vez de en `0.0.0.0`.
+
+    Antes escuchaba en `0.0.0.0` SIEMPRE. En una red que el dueño no
+    controla —wifi compartido, VPN de empresa, un router con
+    port-forward— cualquier aparato podia hablar con `/helius` y con
+    `/` (que devolvia sin autenticar cuantas billeteras se vigilan).
+    """
+    if not PUBLIC_URL and os.getenv("WEBHOOK_LOCAL", "0") != "1":
+        print("📡 Servidor de webhooks NO arrancado: sin PUBLIC_URL, "
+              "Helius no tiene a dónde enviar y el puerto solo sería "
+              "superficie de ataque (WEBHOOK_LOCAL=1 lo fuerza en "
+              "127.0.0.1 para depurar)")
+        return
+    host = "0.0.0.0" if PUBLIC_URL else "127.0.0.1"
     t = threading.Thread(
-        target=lambda: flask_app.run(host="0.0.0.0", port=PORT,
+        target=lambda: flask_app.run(host=host, port=PORT,
                                      debug=False, use_reloader=False),
         daemon=True)
     t.start()
-    print(f"📡 Servidor de webhooks escuchando en puerto {PORT}")
+    print(f"📡 Servidor de webhooks escuchando en {host}:{PORT}")

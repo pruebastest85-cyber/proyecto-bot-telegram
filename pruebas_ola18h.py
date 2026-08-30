@@ -7290,6 +7290,222 @@ def prueba_19d():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-E - seguridad de red y dinero: el puerto abierto de mas, la
+# contraseña publica, el chat de nube sin presupuesto y los creditos que
+# nadie contaba.
+# ---------------------------------------------------------------------
+def prueba_19e():
+    bloque("19-E - superficie de red, initData caducable y créditos")
+    import contextlib
+    import inspect as _insp
+    import io
+    import os as _os
+    import subprocess as _sp
+
+    # ── 1) La ruta /helius: validar ANTES de tocar nada ──────────────
+    import realtime as rt
+    _cfg = __import__("config")
+    _key_prev = _cfg.HELIUS_API_KEY
+    _hook_prev = rt.LAST_HOOK_TS
+    try:
+        _cfg.HELIUS_API_KEY = "clave-buena"
+        cli = rt.flask_app.test_client()
+
+        rt.LAST_HOOK_TS = None
+        r = cli.post("/helius", json=[], headers={"Authorization": "mala"})
+        comprobar("una cabecera incorrecta da 401", r.status_code == 401,
+                  str(r.status_code))
+        comprobar("y NO mueve el reloj de la ingesta (cualquiera podía "
+                  "mantenerlo 'fresco' sin autenticarse)",
+                  rt.LAST_HOOK_TS is None, str(rt.LAST_HOOK_TS))
+
+        rt.LAST_HOOK_TS = None
+        r = cli.post("/helius", json=[],
+                     headers={"Authorization": "clave-buena"})
+        comprobar("con la cabecera correcta sigue funcionando",
+                  r.status_code == 200, str(r.status_code))
+        comprobar("y entonces sí mueve el reloj",
+                  rt.LAST_HOOK_TS is not None)
+
+        # El centinela público del repo NO puede servir de contraseña.
+        _cfg.HELIUS_API_KEY = "TU_CLAVE_AQUI"
+        rt.LAST_HOOK_TS = None
+        r = cli.post("/helius", json=[],
+                     headers={"Authorization": "TU_CLAVE_AQUI"})
+        comprobar("el centinela público del repo NO autentica",
+                  r.status_code == 401,
+                  "esa cadena está en GitHub: cualquiera podría inyectar "
+                  "transacciones falsas que acaban en signals/positions/"
+                  "paper_trades como si estuvieran medidas")
+        _cfg.HELIUS_API_KEY = ""
+        r = cli.post("/helius", json=[], headers={"Authorization": ""})
+        comprobar("sin clave configurada tampoco entra nadie",
+                  r.status_code == 401, str(r.status_code))
+    finally:
+        _cfg.HELIUS_API_KEY = _key_prev
+        rt.LAST_HOOK_TS = _hook_prev
+
+    _src_rt = _insp.getsource(rt.helius_hook)
+    comprobar("la comparación es en tiempo constante (compare_digest)",
+              "compare_digest" in _src_rt,
+              "`!=` sobre cadenas sale en el primer byte distinto: el "
+              "tiempo de respuesta filtra cuánto prefijo has acertado")
+
+    # ── 2) Sin PUBLIC_URL no se abre ningún puerto ───────────────────
+    _src_srv = _insp.getsource(rt.start_webhook_server)
+    comprobar("start_webhook_server no arranca sin PUBLIC_URL",
+              "if not PUBLIC_URL" in _src_srv,
+              "sin PUBLIC_URL Helius no tiene a dónde enviar: el puerto "
+              "solo era superficie de ataque")
+    comprobar("y si se fuerza, escucha en 127.0.0.1, no en 0.0.0.0",
+              '"127.0.0.1"' in _src_srv and 'host=host' in _src_srv,
+              _src_srv[-300:])
+    _pub_prev = rt.PUBLIC_URL
+    _wl_prev = _os.environ.get("WEBHOOK_LOCAL")
+    try:
+        rt.PUBLIC_URL = ""
+        _os.environ.pop("WEBHOOK_LOCAL", None)
+        _hilos = []
+        _th_real = rt.threading.Thread
+        rt.threading.Thread = lambda *a, **k: _hilos.append(1) or _th_real(
+            target=lambda: None)
+        with contextlib.redirect_stdout(io.StringIO()) as _o:
+            rt.start_webhook_server()
+        comprobar("comportamiento: sin PUBLIC_URL no se crea ningún hilo "
+                  "de servidor", not _hilos,
+                  f"se crearon {len(_hilos)}")
+        comprobar("y se dice por qué", "NO arrancado" in _o.getvalue(),
+                  _o.getvalue())
+    finally:
+        rt.threading.Thread = _th_real
+        rt.PUBLIC_URL = _pub_prev
+        if _wl_prev is not None:
+            _os.environ["WEBHOOK_LOCAL"] = _wl_prev
+
+    # ── 3) La clave centinela deja de ser truthy ─────────────────────
+    _raiz = _os.path.dirname(_os.path.abspath(__file__))
+    _env = dict(_os.environ)
+    _env.pop("HELIUS_API_KEY", None)
+    _env.pop("DATABASE_URL", None)
+    _p = _sp.run([sys.executable, "-c",
+                  "import config;print('__K__', repr(config.HELIUS_API_KEY))"],
+                 cwd=_raiz, env=_env, capture_output=True, text=True,
+                 timeout=120)
+    comprobar("sin HELIUS_API_KEY en el entorno, config la deja VACÍA",
+              "__K__ ''" in (_p.stdout or ""),
+              f"salió {(_p.stdout or '').strip()!r} — con el centinela "
+              f"truthy, el corte `if not config.HELIUS_API_KEY` de "
+              f"laserstream era código muerto")
+    # Y el bot no arranca sin ella, en vez de fingir que trabaja.
+    _p2 = _sp.run([sys.executable, "-c", "import telegram_bot"],
+                  cwd=_raiz, env=_env, capture_output=True, text=True,
+                  timeout=180)
+    comprobar("y telegram_bot se niega a arrancar sin clave de Helius",
+              _p2.returncode != 0 and "HELIUS_API_KEY" in (_p2.stderr or ""),
+              f"rc={_p2.returncode}: {(_p2.stderr or '')[-200:]}")
+
+    # ── 4) El chat de nube pasa por el presupuesto ───────────────────
+    import ai_agent as ag
+    _src_ag = _insp.getsource(ag._chat_nube)
+    comprobar("_chat_nube consulta budget_left antes de gastar",
+              "budget_left" in _src_ag,
+              "era la ÚNICA ruta de nube sin presupuesto: hasta 4 "
+              "peticiones por mensaje, las más caras del sistema")
+    comprobar("y apunta cada llamada con record_call",
+              "record_call" in _src_ag, _src_ag[:200])
+    comprobar("si no puede LEER el presupuesto, no gasta (como _nube)",
+              "no gasto" in _src_ag, _src_ag[:400])
+    # Comportamiento: con presupuesto a 0 no se hace NINGUNA petición.
+    _key_ag = ag.ANTHROPIC_API_KEY
+    _post_real = ag.requests.post
+    _peticiones = []
+    import ai_budget as ab
+    _bl_real = ab.budget_left
+    try:
+        ag.ANTHROPIC_API_KEY = "clave-falsa"
+        ag.requests.post = lambda *a, **k: _peticiones.append(1)
+        ab.budget_left = lambda conn: 0
+        with contextlib.redirect_stdout(io.StringIO()):
+            _r = ag._chat_nube([{"role": "user", "content": "hola"}])
+        comprobar("con el presupuesto agotado NO se llama a la API",
+                  not _peticiones and _r is None,
+                  f"peticiones={len(_peticiones)} r={_r!r}")
+    finally:
+        ag.ANTHROPIC_API_KEY = _key_ag
+        ag.requests.post = _post_real
+        ab.budget_left = _bl_real
+
+    # ── 5) Los créditos de Helius que nadie contaba ──────────────────
+    _src_rr = _insp.getsource(rt._recarga_reciente)
+    comprobar("_recarga_reciente apunta sus 100 créditos por llamada",
+              "helius_credits" in _src_rr,
+              "se dispara en CADA compra alertada y era invisible para "
+              "el freno del 85%")
+    comprobar("y respeta el freno de presupuesto",
+              "puede_llamar" in _src_rr, _src_rr[:400])
+    comprobar("y su except ya no es mudo",
+              "except Exception as e" in _src_rr,
+              "un fallo de red se leía como 'no hubo recarga'")
+    import wallet_links as wl
+    _src_wl = _insp.getsource(wl)
+    comprobar("wallet_links (/hermanas) apunta sus créditos",
+              "helius_credits" in _src_wl,
+              "hasta 11 llamadas × 100 créditos POR ⭐ — con 130 ⭐ son "
+              "~143.000 créditos invisibles en una sola pulsación")
+    comprobar("y consulta el freno antes de empezar",
+              "puede_llamar" in _src_wl, _src_wl[:300])
+
+    # ── 6) El panel: initData caducable y sin XSS ────────────────────
+    import webapp as wa
+    _src_wa = _insp.getsource(wa._valid_init_data)
+    comprobar("el initData caduca (se valida auth_date)",
+              "auth_date" in _src_wa,
+              "capturado una vez, servía PARA SIEMPRE para /api/discard")
+    # Comportamiento: misma firma, fecha vieja → rechazado.
+    import hashlib as _hl
+    import hmac as _hm
+    from urllib.parse import urlencode as _ue
+    _bt_prev, _ad_prev = wa.BOT_TOKEN, wa.ADMIN_ID
+    try:
+        wa.BOT_TOKEN, wa.ADMIN_ID = "0:token-de-prueba", "1"
+
+        def _firmar(auth_date):
+            datos = {"auth_date": str(auth_date),
+                     "user": '{"id":1}'}
+            check = "\n".join(f"{k}={v}" for k, v in sorted(datos.items()))
+            secret = _hm.new(b"WebAppData", wa.BOT_TOKEN.encode(),
+                             _hl.sha256).digest()
+            datos["hash"] = _hm.new(secret, check.encode(),
+                                    _hl.sha256).hexdigest()
+            return _ue(datos)
+
+        import time as _tt
+        comprobar("un initData recién firmado se acepta",
+                  wa._valid_init_data(_firmar(int(_tt.time()))))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _viejo = wa._valid_init_data(
+                _firmar(int(_tt.time()) - 40 * 86400))
+        comprobar("uno de hace 40 días se RECHAZA, aunque la firma sea "
+                  "válida", not _viejo,
+                  "la firma no caduca sola: es auth_date quien lo hace")
+    finally:
+        wa.BOT_TOKEN, wa.ADMIN_ID = _bt_prev, _ad_prev
+    comprobar("el panel escapa el texto que viene de la cadena",
+              "function esc(" in wa.PAGE and "esc(x.symbol" in wa.PAGE,
+              "`signals.symbol` se escribe crudo desde DexScreener y "
+              "entraba por innerHTML: un token llamado "
+              "`<img src=x onerror=…>` ejecutaba JS con el initData "
+              "a mano")
+    comprobar("y también el alias y la clase de la IA",
+              "esc(w.alias" in wa.PAGE and "esc(w.ai_class)" in wa.PAGE,
+              wa.PAGE[:100])
+    comprobar("/api/overview cierra su conexión pase lo que pase",
+              "finally:" in _insp.getsource(wa.register_webapp),
+              "una consulta que lanzara dejaba la conexión abierta")
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -7324,6 +7540,7 @@ def main():
     prueba_19b()
     prueba_19c()
     prueba_19d()
+    prueba_19e()
 
     print("\n" + "─" * 60)
     if _FALLOS:

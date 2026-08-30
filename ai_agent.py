@@ -554,8 +554,51 @@ def _chat_local(messages: list[dict]):
 
 
 def _chat_nube(messages: list[dict]):
-    """Loop del agente contra la API de Claude (modo viejo)."""
+    """Loop del agente contra la API de Claude (modo viejo).
+
+    (19-E) PASA POR EL PRESUPUESTO. Era la UNICA ruta de nube del sistema
+    que no lo hacia: `requests.post` directo a api.anthropic.com, sin
+    `budget_left` antes ni `record_call` despues (`record_call` solo
+    aparecia en `ia_puente._nube`). Hasta MAX_PASOS=4 peticiones por
+    mensaje, y son las mas caras del sistema: SYSTEM + 17 herramientas +
+    el historial + el resultado de `consultar_base`.
+
+    Hoy no cuesta dinero porque la cuenta no tiene creditos —el contador
+    `ai_calls` dejo de escribirse el 20/8—, pero el tope de 300/dia de
+    `config` NO cubria esta via: el dia que se recarguen, el chat podria
+    gastar sin techo mientras /status dice "IA hoy: 0/300".
+
+    Agravante que lo hace probable: LM Studio serializa. Mientras el
+    analista evalua billeteras (30-90 s cada una), cualquier otra llamada
+    local agota su timeout y CAE AQUI — o sea, la nube se usa por estar
+    ocupada la local, no por estar apagada.
+
+    Igual que `ia_puente._nube`: si no se puede LEER el presupuesto, no
+    se gasta. Preferimos quedarnos sin respuesta a gastar a ciegas.
+    """
     if not ANTHROPIC_API_KEY:
+        return None
+    _conn = None
+    try:
+        from db import get_conn as _gc
+        _conn = _gc()
+    except Exception as e:
+        print(f"· Agente nube: no puedo leer el presupuesto ({e}); "
+              f"no gasto")
+        return None
+    try:
+        from ai_budget import budget_left, record_call
+        if budget_left(_conn) <= 0:
+            print("· Agente nube: presupuesto de IA agotado por hoy; "
+                  "no llamo")
+            return None
+    except Exception as e:
+        print(f"· Agente nube: no puedo leer el presupuesto ({e}); "
+              f"no gasto")
+        try:
+            _conn.close()
+        except Exception:
+            pass
         return None
     try:
         msgs = list(messages)
@@ -571,6 +614,14 @@ def _chat_nube(messages: list[dict]):
             if r.status_code >= 400:
                 print(f"· Agente nube HTTP {r.status_code}: {r.text[:200]}")
                 return None
+            # (19-E) Se apunta AQUI, en cuanto la API contesta bien: el
+            # gasto ya se produjo, con tool_call o sin el. Contarlo solo
+            # al final del bucle dejaria sin registrar los pasos
+            # intermedios, que son la mayoria.
+            try:
+                record_call(_conn)
+            except Exception as e:
+                print(f"· Agente nube: no pude apuntar la llamada ({e})")
             data = r.json()
             content = data.get("content", [])
             text = "".join(b.get("text", "") for b in content
@@ -590,6 +641,13 @@ def _chat_nube(messages: list[dict]):
     except Exception as e:
         print(f"· Agente nube no disponible: {e}")
         return None
+    finally:
+        # (19-E) Un solo `finally`, como `ia_puente._nube`: los `return`
+        # de dentro del bucle son cuatro y ninguno cerraba nada.
+        try:
+            _conn.close()
+        except Exception:
+            pass
 
 
 def chat(user_text: str):

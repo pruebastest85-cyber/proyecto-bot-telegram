@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import os
+import time          # (19-E) caducidad del initData
 from urllib.parse import parse_qsl
 
 from flask import request, jsonify, Response
@@ -21,6 +22,13 @@ from db import get_conn, get_setting, top_wallets
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
+# (19-E) Cuanto vale un initData de Telegram. 24 h es holgado para una
+# sesion de panel y acota el dano de una captura. Se admiten 5 min de
+# reloj adelantado.
+try:
+    INITDATA_MAX_S = int(os.getenv("WEBAPP_INITDATA_MAX_S", "86400"))
+except (TypeError, ValueError):
+    INITDATA_MAX_S = 86400
 
 
 def _valid_init_data(init_data: str) -> bool:
@@ -35,6 +43,21 @@ def _valid_init_data(init_data: str) -> bool:
                           hashlib.sha256).digest()
         calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(calc, recibido):
+            return False
+        # (19-E) CADUCIDAD. La firma se validaba pero `auth_date` no se
+        # miraba nunca — y Telegram lo incluye precisamente para esto.
+        # Un `initData` capturado una sola vez (el log de un proxy, el
+        # historial del navegador, una captura de pantalla, un
+        # console.log) servia PARA SIEMPRE: acceso permanente a
+        # /api/overview y a /api/discard, que descarta billeteras, sin
+        # volver a pasar por Telegram.
+        try:
+            edad = time.time() - int(data.get("auth_date", 0))
+        except (TypeError, ValueError):
+            return False
+        if not (0 - 300 <= edad <= INITDATA_MAX_S):
+            print(f"· webapp: initData caducado o con fecha imposible "
+                  f"({edad:.0f}s); se rechaza")
             return False
         user = json.loads(data.get("user", "{}"))
         return bool(ADMIN_ID) and str(user.get("id")) == str(ADMIN_ID)
@@ -52,7 +75,19 @@ def register_webapp(app):
         body = request.get_json(silent=True) or {}
         if not _valid_init_data(body.get("initData", "")):
             return jsonify({"error": "unauthorized"}), 401
+        # (19-E) `try/finally`. La conexión se cerraba al final sin
+        # protección: si una consulta lanzaba (una columna ausente tras
+        # un despliegue, la base bloqueada, `top_wallets` fallando), la
+        # conexión quedaba abierta. En SQLite retiene el candado hasta
+        # que el recolector pasa; en Postgres, con Flask multihilo, agota
+        # el cupo de clientes — el modo de fallo que `db.py` documenta.
         conn = get_conn()
+        try:
+            return _overview(conn)
+        finally:
+            conn.close()
+
+    def _overview(conn):
         stats = {
             "tokens": conn.execute(
                 "SELECT COUNT(*) c FROM winning_tokens").fetchone()["c"],
@@ -77,7 +112,6 @@ def register_webapp(app):
                       s.chg_24h, s.signal_score, w.alias
                FROM signals s LEFT JOIN wallets w ON w.address=s.wallet
                ORDER BY s.ts DESC LIMIT 15""").fetchall()]
-        conn.close()
         return jsonify({"stats": stats, "wallets": wallets,
                         "senales": senales})
 
@@ -142,6 +176,14 @@ font-weight:600;margin-left:4px}
 <script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();
 const $=id=>document.getElementById(id);
+// (19-E) XSS ALMACENADO. `signals.symbol` se escribe CRUDO desde
+// DexScreener (realtime no le pasa `db.simbolo_seguro`, y esa funcion
+// tampoco escapa < ni >), y aqui entraba por innerHTML. Un token
+// llamado `<img src=x onerror=...>` ejecutaba JS con el initData a
+// mano, y con el se puede llamar a /api/discard sobre cualquier
+// billetera. Se escapa TODO texto que venga de la cadena o de la base.
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>
+({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function scoreCls(s){return s>=70?'s-hi':(s>=45?'s-md':'s-lo')}
 function fmtMc(v){if(!v)return'?';return v>=1e6?'$'+(v/1e6).toFixed(1)+'M':'$'+(v/1e3).toFixed(0)+'K'}
 async function api(path,extra){const r=await fetch(path,{method:'POST',
@@ -162,7 +204,7 @@ const pnl=[];if(w.pnl_30d!=null)pnl.push('30d: '+w.pnl_30d.toFixed(1));
 if(w.pnl_total!=null)pnl.push('hist: '+w.pnl_total.toFixed(1));
 return '<div class="card"><div class="row"><div style="flex:1">'+
 '<div class="alias">'+(w.is_tracked?'<span class="star">★</span> ':'')+
-(w.alias||'Sin alias')+(w.ai_class?' <span class="chip" style="background:#232936;color:#8b93a7">'+w.ai_class+'</span>':'')+'</div>'+
+esc(w.alias||'Sin alias')+(w.ai_class?' <span class="chip" style="background:#232936;color:#8b93a7">'+esc(w.ai_class)+'</span>':'')+'</div>'+
 '<div class="addr">'+w.address+'</div>'+
 '<div class="meta">ganadores: '+w.winning_tokens_count+
 (pnl.length?' · PnL(SOL) '+pnl.join(' · '):'')+'</div></div>'+
@@ -177,8 +219,8 @@ if(x.chg_1h!=null)chips.push('<span class="chip '+(x.chg_1h>=0?'up':'dn')+'">1h 
 if(x.chg_24h!=null)chips.push('<span class="chip '+(x.chg_24h>=0?'up':'dn')+'">24h '+x.chg_24h.toFixed(0)+'%</span>');
 return '<div class="card"><div class="row"><div style="flex:1">'+
 '<span class="'+(x.side==='compra'?'buy':'sell')+'">'+(x.side==='compra'?'🟢':'🔴')+
-' <b>'+(x.symbol||x.mint.slice(0,8))+'</b></span>'+
-'<span class="meta"> '+x.sol.toFixed(1)+' SOL · '+(x.alias||'')+' · hace '+hace+'h</span>'+
+' <b>'+esc(x.symbol||x.mint.slice(0,8))+'</b></span>'+
+'<span class="meta"> '+(x.sol||0).toFixed(1)+' SOL · '+esc(x.alias||'')+' · hace '+hace+'h</span>'+
 '<div style="margin-top:4px">'+chips.join(' ')+'</div></div>'+
 (x.signal_score!=null?'<div class="score '+scoreCls(x.signal_score)+'">'+Math.round(x.signal_score)+'</div>':'')+
 '</div></div>'}).join(''):'<div class="load">Aún no hay señales</div>';
