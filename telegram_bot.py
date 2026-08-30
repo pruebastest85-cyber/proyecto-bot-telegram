@@ -2241,10 +2241,18 @@ async def cmd_promover(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             _prueba = promocion(conn, ejecutar=False)
             if _prueba.get("error"):
                 return f"⚠️ {_prueba['error']}"
+            # (19-M) Las frenadas por la nota se DICEN, no se esconden:
+            # pasan las puertas 1-2 y aun asi no suben, y sin esta linea
+            # el dueño no tendria forma de saber por que.
+            _nota = _prueba.get("frenadas_por_nota", 0)
+            _l_nota = (f"\n_({_nota} pasan las puertas 1-2 pero tienen una "
+                       f"nota del embudo que impide la ⭐; subirian si un "
+                       f"perfilado nuevo se la mejora.)_" if _nota else "")
             if not _prueba["candidatas"]:
                 return ("⬆️ *Nadie que promover.*\nNinguna billetera sin "
                         "estrella pasa hoy las puertas 1-2 del embudo.\n"
-                        f"⭐ actuales: {_prueba['estrellas_ahora']}")
+                        f"⭐ actuales: {_prueba['estrellas_ahora']}"
+                        + _l_nota)
             if not ejecutar:
                 from paper_trading import _md as _md_pt
                 _l = []
@@ -2261,8 +2269,9 @@ async def cmd_promover(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return (f"🧪 *Ensayo de promoción*\n\n"
                         f"⭐ actuales: {_prueba['estrellas_ahora']}\n"
                         f"⬆️ subirían: *{_prueba['candidatas']}*\n\n"
-                        f"{_txt}\n\n"
-                        "Ejecutar de verdad: `/promover si`\n"
+                        f"{_txt}\n"
+                        + _l_nota +
+                        "\n\nEjecutar de verdad: `/promover si`\n"
                         "_Entran EN PRUEBA: se miden en vivo antes de "
                         "confirmarse. Con el modo provisional encendido, "
                         "el bot ya alerta y copia mientras las mide._")

@@ -668,14 +668,46 @@ def promocion(conn, ejecutar: bool = False) -> dict:
     ahora = int(time.time())
     ya = {r["address"] for r in conn.execute(
         "SELECT address FROM wallets WHERE is_tracked = 1").fetchall()}
+    # (19-M) LA NOTA DEL EMBUDO MANDA TAMBIÉN AQUÍ.
+    #
+    # `depurar_estrellas` QUITA la estrella a quien tiene una nota que la
+    # bloquea (`nota_bloquea`, hoy: 'Descartada'). `promocion` no miraba
+    # la nota, así que DABA la estrella a esas mismas billeteras: el
+    # embudo se contradecía consigo mismo y las subía y bajaba en bucle,
+    # gastando créditos de Helius en re-perfilarlas cada vuelta.
+    #
+    # No es hipótesis. Medido en la base del dueño el 30/8: de las 21 que
+    # `/promover si` subió, **8 perdieron la estrella en menos de una
+    # hora**, y son EXACTAMENTE las 8 que ya tenían `grade='Descartada'`
+    # en el momento de subirlas. Ninguna de las otras 13 cayó.
+    #
+    # Las dos mitades del embudo usan ahora la MISMA función para decidir
+    # si una nota permite estrella, así que no pueden volver a
+    # separarse. Una billetera con mala nota vuelve a ser promovible en
+    # cuanto un perfilado nuevo se la mejore — que es lo correcto: la
+    # nota se gana, no se ignora.
+    try:
+        from ai_analyst import nota_bloquea as _nota_bloquea
+    except Exception as e:                       # pragma: no cover
+        print(f"· promoción: sin guarda de nota ({e})")
+
+        def _nota_bloquea(_c, _t):
+            return False
+    notas = {r["address"]: r["grade"] for r in conn.execute(
+        "SELECT address, grade FROM wallets").fetchall()}
     hist = historial(conn, todas=True)
     suben = []
+    frenadas_por_nota = 0
     for w, h in hist.items():
         if w in ya:
             continue
         pasa, _motivo = puertas_historial(h)
-        if pasa:
-            suben.append((w, h))
+        if not pasa:
+            continue
+        if _nota_bloquea(conn, notas.get(w)):
+            frenadas_por_nota += 1
+            continue
+        suben.append((w, h))
     # Mejores primero: si el dueño corta la lista por donde sea, se
     # queda con las de más recorrido, no con las que salieron antes del
     # diccionario.
@@ -684,6 +716,7 @@ def promocion(conn, ejecutar: bool = False) -> dict:
     alias = {r["address"]: r["alias"] for r in conn.execute(
         "SELECT address, alias FROM wallets").fetchall()}
     res = {"candidatas": len(suben), "estrellas_ahora": len(ya),
+           "frenadas_por_nota": frenadas_por_nota,
            "detalle": [(w, alias.get(w), h["cerradas"], h["wr"],
                         h["tokens"], h["hold_min"], h.get("neto", 0.0))
                        for w, h in suben[:60]],

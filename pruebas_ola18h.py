@@ -8115,6 +8115,75 @@ def prueba_19j():
                                                 or ""),
                   f["BUENA_1"]["ai_reason"])
 
+        # ── 2b) LA NOTA DEL EMBUDO FRENA LA PROMOCION (19-M) ────────
+        # El bucle que se vio en produccion: /promover subia billeteras
+        # con grade='Descartada', el ciclo las perfilaba, grading les
+        # confirmaba la mala nota y `depurar_estrellas` les quitaba la
+        # estrella otra vez — para que el siguiente /promover volviera a
+        # subirlas. Medido el 30/8: de 21 promovidas, cayeron 8 en menos
+        # de una hora, y eran EXACTAMENTE las 8 con nota 'Descartada'.
+        # Cada vuelta gasta creditos de Helius re-perfilandolas.
+        import ai_analyst as _aa
+        # Se devuelven al estado de candidatas: en este punto del bloque
+        # la seccion 3 ya las promovio, y `promocion` salta a las que ya
+        # tienen estrella.
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=0, "
+                     "prueba_desde=NULL WHERE address IN "
+                     "('BUENA_1','BUENA_2')")
+        conn.execute("UPDATE wallets SET grade='Descartada' "
+                     "WHERE address='BUENA_2'")
+        conn.commit()
+        _r = fc.promocion(conn, ejecutar=False)
+        _n = {d[0] for d in _r["detalle"]}
+        comprobar("con nota 'Descartada' NO se promueve",
+                  "BUENA_2" not in _n, sorted(_n))
+        comprobar("la que tiene buena nota sigue subiendo",
+                  "BUENA_1" in _n, sorted(_n))
+        comprobar("y se CUENTA cuantas frena la nota, no se esconden",
+                  _r.get("frenadas_por_nota") == 1, _r)
+        # La guarda usa la MISMA funcion que la depuracion para decidir,
+        # asi que las dos mitades no pueden separarse otra vez.
+        comprobar("promocion y depuracion comparten el criterio de nota",
+                  _aa.nota_bloquea(conn, "Descartada") is True
+                  and _aa.nota_bloquea(conn, "Seguimiento") is False)
+        # Con `grado_vinculante=1` (/nota on) la nota manda del todo: ahi
+        # bloquean TODAS las que no son Elite ni Seguimiento, no solo
+        # 'Descartada'. Esta prueba es la que impide copiar el criterio a
+        # mano: una version escrita aparte ("es Descartada") pasaria las
+        # de arriba y fallaria aqui, que es exactamente como se separan
+        # las dos mitades del embudo sin que nadie se entere.
+        from db import get_setting as _gs, set_setting as _ss
+        _viejo = _gs(conn, "grado_vinculante", None)
+        try:
+            _ss(conn, "grado_vinculante", "1")
+            conn.commit()
+            conn.execute("UPDATE wallets SET grade='Observación' "
+                         "WHERE address='BUENA_2'")
+            conn.commit()
+            _rv = fc.promocion(conn, ejecutar=False)
+            comprobar("con /nota on, una nota sin ⭐ tambien frena la "
+                      "promocion (no solo 'Descartada')",
+                      "BUENA_2" not in {d[0] for d in _rv["detalle"]}
+                      and _rv.get("frenadas_por_nota") == 1,
+                      f"detalle={[d[0] for d in _rv['detalle']]} "
+                      f"frenadas={_rv.get('frenadas_por_nota')}")
+        finally:
+            _ss(conn, "grado_vinculante", _viejo if _viejo is not None
+                else "0")
+            conn.commit()
+
+        # Y no es irreversible: si el perfilado le mejora la nota, vuelve.
+        conn.execute("UPDATE wallets SET grade='Seguimiento' "
+                     "WHERE address='BUENA_2'")
+        conn.commit()
+        _r2 = fc.promocion(conn, ejecutar=False)
+        comprobar("si un perfilado nuevo le mejora la nota, vuelve a ser "
+                  "promovible",
+                  "BUENA_2" in {d[0] for d in _r2["detalle"]},
+                  sorted(d[0] for d in _r2["detalle"]))
+        comprobar("y entonces ya no cuenta como frenada",
+                  _r2.get("frenadas_por_nota") == 0, _r2)
+
         # ── 3b) ENTRA sin confirmar, y eso se mira ANTES de que
         #      `clasificar` pueda maquillarlo.
         #
