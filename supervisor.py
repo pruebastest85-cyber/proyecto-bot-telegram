@@ -46,6 +46,16 @@ aviso_fallo_commit = None
 # horas" (reseteando el contador anti-bucle) y un salto hacia delante
 # aplazaba la proxima actualizacion indefinidamente.
 proximo_intento = 0.0
+# (19-G) Ultimo commit que arranco BIEN (vivio mas de VIDA_CORTA_S). Es
+# el destino del rollback cuando uno nuevo no levanta.
+commit_bueno = None
+# (19-G) Fichero de instancia unica. Nada impedia arrancar DOS
+# supervisores —doble clic en el .bat mas el del arranque de Windows—, y
+# dos supervisores son dos bots con el mismo token de Telegram (el
+# `Conflict` que ya esta en la tabla `errors`) y dos escritores sobre la
+# misma SQLite.
+LOCKFILE = os.path.join(DESTINO, ".supervisor.lock")
+_lock_fh = None
 
 
 def _avisar(texto: str) -> None:
@@ -175,6 +185,20 @@ def actualizar() -> bool:
                         "⚠️ El bot local dice haberse actualizado pero el "
                         "codigo no cambio. Sigue con el commit anterior.")
         return False
+    # (19-G) Verificacion ANTES de dar el despliegue por bueno. Si el
+    # codigo nuevo no compila, se vuelve al ultimo commit que si
+    # arrancaba en vez de entrar en un bucle de reinicios de 15 min sin
+    # salida.
+    if not compila():
+        _avisar(f"⛔ El commit `{objetivo[:7]}` NO COMPILA; no lo "
+                f"despliego. " +
+                (f"Vuelvo a `{commit_bueno[:7]}`." if commit_bueno
+                 else "No tengo un commit bueno conocido al que volver, "
+                      "asi que dejo el arbol como esta."))
+        if commit_bueno:
+            volver_atras(commit_bueno)
+        proximo_intento = time.monotonic() + ESPERA_FALLO_S
+        return False
     pip_pendiente = not _pip()
     if pip_pendiente:
         print("⚠️  pip fallo (¿sin red?); se reintenta antes de arrancar")
@@ -187,26 +211,190 @@ def actualizar() -> bool:
     return True
 
 
+def compila() -> bool:
+    """(19-G) ¿El codigo que acabamos de bajar al menos COMPILA?
+
+    `actualizar()` hacia `git reset --hard` + pip y devolvia True sin
+    comprobar nada. Un `SyntaxError`, un `ImportError` —o un `float()`
+    de config que revienta con una errata en el .env— mataba el bot al
+    arrancar, y el supervisor entraba en backoff hasta 15 minutos PARA
+    SIEMPRE, sin rollback: el unico desbloqueo era subir otro commit. Un
+    commit malo un viernes por la noche = produccion caida toda la
+    noche, con UN solo aviso (en la muerte numero 3 exacta).
+
+    Esto no garantiza que el bot arranque —para eso esta el rollback por
+    muerte temprana—, pero caza gratis el error mas comun. Es lo mismo
+    que el CLAUDE.md exige antes de SUBIR y que nadie comprobaba al
+    RECIBIR.
+    """
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "compileall", "-q", "."],
+            cwd=DESTINO, capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        print(f"⚠️  No pude comprobar si compila ({e}); sigo adelante")
+        return True          # ante la duda, no bloquear el despliegue
+    if r.returncode != 0:
+        print("⛔ El codigo nuevo NO compila:")
+        print((r.stdout or "")[-600:])
+        print((r.stderr or "")[-600:])
+        return False
+    return True
+
+
+def volver_atras(destino: str) -> bool:
+    """(19-G) Rollback al ultimo commit que si arrancaba."""
+    if not destino:
+        return False
+    print(f"↩️  Volviendo al ultimo commit bueno ({destino[:7]})...")
+    if not _git_ok("reset", "--hard", destino):
+        print("⚠️  El rollback fallo; sigo con lo que haya")
+        return False
+    _pip()
+    _avisar(f"↩️ El commit nuevo no arrancaba: he vuelto a "
+            f"`{destino[:7]}`, que es el ultimo que si funcionaba. El bot "
+            f"sigue vivo con ese codigo. Revisa el commit que rompio y "
+            f"vuelve a subirlo arreglado.")
+    return True
+
+
 def lanzar() -> subprocess.Popen:
     global pip_pendiente
     if pip_pendiente:
         print("🔁 Reintentando pip install pendiente...")
         pip_pendiente = not _pip()
-    subprocess.run([sys.executable, "migrate_to_pg.py"], cwd=DESTINO)
+    # (19-G) `timeout`: git y pip ya lo tenian desde la 18-D, pero la
+    # migracion se quedo fuera. Si `psycopg2.connect` se colgara
+    # esperando un lock, el supervisor se congelaria aqui — sin bot, sin
+    # vigilancia y sin aviso, para siempre.
+    try:
+        subprocess.run([sys.executable, "migrate_to_pg.py"], cwd=DESTINO,
+                       timeout=300)
+    except subprocess.TimeoutExpired:
+        print("⚠️  migrate_to_pg.py tardo mas de 5 min; sigo sin el "
+              "(sin DATABASE_URL no hace nada)")
+    except Exception as e:
+        print(f"⚠️  migrate_to_pg.py fallo ({e}); sigo")
     print(f"🚀 Bot arrancando (commit {_git('rev-parse', '--short', 'HEAD')})")
-    return subprocess.Popen([sys.executable, "telegram_bot.py"], cwd=DESTINO)
+    # (19-G) En Windows, GRUPO DE PROCESOS PROPIO. Hace falta para poder
+    # mandarle luego un CTRL_BREAK y que muera LIMPIO — ver `parar()`.
+    _flags = {}
+    if os.name == "nt":
+        _flags["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen([sys.executable, "telegram_bot.py"],
+                            cwd=DESTINO, **_flags)
 
 
 def parar(proc: subprocess.Popen):
+    """Para el bot lo mas limpiamente posible.
+
+    (19-G) PRIMERO SE PIDE POR LAS BUENAS. En Windows,
+    `Popen.terminate()` es `TerminateProcess`: muerte dura, sin señal,
+    sin excepcion y SIN que corra ni un `atexit`. Eso se llevaba por
+    delante el bufer de creditos de `api_usage` —hasta 60 s o 25
+    eventos— EN CADA DESPLIEGUE, y ese contador es justo el que alimenta
+    el freno del 85% de Helius: un subconteo sistematico.
+    `_volcar_al_salir` esta registrado con `atexit` y nunca llegaba a
+    ejecutarse.
+
+    Con CTRL_BREAK el hijo recibe un KeyboardInterrupt, sale por el
+    camino normal del interprete y los `atexit` SI corren. Si en 10 s no
+    ha muerto, se sigue con la escalera de siempre.
+    """
+    _pidio = False
+    if os.name == "nt":
+        try:
+            import signal as _sig
+            proc.send_signal(_sig.CTRL_BREAK_EVENT)
+            _pidio = True
+        except Exception as e:
+            print(f"⚠️  No pude mandar CTRL_BREAK ({e}); voy a terminate")
+    else:
+        try:
+            proc.terminate()          # SIGTERM: en POSIX ya es "por las
+            _pidio = True             # buenas" y corre atexit
+        except Exception as e:
+            print(f"⚠️  No pude mandar SIGTERM ({e})")
+    if _pidio:
+        try:
+            proc.wait(timeout=10)
+            return                     # murio limpio: bufer volcado
+        except subprocess.TimeoutExpired:
+            print("⚠️  El bot no murio por las buenas en 10 s; termino")
+        except Exception:
+            pass
     proc.terminate()
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+        # (19-G) `wait()` DESPUES del kill, sin timeout.
+        #
+        # Antes se volvia sin esperar al hijo y `lanzar()` arrancaba el
+        # nuevo acto seguido: durante esa ventana habia DOS procesos con
+        # el mismo token de Telegram —el `Conflict` que ya esta en la
+        # tabla `errors`— y DOS escritores sobre la misma SQLite. Pasa
+        # cuando el bot tarda mas de 10 s en morir, que es lo normal si
+        # esta dentro de una llamada a la IA local (hasta 135 s) o de un
+        # `to_thread` bloqueado.
+        try:
+            proc.wait()
+        except Exception as e:
+            print(f"⚠️  No pude esperar a que el bot muriera: {e}")
+
+
+def instancia_unica() -> bool:
+    """(19-G) ¿Soy el unico supervisor? True si me quedo con el candado.
+
+    Nada impedia arrancar DOS: el doble clic en `BOT_LOCAL_ARRANCAR.bat`
+    mas el del arranque de Windows, o simplemente abrirlo dos veces. Dos
+    supervisores son dos `telegram_bot.py` con el mismo token —el
+    `Conflict` de Telegram que ya esta en la tabla `errors`— y dos
+    escritores sobre la misma SQLite.
+
+    En Windows se usa `msvcrt.locking`; en el resto, `fcntl.flock`. El
+    candado lo suelta el sistema operativo al morir el proceso, asi que
+    un corte de luz no deja el fichero atascado.
+    """
+    global _lock_fh
+    try:
+        _lock_fh = open(LOCKFILE, "a+")
+    except Exception as e:
+        print(f"⚠️  No pude abrir {LOCKFILE} ({e}); sigo sin candado")
+        return True          # ante la duda, no impedir el arranque
+    try:
+        if os.name == "nt":
+            import msvcrt
+            _lock_fh.seek(0)
+            msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("=" * 60)
+        print(" YA HAY OTRO SUPERVISOR CORRIENDO.")
+        print(" Dos supervisores = dos bots con el mismo token de")
+        print(" Telegram (Conflict) y dos escritores sobre la misma")
+        print(" base. Cierro esta ventana; usa la que ya estaba abierta.")
+        print("=" * 60)
+        return False
+    except Exception as e:
+        print(f"⚠️  No pude tomar el candado ({e}); sigo sin el")
+        return True
+    try:
+        _lock_fh.seek(0)
+        _lock_fh.truncate()
+        _lock_fh.write(f"{os.getpid()}\n")
+        _lock_fh.flush()
+    except Exception:
+        pass
+    return True
 
 
 def main():
-    global proximo_intento
+    global proximo_intento, commit_bueno
+    if not instancia_unica():
+        return
     print("=" * 60)
     print(" SUPERVISOR BOT LOCAL - auto-actualiza desde GitHub cada 5 min")
     print(" GitHub manda: ediciones locales al codigo se pisan solas.")
@@ -217,8 +405,20 @@ def main():
         proc = lanzar()
         nacio = time.monotonic()
         ultimo_chequeo = time.monotonic()
+        _marcado_bueno = False
         while True:
             time.sleep(10)
+            # (19-G) El commit se considera BUENO cuando el bot lleva
+            # vivo mas de VIDA_CORTA_S. Ese es el destino del rollback.
+            if (not _marcado_bueno
+                    and time.monotonic() - nacio >= VIDA_CORTA_S
+                    and proc.poll() is None):
+                _h = _git("rev-parse", "HEAD")
+                if _h:
+                    commit_bueno = _h
+                    _marcado_bueno = True
+                    print(f"✅ Commit {_h[:7]} marcado como bueno "
+                          f"(el bot lleva {VIDA_CORTA_S}s vivo)")
             if proc.poll() is not None:          # el bot murio solo
                 vida = time.monotonic() - nacio
                 # Backoff exponencial (auditoria 19/8): un commit que
@@ -228,6 +428,25 @@ def main():
                 # cuenta (fue una muerte normal, no un bucle).
                 muertes_seguidas = (muertes_seguidas + 1
                                     if vida < VIDA_CORTA_S else 0)
+                # (19-G) ROLLBACK. Dos muertes tempranas seguidas con el
+                # mismo commit significan que ese codigo NO arranca. Sin
+                # esto, el supervisor reintentaba con espera creciente
+                # hasta 15 min PARA SIEMPRE y el unico desbloqueo era que
+                # el dueño subiera otro commit — o sea, produccion caida
+                # hasta que alguien lo notara. Se vuelve al ultimo que si
+                # vivio, y ahi se queda hasta que llegue un commit nuevo.
+                _hoy = _git("rev-parse", "HEAD")
+                if (muertes_seguidas >= 2 and commit_bueno
+                        and _hoy and _hoy != commit_bueno):
+                    if volver_atras(commit_bueno):
+                        muertes_seguidas = 0
+                        # No se vuelve a intentar la actualizacion
+                        # enseguida: si no, dentro de 5 min se detectaria
+                        # "commit nuevo" (el malo) y volveria el bucle.
+                        proximo_intento = (time.monotonic()
+                                           + ESPERA_FALLO_S)
+                        time.sleep(REINICIO_S)
+                        break
                 espera = min(ESPERA_MAX_S,
                              REINICIO_S * (2 ** min(muertes_seguidas, 6)))
                 print(f"⚠️  El bot termino (codigo {proc.returncode}, "

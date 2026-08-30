@@ -7709,6 +7709,138 @@ def prueba_19f():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-G - el supervisor: comprobar lo que despliega, saber volver
+# atras, no dejar dos bots vivos y no perder el bufer de creditos.
+# ---------------------------------------------------------------------
+def prueba_19g():
+    bloque("19-G - el supervisor comprueba, vuelve atrás y no se duplica")
+    import inspect as _insp
+    import os as _os
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile as _tf
+    import supervisor as sv
+
+    # ── 1) Comprueba que el código compila antes de desplegarlo ──────
+    _src_act = _insp.getsource(sv.actualizar)
+    comprobar("actualizar() llama a compila() antes de dar el despliegue "
+              "por bueno", "compila()" in _src_act,
+              "hacía git reset + pip y devolvía True sin comprobar nada: "
+              "un SyntaxError dejaba el bot en backoff de 15 min PARA "
+              "SIEMPRE, sin rollback")
+    comprobar("y si no compila, vuelve al último commit bueno",
+              "volver_atras" in _src_act, _src_act[-300:])
+
+    # Comportamiento real de compila(), sobre un árbol de verdad.
+    _d = _tf.mkdtemp(prefix="sup19g_")
+    _destino_prev = sv.DESTINO
+    try:
+        sv.DESTINO = _d
+        with open(_os.path.join(_d, "bueno.py"), "w") as f:
+            f.write("x = 1\n")
+        comprobar("compila(): un árbol sano da True", sv.compila() is True)
+        with open(_os.path.join(_d, "roto.py"), "w") as f:
+            f.write("def (:\n")
+        import contextlib as _cx
+        import io as _io
+        with _cx.redirect_stdout(_io.StringIO()):
+            _r = sv.compila()
+        comprobar("compila(): un SyntaxError da False", _r is False,
+                  "si no lo caza, el commit malo se despliega igual")
+    finally:
+        sv.DESTINO = _destino_prev
+        _sh.rmtree(_d, ignore_errors=True)
+
+    # ── 2) Rollback por muerte temprana repetida ─────────────────────
+    _src_main = _insp.getsource(sv.main)
+    comprobar("el bucle marca como BUENO el commit que sobrevive",
+              "commit_bueno = _h" in _src_main,
+              "sin un commit bueno conocido no hay a dónde volver")
+    comprobar("y vuelve atrás tras dos muertes tempranas seguidas",
+              "muertes_seguidas >= 2" in _src_main
+              and "volver_atras(commit_bueno)" in _src_main,
+              "sin esto, el único desbloqueo era que el dueño subiera "
+              "otro commit: producción caída hasta que alguien lo notara")
+
+    # ── 3) kill() ya espera al hijo ──────────────────────────────────
+    _src_parar = _insp.getsource(sv.parar)
+    _i_kill = _src_parar.find("proc.kill()")
+    _i_wait = _src_parar.find("proc.wait()", _i_kill)
+    comprobar("parar(): hay un wait() SIN timeout después del kill()",
+              _i_kill != -1 and _i_wait != -1 and _i_wait > _i_kill,
+              "volvía sin esperar al hijo y lanzar() arrancaba el nuevo "
+              "acto seguido: dos bots con el mismo token (Conflict) y "
+              "dos escritores sobre la misma SQLite")
+
+    # ── 4) Se pide por las buenas antes de matar ─────────────────────
+    comprobar("parar() intenta primero un apagado limpio",
+              "CTRL_BREAK_EVENT" in _src_parar,
+              "terminate() en Windows es TerminateProcess: no corre "
+              "NINGÚN atexit, así que el búfer de créditos de api_usage "
+              "(hasta 60 s / 25 eventos) se perdía EN CADA DESPLIEGUE — "
+              "y ese contador alimenta el freno del 85% de Helius")
+    comprobar("y para eso el bot se lanza en su propio grupo de procesos",
+              "CREATE_NEW_PROCESS_GROUP" in _insp.getsource(sv.lanzar),
+              "sin grupo propio no se le puede mandar un CTRL_BREAK")
+    comprobar("api_usage sigue teniendo su volcado registrado en atexit",
+              "_atexit.register" in _insp.getsource(
+                  __import__("api_usage")),
+              "si no, el apagado limpio no serviría de nada")
+
+    # ── 5) La migración ya no puede colgar al supervisor ─────────────
+    comprobar("migrate_to_pg se lanza con timeout",
+              "timeout=300" in _insp.getsource(sv.lanzar),
+              "git y pip lo tienen desde la 18-D; la migración se quedó "
+              "fuera: un cuelgue ahí congelaba el supervisor sin bot, "
+              "sin vigilancia y sin aviso")
+
+    # ── 6) Instancia única, comprobada con DOS procesos de verdad ────
+    _d2 = _tf.mkdtemp(prefix="sup19g_lock_")
+    _raiz = _os.path.dirname(_os.path.abspath(__file__))
+    try:
+        _codigo = (
+            "import sys, time, os\n"
+            f"sys.path.insert(0, {_raiz!r})\n"
+            "import supervisor as sv\n"
+            f"sv.DESTINO = {_d2!r}\n"
+            f"sv.LOCKFILE = os.path.join({_d2!r}, '.supervisor.lock')\n"
+            "ok = sv.instancia_unica()\n"
+            "print('__LOCK__', ok, flush=True)\n"
+            "time.sleep(float(sys.argv[1]))\n"
+        )
+        # El primero toma el candado y lo mantiene 12 s.
+        p1 = _sp.Popen([sys.executable, "-c", _codigo, "12"],
+                       stdout=_sp.PIPE, text=True)
+        _l1 = p1.stdout.readline().strip()
+        comprobar("el primer supervisor toma el candado",
+                  _l1 == "__LOCK__ True", f"dijo {_l1!r}")
+        # El segundo, con el primero vivo, debe rechazarse.
+        p2 = _sp.run([sys.executable, "-c", _codigo, "0"],
+                     capture_output=True, text=True, timeout=60)
+        comprobar("un SEGUNDO supervisor se rechaza mientras el primero "
+                  "vive",
+                  "__LOCK__ False" in (p2.stdout or ""),
+                  f"salió {(p2.stdout or '').strip()!r} — dos "
+                  f"supervisores son dos bots con el mismo token de "
+                  f"Telegram y dos escritores sobre la misma base")
+        p1.terminate()
+        try:
+            p1.wait(timeout=15)
+        except Exception:
+            p1.kill()
+        # Y cuando el primero muere, el candado se suelta solo.
+        p3 = _sp.run([sys.executable, "-c", _codigo, "0"],
+                     capture_output=True, text=True, timeout=60)
+        comprobar("y cuando el primero muere, el candado queda libre (no "
+                  "se atasca tras un corte)",
+                  "__LOCK__ True" in (p3.stdout or ""),
+                  f"salió {(p3.stdout or '').strip()!r}")
+    finally:
+        _sh.rmtree(_d2, ignore_errors=True)
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -7745,6 +7877,7 @@ def main():
     prueba_19d()
     prueba_19e()
     prueba_19f()
+    prueba_19g()
 
     print("\n" + "─" * 60)
     if _FALLOS:
