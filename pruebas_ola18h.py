@@ -8758,6 +8758,30 @@ def prueba_19n():
                 1.4 if i < 8 else 0.5, hace_dias=10 + i)
         conn.commit()
 
+        # ── (19-O) TODOS los mandos del filtro existen en `config` ───
+        # `filtro_calidad._cfg()` los lee con getattr(config, ...): un
+        # mando que no este declarado ahi es un mando MUERTO que ademas
+        # parece funcionar (ponerlo en el .env no hace nada y no avisa).
+        # Paso con FILTRO_PF_MIN en la 19-N y con AUTO_CYCLE_HOURS en la
+        # 19-L. Esta prueba recorre el fuente de _cfg y comprueba cada
+        # nombre, asi que cubre tambien los mandos que se añadan manana.
+        import ast as _ast2
+        import io as _io2
+        _src = _io2.open(fc.__file__, encoding="utf-8").read()
+        _fn = next(n for n in _ast2.walk(_ast2.parse(_src))
+                   if isinstance(n, _ast2.FunctionDef) and n.name == "_cfg")
+        _nombres = sorted({n.args[0].value for n in _ast2.walk(_fn)
+                           if isinstance(n, _ast2.Call)
+                           and isinstance(n.func, _ast2.Name)
+                           and n.func.id == "g" and n.args
+                           and isinstance(n.args[0], _ast2.Constant)})
+        _faltan = [n for n in _nombres if not hasattr(cfg, n)]
+        comprobar("todos los mandos que lee el filtro existen en config "
+                  "(si no, ponerlos en el .env no haria nada)",
+                  not _faltan,
+                  f"faltan en config.py: {_faltan} · revisados: "
+                  f"{len(_nombres)}")
+
         h = fc.historial(conn, todas=True)
         _a, _r = h["ASIMETRICA"], h["REGULAR"]
         comprobar("el historial trae ahora el profit factor",

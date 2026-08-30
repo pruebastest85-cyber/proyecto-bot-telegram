@@ -190,6 +190,22 @@ FILTRO_PROVISIONAL = _int("FILTRO_PROVISIONAL", 1)
 # escondia a billeteras que ganan poquitos y palman fuerte en bolsas que
 # nunca cierran (caso real: 62% de acierto en cerradas y -21,8 SOL netos).
 FILTRO_NETO_MIN = _float("FILTRO_NETO_MIN", 0.0)
+# (19-O) PROFIT FACTOR minimo: por cada SOL perdido, cuantos ganados.
+# 0 = puerta APAGADA (el defecto: desplegar no cambia a quien copia el
+# bot de nadie).
+#
+# Faltaba: la 19-N añadio la puerta en `filtro_calidad._cfg()`, que lee
+# los ajustes con `getattr(config, ...)`, pero NO declaro la variable
+# aqui. Resultado: `FILTRO_PF_MIN` en el entorno no llegaba a ninguna
+# parte y la puerta era imposible de encender — un mando muerto que
+# ademas parecia funcionar. Se vio al medir en la PC del dueño: con
+# FILTRO_PF_MIN=2 exportado, `_cfg()` seguia diciendo pf_min=0.
+#
+# Es el MISMO fallo que la 19-L (AUTO_CYCLE_HOURS leido de `config`
+# donde no estaba). Por eso la prueba que lo acompaña no comprueba solo
+# este mando: recorre TODOS los ajustes que `filtro_calidad` espera y
+# exige que existan aqui.
+FILTRO_PF_MIN = _float("FILTRO_PF_MIN", 0.0)
 # (18-O) La IA no puede DAR la estrella a quien no pasa las puertas 1-2.
 # Medido en la base del dueño el 28/8: de 24 ⭐ vivas, solo 7 pasaban el
 # embudo; las otras 17 las habia promovido la re-evaluacion de la IA en
