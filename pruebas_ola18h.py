@@ -2743,8 +2743,18 @@ def prueba_reentrada():
 
         dichos = []
 
+        # (19-F) El doble tiene `chat` con `send_message` porque el
+        # comando pasó a enviar por `_send_md` — que recorta al tope de
+        # Telegram y reintenta en texto plano si el Markdown se rompe,
+        # igual que ya hacían /copiapura y /nota. Antes usaba
+        # `reply_text(parse_mode="Markdown")` a pelo, sin red. Lo que se
+        # comprueba abajo (qué se guarda y qué se responde) no cambia.
+        class _Chat:
+            async def send_message(self, txt, **k):
+                dichos.append(txt)
+
         class _Msg:
-            chat = None
+            chat = _Chat()
             async def reply_text(self, txt, **k):
                 dichos.append(txt)
 
@@ -7506,6 +7516,199 @@ def prueba_19e():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-F - Telegram: comandos que congelaban el bot, /top que no cabia,
+# y /reembudo que depuraba con el filtro apagado.
+# ---------------------------------------------------------------------
+def prueba_19f():
+    bloque("19-F - el bot deja de congelarse, /top cabe y /reembudo respeta")
+    import asyncio as _aio
+    import contextlib
+    import inspect as _insp
+    import io
+    import types as _ty
+    import telegram_bot as tb
+    from db import get_conn, set_setting, get_setting
+
+    conn = get_conn()
+
+    # ── 1) Ningún comando escribe en la base desde el event loop ─────
+    # La propiedad se comprueba sobre el AST: dentro de una corrutina
+    # `async def`, un `set_setting(...)` que no esté dentro de una
+    # función anidada (la que se pasa a `asyncio.to_thread`) corre EN el
+    # event loop y congela el bot hasta 30 s si SQLite está ocupado.
+    import ast as _ast
+    _arbol = _ast.parse(_insp.getsource(tb))
+    _culpables = []
+    for _n in _ast.walk(_arbol):
+        if not isinstance(_n, _ast.AsyncFunctionDef):
+            continue
+        # funciones anidadas dentro de la corrutina: su cuerpo SÍ puede
+        # escribir, porque va a `to_thread`.
+        _anidadas = {id(x) for d in _ast.walk(_n)
+                     if isinstance(d, _ast.FunctionDef)
+                     for x in _ast.walk(d)}
+        for _c in _ast.walk(_n):
+            if (isinstance(_c, _ast.Call)
+                    and getattr(_c.func, "id", "") in ("set_setting",)
+                    and id(_c) not in _anidadas):
+                _culpables.append(f"{_n.name}:{_c.lineno}")
+    comprobar("ninguna corrutina llama a set_setting directamente",
+              not _culpables,
+              f"lo hacen: {_culpables} — set_setting pide el candado de "
+              f"escritura de SQLite con busy_timeout=30000, así que con "
+              f"la ingesta escribiendo el bot entero deja de responder")
+
+    # Comportamiento: /reentrada y /topalertas siguen guardando bien.
+    dichos = []
+
+    class _Chat:
+        async def send_message(self, txt, **k):
+            dichos.append(txt)
+
+    class _Msg:
+        chat = _Chat()
+
+        async def reply_text(self, txt, **k):
+            dichos.append(txt)
+
+    upd = _ty.SimpleNamespace(message=_Msg(),
+                              effective_user=_ty.SimpleNamespace(id=1))
+
+    def correr(cmd, *args):
+        dichos.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _aio.run(cmd(upd, _ty.SimpleNamespace(args=list(args))))
+        return dichos[-1] if dichos else ""
+
+    _prev_top = get_setting(conn, "top_alertas", None)
+    try:
+        correr(tb.cmd_top_alertas, "17")
+        comprobar("/topalertas 17 lo guarda (desde un hilo)",
+                  str(get_setting(conn, "top_alertas", "")) in ("17", "17.0"),
+                  str(get_setting(conn, "top_alertas", None)))
+        _t = correr(tb.cmd_top_alertas)
+        comprobar("y sin argumentos informa del valor",
+                  "17" in _t, f"respuesta = {_t[:60]!r}")
+        _t = correr(tb.cmd_top_alertas, "-3")
+        comprobar("un valor inválido se rechaza y no cambia nada",
+                  "Uso:" in _t
+                  and str(get_setting(conn, "top_alertas", "")) in
+                  ("17", "17.0"), f"{_t[:50]!r}")
+    finally:
+        if _prev_top is not None:
+            set_setting(conn, "top_alertas", _prev_top)
+
+    # ── 2) /ialocal no reenciende el experimento al cambiar la URL ───
+    _prev_act = get_setting(conn, "ia_local_activa", "0")
+    _prev_url = get_setting(conn, "local_ai_url", "")
+    try:
+        set_setting(conn, "ia_local_activa", "0")     # modo copia pura
+        correr(tb.cmd_ialocal, "http://localhost:9999")
+        comprobar("guardar una URL nueva NO reenciende la IA si estaba "
+                  "apagada",
+                  str(get_setting(conn, "ia_local_activa", "1")) in
+                  ("0", "0.0"),
+                  "con /copiapura on ese ajuste está en 0 A PROPÓSITO: "
+                  "reencenderlo por cambiar una URL rompe el modo copia "
+                  "pura en silencio")
+        comprobar("pero la URL sí se guarda",
+                  (get_setting(conn, "local_ai_url", "") or "").endswith(
+                      "9999"),
+                  str(get_setting(conn, "local_ai_url", None)))
+        set_setting(conn, "ia_local_activa", "1")
+        correr(tb.cmd_ialocal, "http://localhost:8888")
+        comprobar("y si estaba encendida, sigue encendida",
+                  str(get_setting(conn, "ia_local_activa", "0")) in
+                  ("1", "1.0"))
+    finally:
+        set_setting(conn, "ia_local_activa", _prev_act)
+        if _prev_url:
+            set_setting(conn, "local_ai_url", _prev_url)
+
+    # ── 3) /top cabe en Telegram ─────────────────────────────────────
+    _src_top = _insp.getsource(tb.cmd_top)
+    comprobar("/top envía por _send_md (recorta y reintenta en plano)",
+              "_send_md" in _src_top,
+              "30 filas con alias, PnL y clase de la IA son ~6.100 "
+              "caracteres: Telegram rechaza el mensaje entero a partir "
+              "de 21 filas")
+    _src_cb = _insp.getsource(tb.on_callback)
+    comprobar("y los botones del top editan por _edit_md",
+              _src_cb.count("_edit_md(") >= 2,
+              "el edit estaba dentro de un `except: pass`, así que el "
+              "botón Top 30 no hacía NADA y no dejaba rastro")
+    comprobar("_edit_md recorta al tope antes de editar",
+              "_recortar_tg" in _insp.getsource(tb._edit_md))
+    # Comportamiento: un texto de 9.000 caracteres se recorta y se envía.
+    _largo = "x" * 9000
+    comprobar("un texto de 9.000 caracteres se recorta al tope",
+              tb._largo_tg(tb._recortar_tg(_largo)) <= tb.TG_MAX_CHARS,
+              str(tb._largo_tg(tb._recortar_tg(_largo))))
+
+    # ── 4) /reembudo NO depura si el filtro está apagado ─────────────
+    import ai_analyst as aa
+    import filtro_calidad as fc
+    _dep_real = aa.depurar_estrellas
+    _cfg = __import__("config")
+    _act_prev = getattr(_cfg, "FILTRO_TRES_PUERTAS", 1)
+    _depuraciones = []
+    try:
+        aa.depurar_estrellas = lambda c: _depuraciones.append(1)
+        _cfg.FILTRO_TRES_PUERTAS = 0          # interruptor maestro APAGADO
+        _t = correr(tb.cmd_reembudo, "si")
+        comprobar("con el filtro APAGADO, /reembudo si avisa y no ejecuta",
+                  "⚠️" in _t, f"respuesta = {_t[:80]!r}")
+        comprobar("y NO llama a la depuración destructiva",
+                  not _depuraciones,
+                  "depurar_estrellas corría ANTES de comprobar el "
+                  "interruptor: el mensaje decía que no pasó nada y ya "
+                  "había degradado estrellas")
+        _cfg.FILTRO_TRES_PUERTAS = 1
+        _depuraciones.clear()
+        _t = correr(tb.cmd_reembudo)          # ENSAYO, sin "si"
+        comprobar("el ensayo tampoco depura (ni con el filtro encendido)",
+                  not _depuraciones, f"se llamó {len(_depuraciones)} veces")
+        comprobar("y el ensayo sigue informando",
+                  "Ensayo" in _t or "⚠️" in _t, f"{_t[:60]!r}")
+    finally:
+        aa.depurar_estrellas = _dep_real
+        _cfg.FILTRO_TRES_PUERTAS = _act_prev
+        fc  # (usado arriba por import; se deja explícito)
+
+    # ── 5) Un ciclo omitido por el candado NO se marca como exitoso ──
+    comprobar("run_full_cycle lanza CicloOmitido en vez de devolver texto",
+              "raise CicloOmitido" in _insp.getsource(tb.run_full_cycle),
+              "devolvía una cadena sin lanzar, así que _con_reloj ponía "
+              "_ok=True y sellaba job_ts:auto_cycle: el siguiente ciclo "
+              "esperaba el intervalo entero sin haberse ejecutado ninguno")
+    tb.cycle_lock.acquire()
+    try:
+        _lanzo = False
+        try:
+            tb.run_full_cycle()
+        except tb.CicloOmitido:
+            _lanzo = True
+        comprobar("comportamiento: con el candado tomado, lanza",
+                  _lanzo, "no lanzó: el reloj de éxito volvería a mentir")
+        # Y /descubrir y /analizar también lo respetan ahora.
+        for _fn, _nombre in ((tb.cmd_descubrir, "/descubrir"),
+                             (tb.cmd_analizar, "/analizar")):
+            _t = correr(_fn)
+            comprobar(f"{_nombre} respeta el candado del ciclo",
+                      "en curso" in _t,
+                      f"respuesta = {_t[:60]!r} — sin esto, dos análisis "
+                      f"concurrentes escriben en wallets/appearances y "
+                      f"gastan la cuota de Helius dos veces")
+    finally:
+        tb.cycle_lock.release()
+    # Y con el candado libre, vuelven a funcionar.
+    comprobar("con el candado libre, run_full_cycle no lanza",
+              not tb.cycle_lock.locked())
+    conn.close()
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -7541,6 +7744,7 @@ def main():
     prueba_19c()
     prueba_19d()
     prueba_19e()
+    prueba_19f()
 
     print("\n" + "─" * 60)
     if _FALLOS:

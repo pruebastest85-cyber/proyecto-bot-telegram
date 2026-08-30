@@ -12,6 +12,7 @@ Variables de entorno:
 """
 
 import asyncio
+import functools
 import os
 import re
 import threading
@@ -316,6 +317,37 @@ async def _send_md(chat, text, **kw):
             return None
 
 
+async def _edit_md(q, text, **kw):
+    """(19-F) Gemela de `_send_md` para los mensajes que se EDITAN.
+
+    `/top 30` genera ~6.100 caracteres con alias, PnL y clase de la IA
+    —medido: se pasa del tope de 4.096 a partir de 21 filas— y ninguna de
+    las cuatro rutas del top pasaba por `_recortar_tg`. Por comando,
+    Telegram devolvia 400 y el usuario veia el generico "⚠️ Algo falló";
+    por boton, el `edit_message_text` estaba dentro de un
+    `except Exception: pass`, asi que el boton "Top 30" no hacia
+    ABSOLUTAMENTE NADA y no quedaba rastro.
+
+    Aqui: se recorta al tope, se reintenta en texto plano si el Markdown
+    falla, y un fallo real se dice por consola en vez de tragarse.
+    `BadRequest: message is not modified` es normal (el contenido no
+    cambio) y no se considera fallo.
+    """
+    text = _recortar_tg(text)
+    try:
+        return await q.edit_message_text(text, parse_mode="Markdown", **kw)
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return None
+        print(f"· Edición en Markdown rechazada ({e}); texto plano")
+        try:
+            return await q.edit_message_text(text, **kw)
+        except Exception as e2:
+            if "not modified" not in str(e2).lower():
+                print(f"· No se pudo editar el mensaje: {e2}")
+            return None
+
+
 def _token_keyboard(url, mint):
     """Botones bajo la ficha de token: DexScreener + 👍/👎 para aprender."""
     filas = []
@@ -460,10 +492,53 @@ HELP_TEXT = (
 
 # ──────────────────── LÓGICA REUTILIZABLE (bloqueante) ─────────────────
 
-def run_full_cycle() -> str:
-    """Ejecuta descubrimiento + análisis. Devuelve resumen en texto."""
+def _bajo_cycle_lock(fn, *a, **k):
+    """(19-F) Ejecuta `fn` con el `cycle_lock` tomado, o lanza
+    `CicloOmitido`.
+
+    `cycle_lock` esta declarado como "evita que el ciclo automatico y un
+    comando manual corran a la vez", pero SOLO lo tomaba
+    `run_full_cycle`: `/descubrir` llamaba a `run_discovery()` y
+    `/analizar` a `run_analysis()` directamente. Pulsar "Analizar
+    compradores" mientras el ciclo automatico corria su propio
+    `run_analysis()` lanzaba DOS analisis concurrentes escribiendo en
+    `wallets` y `appearances`, gastando la cuota de Helius dos veces
+    (10M/mes es el presupuesto) y peleando por el candado de escritura
+    de SQLite.
+    """
     if not cycle_lock.acquire(blocking=False):
-        return "⏳ Ya hay un ciclo en curso; este intento se omitió."
+        raise CicloOmitido(
+            "Ya hay un ciclo en curso; este intento se omitió.")
+    try:
+        return fn(*a, **k)
+    finally:
+        cycle_lock.release()
+
+
+class CicloOmitido(RuntimeError):
+    """(19-F) El ciclo NO se ejecutó porque ya había otro en curso.
+
+    Antes `run_full_cycle` devolvía una CADENA en ese caso, sin lanzar.
+    `auto_cycle_job` terminaba sin excepción, `_con_reloj` ponía
+    `_ok = True` y sellaba `job_ts:auto_cycle` como si el ciclo hubiera
+    corrido: el siguiente esperaba las 2 h completas sin haberse
+    ejecutado ninguno. Y si un ciclo se quedara colgado con el lock
+    tomado, el automático no volvería a correr JAMÁS mientras el reloj
+    sigue diciendo que todo va bien.
+
+    Con una excepción propia, `_con_reloj` no marca éxito y se reintenta
+    en el siguiente sondeo (30 min), que es lo que se pretendía.
+    """
+
+
+def run_full_cycle() -> str:
+    """Ejecuta descubrimiento + análisis. Devuelve resumen en texto.
+
+    Lanza `CicloOmitido` si ya hay otro ciclo corriendo.
+    """
+    if not cycle_lock.acquire(blocking=False):
+        raise CicloOmitido(
+            "Ya hay un ciclo en curso; este intento se omitió.")
     try:
         saved = run_discovery()
         run_analysis()
@@ -1002,7 +1077,12 @@ async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def auto_cycle_job(ctx: ContextTypes.DEFAULT_TYPE):
-    """Job periódico: corre el ciclo y avisa al admin."""
+    """Job periódico: corre el ciclo y avisa al admin.
+
+    (19-F) `CicloOmitido` se deja SUBIR: así `_con_reloj` no sella el
+    reloj de éxito y el ciclo se reintenta en el siguiente sondeo, en vez
+    de posponerse el intervalo entero por un solapamiento.
+    """
     resumen = await asyncio.to_thread(run_full_cycle)
     if ADMIN_ID:
         try:
@@ -1032,7 +1112,18 @@ async def sync_webhook_job(ctx: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────── SEGURIDAD ────────────────────────────────
 
 def solo_admin(func):
-    """Decorador: ignora mensajes de cualquiera que no sea el dueño."""
+    """Decorador: ignora mensajes de cualquiera que no sea el dueño.
+
+    (19-F) `functools.wraps`: sin él, `tb.cmd_top` era el `wrapper` y
+    perdía el nombre, el docstring y el código de la función real. En la
+    práctica eso significa que `inspect.getsource` devolvía el cuerpo
+    del decorador para los 55 comandos, así que ninguna comprobación por
+    introspección —ni una traza de error, ni el `__doc__` que se usa
+    para documentar— hablaba del comando de verdad. No cambia el
+    comportamiento en tiempo de ejecución: `wraps` solo copia metadatos
+    y deja `__wrapped__` apuntando al original.
+    """
+    @functools.wraps(func)
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if ADMIN_ID and (not update.effective_user
                          or update.effective_user.id != ADMIN_ID):
@@ -1060,7 +1151,7 @@ async def _hub_run(q, name: str):
         limit = 10 if name == "top10" else 20
         await q.answer()
         text, kb = await asyncio.to_thread(build_top_message, limit)
-        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        await _edit_md(q, text, reply_markup=kb)      # (19-F)
     elif name == "rendimiento":
         await q.answer()
         from rendimiento import rendimiento_text
@@ -1092,17 +1183,28 @@ async def _hub_run(q, name: str):
     elif name == "ciclo":
         await q.answer("⏳ Iniciando ciclo…")
         await chat.send_message("⏳ Ciclo completo iniciado…")
-        resumen = await asyncio.to_thread(run_full_cycle)
+        try:
+            resumen = await asyncio.to_thread(run_full_cycle)
+        except CicloOmitido as e:      # (19-F) manual: mensaje amable
+            resumen = f"⏳ {e}"
         await chat.send_message(resumen)
     elif name == "descubrir":
         await q.answer("⏳ Buscando…")
         await chat.send_message("⏳ Buscando tokens ganadores…")
-        saved = await asyncio.to_thread(run_discovery)
+        try:      # (19-F) mismo candado que el ciclo automático
+            saved = await asyncio.to_thread(_bajo_cycle_lock, run_discovery)
+        except CicloOmitido as e:
+            await chat.send_message(f"⏳ {e}")
+            return
         await chat.send_message(f"✅ {saved} tokens ganadores guardados.")
     elif name == "analizar":
         await q.answer("⏳ Analizando…")
         await chat.send_message("⏳ Analizando compradores tempranos…")
-        await asyncio.to_thread(run_analysis)
+        try:      # (19-F) mismo candado que el ciclo automático
+            await asyncio.to_thread(_bajo_cycle_lock, run_analysis)
+        except CicloOmitido as e:
+            await chat.send_message(f"⏳ {e}")
+            return
         await chat.send_message("✅ Análisis terminado. Usa /top.")
 
 
@@ -1339,11 +1441,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg = await asyncio.to_thread(discard_wallet, address)
         await q.answer(msg[:190])
         text, kb = await asyncio.to_thread(build_top_message, limit)
-        try:
-            await q.edit_message_text(text, parse_mode="Markdown",
-                                      reply_markup=kb)
-        except Exception:
-            pass  # el mensaje no cambió o expiró
+        await _edit_md(q, text, reply_markup=kb)      # (19-F)
     elif data.startswith("t:"):
         try:
             limit = int(data[2:])
@@ -1352,11 +1450,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         await q.answer()
         text, kb = await asyncio.to_thread(build_top_message, limit)
-        try:
-            await q.edit_message_text(text, parse_mode="Markdown",
-                                      reply_markup=kb)
-        except Exception:
-            pass
+        await _edit_md(q, text, reply_markup=kb)      # (19-F)
 
 
 # ─────────────────────────── COMANDOS ─────────────────────────────────
@@ -1376,21 +1470,32 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @solo_admin
 async def cmd_descubrir(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Buscando tokens ganadores…")
-    saved = await asyncio.to_thread(run_discovery)
+    try:      # (19-F) bajo el mismo candado que el ciclo automático
+        saved = await asyncio.to_thread(_bajo_cycle_lock, run_discovery)
+    except CicloOmitido as e:
+        await update.message.reply_text(f"⏳ {e}")
+        return
     await update.message.reply_text(f"✅ {saved} tokens ganadores guardados.")
 
 
 @solo_admin
 async def cmd_analizar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Analizando compradores tempranos…")
-    await asyncio.to_thread(run_analysis)
+    try:      # (19-F) bajo el mismo candado que el ciclo automático
+        await asyncio.to_thread(_bajo_cycle_lock, run_analysis)
+    except CicloOmitido as e:
+        await update.message.reply_text(f"⏳ {e}")
+        return
     await update.message.reply_text("✅ Análisis terminado. Usa /top.")
 
 
 @solo_admin
 async def cmd_ciclo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Ciclo completo iniciado…")
-    resumen = await asyncio.to_thread(run_full_cycle)
+    try:
+        resumen = await asyncio.to_thread(run_full_cycle)
+    except CicloOmitido as e:          # (19-F) manual: mensaje amable
+        resumen = f"⏳ {e}"
     await update.message.reply_text(resumen)
 
 
@@ -1403,8 +1508,9 @@ async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
     text, kb = await asyncio.to_thread(build_top_message, limit)
-    await update.message.reply_text(text, parse_mode="Markdown",
-                                    reply_markup=kb)
+    # (19-F) Por `_send_md`: recorta al tope y reintenta en texto plano.
+    # `/top 30` son ~6.100 caracteres y Telegram lo rechazaba entero.
+    await _send_md(update.message.chat, text, reply_markup=kb)
 
 
 @solo_admin
@@ -1773,37 +1879,67 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     0 = sin límite (vuelve al comportamiento de antes: alerta cualquier ⭐).
     """
+    # (19-F) TODO el trabajo de base va en un hilo.
+    #
+    # Esto hacia `get_conn()` + `set_setting()` DIRECTAMENTE en la
+    # corrutina. `set_setting` es un INSERT … ON CONFLICT con commit, o
+    # sea que pide el candado de escritura de SQLite con
+    # `busy_timeout=30000`: si el hilo de ingesta o `track_outcomes` lo
+    # tienen, el bot entero deja de responder —comandos, botones y jobs—
+    # hasta 30 segundos.
+    #
+    # Este mismo archivo ya documenta la leccion en la linea del
+    # `_status_text`: "las consultas corrian EN el event loop; un stall
+    # de SQLite congelaba el bot entero" (Ola 6, M25). `/copiapura` y
+    # `/nota` ya lo hacen bien con un `_trabajo()` en hilo; estos cuatro
+    # comandos se quedaron fuera.
     from db import set_setting, get_setting, TOP_ALERTAS_DEFAULT
-    conn = get_conn()
-    try:
-        args = ctx.args or []
-        if args:
-            try:
-                n = int(float(args[0]))
-                if n < 0:
-                    raise ValueError
-            except ValueError:
-                await update.message.reply_text(
-                    "Uso: /topalertas <n>   (0 = sin límite)")
-                return
-            set_setting(conn, "top_alertas", n)
-            txt = (f"📡 Alertan las *top {n}* billeteras."
-                   if n else "📡 Sin límite: alerta cualquier billetera ⭐.")
-            await update.message.reply_text(txt, parse_mode="Markdown")
+    args = ctx.args or []
+    if args:
+        try:
+            n = int(float(args[0]))
+            if n < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Uso: /topalertas <n>   (0 = sin límite)")
             return
-        actual = get_setting(conn, "top_alertas", str(TOP_ALERTAS_DEFAULT))
-        # (Ola 8) 0 significa "sin limite" para todo el sistema: decir
-        # "top 0" seria mentira.
-        _desc = (f"las *top {actual}* billeteras"
-                 if int(float(actual or 0)) else
-                 "*todas* las billeteras ⭐ (sin límite)")
-        await update.message.reply_text(
-            f"📡 Ahora mismo alertan {_desc} "
-            f"(señales y tarjetas).\nCambiar: `/topalertas 20`  ·  "
-            f"`/topalertas 0` quita el límite.",
-            parse_mode="Markdown")
-    finally:
-        conn.close()
+
+        def _fijar(valor):
+            conn = get_conn()
+            try:
+                set_setting(conn, "top_alertas", valor)
+            finally:
+                conn.close()
+
+        await asyncio.to_thread(_fijar, n)
+        txt = (f"📡 Alertan las *top {n}* billeteras."
+               if n else "📡 Sin límite: alerta cualquier billetera ⭐.")
+        await _send_md(update.message.chat, txt)
+        return
+
+    def _leer():
+        conn = get_conn()
+        try:
+            return get_setting(conn, "top_alertas",
+                               str(TOP_ALERTAS_DEFAULT))
+        finally:
+            conn.close()
+
+    actual = await asyncio.to_thread(_leer)
+    # (Ola 8) 0 significa "sin limite" para todo el sistema: decir
+    # "top 0" seria mentira.
+    try:
+        _hay_limite = int(float(actual or 0))
+    except (TypeError, ValueError):
+        _hay_limite = 0
+    _desc = (f"las *top {actual}* billeteras" if _hay_limite else
+             "*todas* las billeteras ⭐ (sin límite)")
+    await _send_md(
+        update.message.chat,
+        f"📡 Ahora mismo alertan {_desc} "
+        f"(señales y tarjetas).\nCambiar: `/topalertas 20`  ·  "
+        f"`/topalertas 0` quita el límite.")
 
 
 @solo_admin
@@ -1826,6 +1962,22 @@ async def cmd_reembudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     def _trabajo() -> str:
         conn = get_conn()
         try:
+            # (19-F) EL INTERRUPTOR MAESTRO SE MIRA ANTES DE TOCAR
+            # NADA.
+            #
+            # `depurar_estrellas` es DESTRUCTIVO (quita estrellas por
+            # grading, retención, creadores de mercado y familias) y
+            # corría ANTES de que `reevaluacion` comprobara si el filtro
+            # está encendido. Con `FILTRO_TRES_PUERTAS=0` el usuario
+            # recibía "el filtro está APAGADO, no hago nada"… y la
+            # depuración ya había degradado estrellas. Un mensaje que
+            # dice lo contrario de lo que pasó es peor que un error.
+            #
+            # Se pregunta primero, con el mismo `reevaluacion` en modo
+            # ENSAYO, que no escribe nada y devuelve el mismo error.
+            _prueba = reevaluacion(conn, ejecutar=False)
+            if _prueba.get("error"):
+                return f"⚠️ {_prueba['error']}"
             if ejecutar:
                 # La depuración completa primero: así el corte por
                 # historial actúa sobre quien sobrevive a los filtros
@@ -1835,7 +1987,8 @@ async def cmd_reembudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     depurar_estrellas(conn)
                 except Exception as e:
                     print(f"· depuración previa omitida: {e}")
-            res = reevaluacion(conn, ejecutar=ejecutar)
+            res = _prueba if not ejecutar else reevaluacion(
+                conn, ejecutar=True)
             if res.get("error"):
                 return f"⚠️ {res['error']}"
             if not ejecutar:
@@ -1899,37 +2052,53 @@ async def cmd_reentrada(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     Escribirlo desde fuera significaría abrir la base que el proceso
     tiene viva; se hace desde dentro, con la conexión de siempre.
     """
+    # (19-F) El trabajo de base va en un hilo: `set_setting` pide el
+    # candado de escritura de SQLite y, hecho en la corrutina, congelaba
+    # el bot entero hasta 30 s (ver la nota larga en `/topalertas`).
     from db import set_setting, get_setting
-    conn = get_conn()
-    try:
-        args = ctx.args or []
-        if args:
-            try:
-                h = float(args[0])
-                # NaN e inf pasarían un `h < 0` a secas.
-                if not (0 <= h <= 720):
-                    raise ValueError
-            except (TypeError, ValueError):
-                await update.message.reply_text(
-                    "Uso: /reentrada <horas> entre 0 y 720  "
-                    "(0 = sin enfriamiento; ej: /reentrada 6)")
-                return
-            set_setting(conn, "paper_reentrada_h", h)
-            txt = (f"⏳ Un token ya jugado no se vuelve a abrir hasta "
-                   f"*{h:g} h* después de cerrarse."
-                   if h else
-                   "⏳ Sin enfriamiento: un token puede reabrirse al "
-                   "instante.")
-            await update.message.reply_text(txt, parse_mode="Markdown")
+    args = ctx.args or []
+    if args:
+        try:
+            h = float(args[0])
+            # NaN e inf pasarían un `h < 0` a secas.
+            if not (0 <= h <= 720):
+                raise ValueError
+        except (TypeError, ValueError):
+            await update.message.reply_text(
+                "Uso: /reentrada <horas> entre 0 y 720  "
+                "(0 = sin enfriamiento; ej: /reentrada 6)")
             return
-        actual = _f_setting(get_setting(conn, "paper_reentrada_h", "24"), 24.0)
-        _desc = (f"*{actual:g} h*" if actual else "*sin enfriamiento*")
-        await update.message.reply_text(
-            f"⏳ Enfriamiento por token: {_desc}.\n"
-            f"Cambiar: `/reentrada 6`  ·  `/reentrada 0`",
-            parse_mode="Markdown")
-    finally:
-        conn.close()
+
+        def _fijar(valor):
+            conn = get_conn()
+            try:
+                set_setting(conn, "paper_reentrada_h", valor)
+            finally:
+                conn.close()
+
+        await asyncio.to_thread(_fijar, h)
+        txt = (f"⏳ Un token ya jugado no se vuelve a abrir hasta "
+               f"*{h:g} h* después de cerrarse."
+               if h else
+               "⏳ Sin enfriamiento: un token puede reabrirse al "
+               "instante.")
+        await _send_md(update.message.chat, txt)
+        return
+
+    def _leer():
+        conn = get_conn()
+        try:
+            return _f_setting(
+                get_setting(conn, "paper_reentrada_h", "24"), 24.0)
+        finally:
+            conn.close()
+
+    actual = await asyncio.to_thread(_leer)
+    _desc = (f"*{actual:g} h*" if actual else "*sin enfriamiento*")
+    await _send_md(
+        update.message.chat,
+        f"⏳ Enfriamiento por token: {_desc}.\n"
+        f"Cambiar: `/reentrada 6`  ·  `/reentrada 0`")
 
 
 def _f_setting(valor, por_defecto: float) -> float:
@@ -1968,11 +2137,21 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 reply_markup=kb_paper_confirmar(abiertas, cerradas))
             return
-        conn = get_conn()
+        # (19-F) La escritura va en un hilo. `set_setting` pide el
+        # candado de escritura de SQLite y aqui se hacia en la corrutina:
+        # con la ingesta escribiendo a la vez, `/paper max 1.5` congelaba
+        # el bot entero hasta 30 s (ver la nota de `/topalertas`).
+        def _fijar(clave, valor):
+            conn = get_conn()
+            try:
+                set_setting(conn, clave, valor)
+            finally:
+                conn.close()
+
         if args[0] in ("on", "off"):
-            set_setting(conn, "paper_enabled", "1" if args[0] == "on" else "0")
+            await asyncio.to_thread(
+                _fijar, "paper_enabled", "1" if args[0] == "on" else "0")
             estado = "activado 🟢" if args[0] == "on" else "apagado 🔴"
-            conn.close()
             await update.message.reply_text(f"🧪 Paper trading {estado}.")
             return
         if args[0] == "max" and len(args) > 1:
@@ -1983,17 +2162,14 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 if not (0.05 <= v <= 10):
                     raise ValueError
             except ValueError:
-                conn.close()
                 await update.message.reply_text(
                     "Uso: /paper max <SOL> entre 0.05 y 10  "
                     "(ej: /paper max 1.5)")
                 return
-            set_setting(conn, "paper_max_sol", v)
-            conn.close()
-            await update.message.reply_text(
-                f"🧪 Tope por señal: *{v:g} SOL*", parse_mode="Markdown")
+            await asyncio.to_thread(_fijar, "paper_max_sol", v)
+            await _send_md(update.message.chat,
+                           f"🧪 Tope por señal: *{v:g} SOL*")
             return
-        conn.close()
         await update.message.reply_text(
             "Uso: /paper · /paper on · /paper off · /paper max <SOL> "
             "· /paper reset")
@@ -2552,64 +2728,86 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @solo_admin
 async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """IA local para salidas: /ialocal <url> · /ialocal on|off · /ialocal"""
+    """IA local para salidas: /ialocal <url> · /ialocal on|off · /ialocal
+
+    (19-F) Todo el trabajo de base va en un hilo. Antes se hacia en la
+    corrutina, y `set_setting` pide el candado de escritura de SQLite con
+    `busy_timeout=30000`: con la ingesta escribiendo a la vez, este
+    comando congelaba el bot entero hasta 30 s. Ver la nota larga de
+    `/topalertas`.
+    """
     from db import set_setting, get_setting
-    conn = get_conn()
-    try:
-        args = ctx.args or []
-        if args:
-            a = args[0].strip()
-            if a.lower() == "off":
-                set_setting(conn, "ia_local_activa", 0)
-                await update.message.reply_text(
-                    "🤖 IA local APAGADA: todo vuelve a reglas.")
-                return
-            if a.lower() == "proveedor":
-                if len(args) > 1 and args[1].lower() in (
-                        "local", "nube", "local_primero"):
-                    set_setting(conn, "ia_proveedor", args[1].lower())
-                    await update.message.reply_text(
-                        f"🧠 Proveedor de IA: *{args[1].lower()}*",
-                        parse_mode="Markdown")
-                else:
+    args = ctx.args or []
+
+    def _trabajo() -> str:
+        conn = get_conn()
+        try:
+            if args:
+                a = args[0].strip()
+                if a.lower() == "off":
+                    set_setting(conn, "ia_local_activa", 0)
+                    return ("🤖 IA local APAGADA: todo vuelve a reglas, "
+                            "también en las posiciones que ya estaban "
+                            "abiertas (19-C).")
+                if a.lower() == "proveedor":
+                    if len(args) > 1 and args[1].lower() in (
+                            "local", "nube", "local_primero"):
+                        set_setting(conn, "ia_proveedor", args[1].lower())
+                        return f"🧠 Proveedor de IA: *{args[1].lower()}*"
                     actual = get_setting(conn, "ia_proveedor",
                                          "local_primero")
-                    await update.message.reply_text(
-                        f"🧠 Proveedor actual: {actual}\n"
-                        "Cambiar: /ialocal proveedor local · "
-                        "local_primero · nube")
-                return
-            if a.lower() == "on":
-                url = get_setting(conn, "local_ai_url", "") or ""
-                if not url:
-                    await update.message.reply_text(
-                        "Primero configura la URL: /ialocal https://…")
-                    return
-                set_setting(conn, "ia_local_activa", 1)
-                await update.message.reply_text(
-                    f"🤖 IA local ENCENDIDA · {url}\n"
-                    "Mitad de las posiciones nuevas serán gestionadas "
-                    "por la IA (A/B contra reglas).")
-                return
-            if a.startswith("http"):
-                set_setting(conn, "local_ai_url", a.rstrip("/"))
-                set_setting(conn, "ia_local_activa", 1)
-                await update.message.reply_text(
-                    f"🤖 URL guardada y experimento ENCENDIDO:\n{a}\n"
-                    "Si el túnel cambia de URL, repite /ialocal <url>.")
-                return
-            await update.message.reply_text(
-                "Uso: /ialocal <url> · /ialocal on · /ialocal off")
-            return
-        activa = get_setting(conn, "ia_local_activa", "0")
-        url = get_setting(conn, "local_ai_url", "") or "(sin URL)"
-        estado = "🟢 encendida" if str(activa) in ("1", "1.0") \
-            else "🔴 apagada"
-        await update.message.reply_text(
-            f"🤖 IA local: {estado}\nURL: {url}\n"
-            "Cambiar: /ialocal <url> · /ialocal on · /ialocal off")
-    finally:
-        conn.close()
+                    return (f"🧠 Proveedor actual: {actual}\n"
+                            "Cambiar: /ialocal proveedor local · "
+                            "local_primero · nube")
+                if a.lower() == "on":
+                    url = get_setting(conn, "local_ai_url", "") or ""
+                    if not url:
+                        return ("Primero configura la URL: "
+                                "/ialocal https://…")
+                    set_setting(conn, "ia_local_activa", 1)
+                    return (f"🤖 IA local ENCENDIDA · {url}\n"
+                            "Mitad de las posiciones nuevas serán "
+                            "gestionadas por la IA (A/B contra reglas).")
+                if a.startswith("http"):
+                    # (19-F) Guardar la URL ya NO enciende el
+                    # experimento por su cuenta.
+                    #
+                    # Antes hacia `ia_local_activa=1` sin decirlo: si el
+                    # dueño reapuntaba LM Studio porque el tunel habia
+                    # cambiado de direccion —que es justo para lo que
+                    # existe este comando— el A/B de salidas se
+                    # reactivaba solo. Y con `/copiapura on` ese ajuste
+                    # esta en 0 A PROPOSITO, asi que cambiar una URL
+                    # rompia el modo copia pura en silencio y contaminaba
+                    # la medicion que el dueño esta haciendo.
+                    #
+                    # Ahora se respeta el estado que hubiera: si estaba
+                    # encendido sigue encendido, y si no, se dice como
+                    # encenderlo.
+                    set_setting(conn, "local_ai_url", a.rstrip("/"))
+                    _ya = str(get_setting(conn, "ia_local_activa", "0"))
+                    if _ya in ("1", "1.0"):
+                        return (f"🤖 URL guardada · {a}\n"
+                                "El experimento seguía ENCENDIDO y sigue "
+                                "igual.")
+                    return (f"🤖 URL guardada · {a}\n"
+                            "El experimento sigue *apagado* (no lo "
+                            "enciendo yo por cambiar una URL). "
+                            "Encenderlo: `/ialocal on`")
+                return ("Uso: /ialocal <url> · /ialocal on · "
+                        "/ialocal off")
+            activa = get_setting(conn, "ia_local_activa", "0")
+            url = get_setting(conn, "local_ai_url", "") or "(sin URL)"
+            estado = "🟢 encendida" if str(activa) in ("1", "1.0") \
+                else "🔴 apagada"
+            return (f"🤖 IA local: {estado}\nURL: {url}\n"
+                    "Cambiar: /ialocal <url> · /ialocal on · "
+                    "/ialocal off")
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
 
 
 @solo_admin
