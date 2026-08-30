@@ -1746,9 +1746,19 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             set_setting(conn, k, v)
                             _cambios.append((k, _act, v))
                     if not _cambios:
-                        return ("🧬 Ya estaba encendida y los nueve "
-                                "ajustes cuadran con el modo.\n"
-                                "`/copiapura off` la quita.")
+                        # (19-I) El número sale de `_COPIA_PURA`, no se
+                        # escribe a mano. La 19-H decía "los nueve
+                        # ajustes" y el preset tiene OCHO claves: el nueve
+                        # venía de una versión anterior que incluía
+                        # `paper_reentrada_h`, quitada el 26/8. Un número
+                        # a mano vuelve a mentir en cuanto alguien añada o
+                        # quite una clave, y este es justo el mensaje que
+                        # el dueño lee para creerse que el modo está
+                        # entero.
+                        return ("🧬 Ya estaba encendida y los {} ajustes "
+                                "del modo cuadran.\n"
+                                "`/copiapura off` la quita.".format(
+                                    len(_COPIA_PURA)))
                     conn.commit()
                     _det = "\n".join(
                         "• `{}`: {} → *{}*".format(

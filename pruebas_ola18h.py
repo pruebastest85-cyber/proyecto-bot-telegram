@@ -7940,6 +7940,18 @@ def prueba_19h():
         _txt = correr("on")
         comprobar("una segunda pasada no encuentra nada que corregir",
                   "cuadran" in _txt, f"respuesta = {_txt[:100]!r}")
+        # (19-I) El recuento que ve el dueño tiene que ser el de verdad.
+        # La 19-H lo escribió a mano ("los nueve ajustes") y el preset
+        # tiene ocho: sobraba una clave de una versión vieja. Esta prueba
+        # ata el mensaje al dict, así que añadir o quitar una clave sin
+        # tocar el texto ya no puede volver a mentir.
+        comprobar("y el recuento del mensaje es el del preset de verdad",
+                  f" {len(tb._COPIA_PURA)} ajustes" in _txt,
+                  f"el preset tiene {len(tb._COPIA_PURA)} claves; "
+                  f"respuesta = {_txt[:120]!r}")
+        comprobar("sin números escritos a mano en ese mensaje",
+                  "nueve" not in _txt.lower(),
+                  f"respuesta = {_txt[:120]!r}")
 
         # ── 5) Y encender desde APAGADO sigue funcionando igual ──────
         set_setting(conn, "copia_pura_previo", "")
