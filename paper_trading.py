@@ -499,8 +499,58 @@ def _fill_resultado(conn, trade_id: int, firma, tipo: str, motivo: str,
         print(f"· fill no registrado ({e})")
 
 
+def _releer(conn, trade_id):
+    """(19-C) La fila TAL Y COMO ESTA AHORA en la base, o None si ya no
+    existe. Devuelve un dict para que sea indexable igual que la fila.
+
+    Existe porque `update_open_trades` hace un solo `fetchall()` al
+    empezar y luego procesa fila a fila con pausas y llamadas de red: la
+    `row` que llega aqui puede tener MINUTOS. Si en ese rato un worker de
+    LaserStream copio una venta parcial, esa `row` trae la fraccion y lo
+    realizado ANTIGUOS.
+    """
+    try:
+        r = conn.execute("SELECT * FROM paper_trades WHERE id=?",
+                         (trade_id,)).fetchone()
+        return dict(r) if r is not None else None
+    except Exception as e:
+        print(f"· Paper: no pude releer la posición {trade_id} ({e})")
+        return None
+
+
 def _close(conn, row, price: float, reason: str, icon: str, firma=None,
-           liq_salida=None, nota=""):
+           liq_salida=None, nota="", _reintento=False):
+    # ── (19-C) RELECTURA ANTES DE CALCULAR ───────────────────────────
+    # El guardia `AND status='abierta'` de mas abajo impide el cierre
+    # DOBLE, pero no impide cerrar con DATOS VIEJOS, que es una perdida
+    # distinta y peor: el UPDATE escribe `fraccion_restante`,
+    # `pnl_usd`, `usd_salida_real` y `pnl_usd_neto` calculados sobre la
+    # foto vieja, y el parcial que llego en medio DESAPARECE del
+    # historico — que es lo unico irreversible del sistema.
+    #
+    # Escenario real: el job de 15 min lee la fila con frac=1.0 y
+    # realizado=0; mientras cotiza en Jupiter (hasta 12 s) un worker
+    # copia una venta del 90% de la ⭐ y deja frac=0.1 y +80 $
+    # realizados; el UPDATE del job aterriza despues y graba
+    # `pnl_usd = stake*1.0*pct/100 + 0`. Los 80 $ se pierden.
+    # (El orden inverso ya estaba bien resuelto: el parcial ve
+    # rowcount=0 y se retira.)
+    if not _reintento:
+        _fresca = _releer(conn, row["id"])
+        if _fresca is None:
+            print(f"· Paper: la posición {row['id']} ya no existe; "
+                  f"no la cierro")
+            return
+        if _fresca.get("status") != "abierta":
+            print(f"· Paper: {row['symbol']} ya estaba cerrada; no se "
+                  f"cierra dos veces")
+            return
+        row = _fresca
+    # Valores de control para el compare-and-swap de la escritura: son
+    # justo los que un parcial concurrente cambia.
+    _cas_frac = _campo(row, "fraccion_restante")
+    _cas_frac = 1.0 if _cas_frac is None else float(_cas_frac)
+    _cas_real = float(_campo(row, "pnl_realizado_usd") or 0)
     pct = (price / row["entry_price"] - 1) * 100
 
     # PnL en dólares sobre el importe que se guardó al entrar. Si la fila
@@ -583,7 +633,35 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     # trozos (o 0) menos lo invertido.
     if pnl_neto is None and stake_usd is not None \
             and reason == "sin liquidez":
-        pnl_neto = (usd_salida or 0) - stake_usd - (costos or 0)
+        # (19-C) …pero lo YA REALIZADO por los parciales no se puede
+        # ignorar. Si Jupiter no cotizo al ABRIR, `tokens_raw` quedo
+        # NULL; entonces los parciales de `_venta_parcial` no entran por
+        # su rama de cotizacion y su dinero se apunta SOLO en
+        # `pnl_realizado_usd`, sin tocar `usd_salida_real`. Con la
+        # formula de arriba eso daba `0 - stake - costos`: la PERDIDA
+        # TOTAL del importe, aunque la misma fila registrara ganancia
+        # realizada. `pnl_usd` podia decir +70 $ y `pnl_usd_neto` -100 $.
+        #
+        # Y esa cifra es la que suma la linea "⚖️ Realidad vs papel" de
+        # /paper, asi que el sesgo caia justo sobre las peores
+        # operaciones: el neto real salia mas pesimista de lo que fue.
+        #
+        # Reconstruccion: lo bruto que entro por los trozos vendidos es
+        # `stake_usd * (1 - frac) + realizado`, asi que
+        #   neto = realizado - stake_usd*frac - costos
+        # o sea: lo que se gano en la parte vendida, menos lo que costo
+        # la parte que murio. Con frac=1 y realizado=0 (lo normal) da
+        # exactamente la formula de antes, asi que no cambia nada en el
+        # caso comun.
+        #
+        # LIMITE conocido: si ALGUNOS parciales si se cotizaron y otros
+        # no, `usd_salida` existe y se usa la formula clasica; mezclar
+        # las dos fuentes contaria dos veces el mismo dinero, y preferir
+        # una cifra incompleta a una inflada es la eleccion de la casa.
+        if usd_salida is None and realizado:
+            pnl_neto = realizado - stake_usd * frac - (costos or 0)
+        else:
+            pnl_neto = (usd_salida or 0) - stake_usd - (costos or 0)
 
     # (Ola 18-J) `AND status='abierta'`: el cierre solo se escribe si la
     # fila SEGUIA abierta. Dos ventas del mismo token llegan como dos
@@ -596,18 +674,42 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     # los dos motores.
     # `fraccion_restante=0` (Ola 18-J): la fila cerrada dejaba la cola
     # geometrica puesta (1e-4), que confunde al leerla.
+    # (19-C) Y ademas COMPARE-AND-SWAP sobre los dos campos que un
+    # parcial concurrente cambia. Entre la relectura de arriba y esta
+    # escritura hay una cotizacion de Jupiter (hasta 12 s): si en esa
+    # ventana entro un parcial, esta condicion falla, no se escribe nada
+    # y se reintenta UNA vez con la fila fresca (que ademas vuelve a
+    # cotizar, porque `tokens_raw` habra cambiado). `COALESCE` en vez de
+    # `IS` porque `IS` no compara igual en los dos motores.
     cur_cierre = conn.execute(
         """UPDATE paper_trades SET status='cerrada', exit_price=?,
            exit_ts=?, exit_reason=?, pnl_pct=?, pnl_sol=?, pnl_usd=?,
            stake_usd=?, costos_usd=?, usd_salida_real=?, pnl_usd_neto=?,
-           fraccion_restante=0 WHERE id=? AND status='abierta'""",
+           fraccion_restante=0 WHERE id=? AND status='abierta'
+             AND COALESCE(fraccion_restante, 1.0) = ?
+             AND COALESCE(pnl_realizado_usd, 0) = ?""",
         (price, int(time.time()), reason, pct, pnl, pnl_usd,
-         stake_usd, costos, usd_salida, pnl_neto, row["id"]))
+         stake_usd, costos, usd_salida, pnl_neto, row["id"],
+         _cas_frac, _cas_real))
     conn.commit()
     if getattr(cur_cierre, "rowcount", 1) == 0:
-        print(f"· Paper: {row['symbol']} ya estaba cerrada; no se cierra "
-              f"dos veces")
-        return
+        _ahora = _releer(conn, row["id"])
+        if _ahora is None or _ahora.get("status") != "abierta":
+            print(f"· Paper: {row['symbol']} ya estaba cerrada; no se "
+                  f"cierra dos veces")
+            return
+        if _reintento:
+            # Dos carreras seguidas con el mismo mint: no se fuerza la
+            # escritura (grabaria cifras viejas encima de un parcial
+            # bueno). La posicion queda ABIERTA y la recoge la siguiente
+            # pasada del job, que es el error seguro.
+            print(f"· Paper: {row['symbol']} cambió dos veces mientras "
+                  f"cerraba; la dejo abierta para la próxima pasada")
+            return
+        print(f"· Paper: {row['symbol']} recibió un parcial mientras "
+              f"cerraba; recalculo con la fila fresca")
+        return _close(conn, _ahora, price, reason, icon, firma=firma,
+                      liq_salida=liq_salida, nota=nota, _reintento=True)
     _fill_resultado(conn, row["id"], firma, "total", reason,
                     round(frac, 4), price, _usd_fill, _fee_fill)
 
@@ -822,12 +924,32 @@ def _resto_es_polvo(conn, row, nueva_frac: float, price: float) -> bool:
     return nueva_frac < 1e-4
 
 
-def _venta_parcial(conn, row, price: float, pct: float, firma=None):
+def _venta_parcial(conn, row, price: float, pct: float, firma=None,
+                   _reintento=False):
     """La ⭐ vendio el pct% de SU posicion: el paper vende el mismo pct%
     de la SUYA. La fila sigue abierta con la fraccion restante; el PnL del
-    trozo vendido se acumula en pnl_realizado_usd y se suma al cierre."""
+    trozo vendido se acumula en pnl_realizado_usd y se suma al cierre.
+
+    (19-C) Igual que `_close`: relectura al entrar y compare-and-swap al
+    escribir. Aqui el fallo era simetrico — `frac` y `realizado` se leen
+    de la fila y se reescriben como valores ABSOLUTOS
+    (`nueva = frac - frac*pct/100`), asi que dos ventas del mismo mint
+    procesadas a la vez por dos workers leian la MISMA fraccion y la
+    ultima en escribir ganaba: una de las dos ventas desaparecia. Las
+    firmas son distintas, asi que `paper_fills` no las deduplica (ni
+    debe: son dos eventos reales).
+    """
+    if not _reintento:
+        _fresca = _releer(conn, row["id"])
+        if _fresca is None or _fresca.get("status") != "abierta":
+            print(f"· Paper: {row['symbol']} ya no está abierta; no "
+                  f"apunto el parcial encima")
+            return
+        row = _fresca
     frac = _campo(row, "fraccion_restante")
     frac = 1.0 if frac is None else frac
+    _cas_frac = float(frac)
+    _cas_real = float(_campo(row, "pnl_realizado_usd") or 0)
     vendida = frac * pct / 100.0
     nueva = max(0.0, frac - vendida)
 
@@ -899,18 +1021,35 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None):
     # se apunta encima. Antes dejaba una fila cerrada con un
     # `pnl_realizado_usd` posterior al cierre — dinero realizado que el
     # `pnl_usd` del historico ya no contaba.
+    # (19-C) Ademas del `status`, compare-and-swap sobre la fraccion y lo
+    # realizado: si OTRO parcial del mismo mint entro mientras este
+    # cotizaba en Jupiter, esta escritura no se aplica y se reintenta una
+    # vez con la fila fresca, en vez de pisarlo.
     cur_parcial = conn.execute(
         """UPDATE paper_trades SET fraccion_restante=?, pnl_realizado_usd=?,
            pnl_realizado_frac=?, tokens_raw=?, usd_salida_real=?,
-           costos_usd=?, stake_usd=? WHERE id=? AND status='abierta'""",
+           costos_usd=?, stake_usd=? WHERE id=? AND status='abierta'
+             AND COALESCE(fraccion_restante, 1.0) = ?
+             AND COALESCE(pnl_realizado_usd, 0) = ?""",
         (nueva, realizado, realizado_frac, nuevos_tokens, usd_real, costos,
          stake_usd if stake_usd is not None else _campo(row, "stake_usd"),
-         row["id"]))
+         row["id"], _cas_frac, _cas_real))
     conn.commit()
     if getattr(cur_parcial, "rowcount", 1) == 0:
-        print(f"· Paper: {row['symbol']} se cerró mientras copiaba el "
-              f"parcial; no lo apunto encima")
-        return
+        _ahora = _releer(conn, row["id"])
+        if _ahora is None or _ahora.get("status") != "abierta":
+            print(f"· Paper: {row['symbol']} se cerró mientras copiaba el "
+                  f"parcial; no lo apunto encima")
+            return
+        if _reintento:
+            print(f"· Paper: {row['symbol']} cambió dos veces mientras "
+                  f"copiaba el parcial; NO lo apunto (mejor perder este "
+                  f"espejo que pisar el otro)")
+            return
+        print(f"· Paper: otro parcial de {row['symbol']} entró antes; "
+              f"recalculo el espejo con la fracción fresca")
+        return _venta_parcial(conn, _ahora, price, pct, firma=firma,
+                              _reintento=True)
     _fill_resultado(conn, row["id"], firma, "parcial",
                     f"espejo {pct:.0f}% de la ⭐", round(vendida, 4),
                     price, _usd_fill, _fee_fill)
@@ -1013,11 +1152,55 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             # normal — IA/reglas pueden holdear con trailing si el perfil
             # lo amerita, y TP/SL siguen supremos. No siempre vende YA.
             pos = None
-        except Exception:
+        except Exception as e:
+            # (19-C) Antes era `except Exception: return`, MUDO. Este
+            # bloque cubre la lectura de `consenso_salida_n` y dos
+            # consultas a `signals`/`wallets`: un ajuste con basura, o un
+            # "database is locked" compitiendo con la ingesta, apagaban
+            # el quorum de salida sin dejar UN SOLO rastro — ni en
+            # consola ni en /errores. Va contra la regla de la casa
+            # ("except anchos SIEMPRE con print") y contra la leccion que
+            # este mismo archivo documenta mas abajo.
+            print(f"· Paper: el quórum de salida de "
+                  f"{_campo(row, 'symbol') or trade['mint'][:8]} falló "
+                  f"({e}); NO cierro por manada")
+            try:
+                from errores import record as _rec
+                _rec("paper.quorum_salida", e)
+            except Exception as e2:
+                print(f"  · (y tampoco pude registrarlo: {e2})")
             return
     price = token.get("price")
     if not price or price <= 0:
         return
+    # (19-C) "Vendio el 0%" es un dato AUSENTE, no una venta, y va ANTES
+    # de reclamar el evento — igual que el "return por precio ausente" de
+    # arriba, y por el mismo motivo: es transitorio.
+    #
+    # `db.pct_sold` devuelve 0 cuando no pudo leer los tokens de la
+    # transaccion. Con `/copiapura on`, `paper_parcial_min_pct` vale 0 a
+    # proposito (copiar tambien las ventas pequeñas), asi que el umbral
+    # configurable no filtra ese caso: se copiaba una "venta parcial del
+    # 0%" — fila en `paper_fills`, mensaje de Telegram diciendo "vendió
+    # el 0% y el paper vende su 0%"— y, lo que de verdad importa, la
+    # firma quedaba CONSUMIDA aqui abajo, asi que cuando el mismo evento
+    # volvia por la otra via con los tokens ya legibles, moria en el
+    # UNIQUE del libro y la venta real no se copiaba nunca.
+    #
+    # Solo aplica al camino del espejo parcial: si la ⭐ liquido del todo
+    # (`fully_sold`) o el quorum decidio salir (`pos = None`), no hay
+    # ningun porcentaje que mirar y el cierre sigue su curso.
+    if (pos and pos.get("known") and not pos.get("fully_sold")
+            and pos.get("pct_sold") is not None):
+        try:
+            if float(pos["pct_sold"]) <= 0:
+                print(f"· Paper: la venta de "
+                      f"{_campo(row, 'symbol') or trade['mint'][:8]} llegó "
+                      f"con 0% vendido (tokens ilegibles); no la copio y "
+                      f"NO gasto la firma, por si vuelve con el dato")
+                return
+        except (TypeError, ValueError):
+            return
     # El evento se RECLAMA aqui, en cuanto la decision de actuar esta
     # tomada: el "return por precio ausente" de arriba es transitorio y
     # SI se quiere reintentar; de aqui en adelante, todo pase repetido
@@ -1052,6 +1235,18 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         pct_v = float(pos["pct_sold"])
         tope_total = _f(conn, "paper_total_pct", 95.0)
         min_parcial = _f(conn, "paper_parcial_min_pct", 5.0)
+        # (19-C) Suelo DURO por debajo del umbral configurable. Con
+        # `/copiapura on` el umbral vale 0 a proposito (copiar tambien las
+        # ventas pequeñas), y entonces `pct_v < 0` no filtra nada: una
+        # venta cuyo `pct_sold` sale 0 —`db.pct_sold` devuelve 0 cuando no
+        # pudo leer los tokens— se copiaba como "venta parcial del 0%".
+        # Consecuencias: una fila en `paper_fills`, un mensaje de Telegram
+        # diciendo "vendió el 0% y el paper vende su 0%", y —lo que
+        # importa— el evento queda CONSUMIDO por `_fill_nuevo`, asi que
+        # esa firma ya no se puede reprocesar cuando el dato llegue bien.
+        # Vender el 0% no es una venta.
+        if pct_v <= 0:
+            return
         if pct_v < min_parcial:
             return                      # venta de polvo: no se copia
         if pct_v < tope_total and row["status"] == "abierta":
@@ -1089,7 +1284,34 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
             perfil = None
 
         # ── Mitad "ia" del A/B: decide la IA local (con barandillas) ──
-        if _campo(row, "gestion") == "ia":
+        #
+        # (19-C) Se exige TAMBIEN que el experimento siga encendido.
+        #
+        # `gestion` es un valor CONGELADO en la fila el dia que se abrio.
+        # `ia_local_activa` solo se consultaba al ABRIR (linea ~326 y en
+        # el filtro de entrada), asi que apagar el experimento —con
+        # /ialocal off, o con /copiapura on, que lo pone a 0— NO sacaba a
+        # la IA de las salidas de las posiciones YA abiertas: seguian
+        # entrando por aqui. Dos consecuencias, las dos medidas:
+        #
+        #   · Si la IA contesta "holdear", la posicion NO copia la venta
+        #     de la ⭐ y se queda con trailing. En modo copia pura eso
+        #     contradice frontalmente lo unico que el modo promete, y
+        #     contamina la medicion que el dueño esta haciendo.
+        #   · `decidir_salida` corre EN LINEA dentro del candado del mint
+        #     del camino caliente, con TIMEOUT_SALIDA=45 y paciencia=True,
+        #     que con el modelo pensante reintenta con max(45, 90): hasta
+        #     135 s con uno de los tres workers de LaserStream y ese token
+        #     bloqueados, mas el intento de nube detras.
+        #
+        # `/ialocal off` respondia "todo vuelve a reglas" y no era cierto.
+        # Ahora si lo es, tambien para lo que ya estaba abierto.
+        _ia_on = False
+        try:
+            _ia_on = bool(int(float(_g(conn, "ia_local_activa", "0") or 0)))
+        except (TypeError, ValueError):
+            _ia_on = False
+        if _campo(row, "gestion") == "ia" and _ia_on:
             try:
                 from decision_ia import decidir_salida, armar_contexto
                 d = decidir_salida(
@@ -1420,7 +1642,13 @@ def update_open_trades() -> int:
                 _ic = "🟢" if price >= row["entry_price"] else "🔴"
                 print(f"🧹 Paper: {row['symbol']} llevaba abierta con "
                       f"polvo ({_fr:.2e}); se cierra")
-                _close(conn, row, price, "venta de la ⭐", _ic,
+                # (19-C) Motivo PROPIO. Antes se grababa "venta de la ⭐"
+                # en una posicion que NADIE vendio: era el barrido de
+                # limpieza. El desglose por motivo de /paper mezclaba asi
+                # copias reales con tareas de mantenimiento, y ese
+                # desglose es justo lo que el dueño mira para saber que
+                # cierra sus posiciones.
+                _close(conn, row, price, "resto de polvo", _ic,
                        nota="\n_Se cierra ENTERA: lo que quedaba vivo ya no "
                             "llegaba a un céntimo. Dejarla abierta solo "
                             "ocupaba plaza y bloqueaba volver a copiar "

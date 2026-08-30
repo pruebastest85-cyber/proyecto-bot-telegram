@@ -2039,10 +2039,37 @@ def prueba_polvo():
                   "estaban abiertas", fila["status"] == "cerrada",
                   f"status = {fila['status']}, "
                   f"frac = {fila['fraccion_restante']}")
-        comprobar("el barrido apunta el cierre como venta de la ⭐, no "
-                  "con un motivo nuevo que descuadre el histórico",
-                  fila["exit_reason"] == "venta de la ⭐",
+        # (19-C) Este cierre lo hace el barrido de mantenimiento: NADIE
+        # vendió. Apuntarlo como "venta de la ⭐" mezclaba en el desglose
+        # de /paper las copias reales con las tareas de limpieza, y ese
+        # desglose es justo lo que el dueño mira para saber qué cierra
+        # sus posiciones. El motivo del ESPEJO (el que sí dispara una
+        # venta de verdad, caso (a) de esta misma prueba) NO cambia.
+        #
+        # El miedo de la versión anterior —"un motivo nuevo descuadra el
+        # histórico"— no se sostiene contra el código: `resumen_text`
+        # hace `GROUP BY exit_reason` sin lista fija de motivos, así que
+        # un valor nuevo sale como una línea más y ningún total se
+        # calcula a partir de un catálogo cerrado. Se comprueba abajo en
+        # vez de darlo por supuesto.
+        comprobar("el barrido apunta el cierre con motivo PROPIO, no "
+                  "como una venta que nadie hizo",
+                  fila["exit_reason"] == "resto de polvo",
                   f"motivo = {fila['exit_reason']!r}")
+        _desglose = conn.execute(
+            "SELECT exit_reason r, COUNT(*) n FROM paper_trades "
+            "WHERE status='cerrada' GROUP BY exit_reason").fetchall()
+        _motivos = {r["r"]: r["n"] for r in _desglose}
+        _total_cerradas = conn.execute(
+            "SELECT COUNT(*) c FROM paper_trades "
+            "WHERE status='cerrada'").fetchone()["c"]
+        comprobar("y el motivo nuevo aparece en el desglose por su cuenta",
+                  _motivos.get("resto de polvo", 0) >= 1, str(_motivos))
+        comprobar("sin descuadrar el total: la suma del desglose sigue "
+                  "siendo el número de cerradas",
+                  sum(_motivos.values()) == _total_cerradas,
+                  f"desglose suma {sum(_motivos.values())}, "
+                  f"cerradas {_total_cerradas}")
         comprobar("el barrido manda UN solo mensaje por posición",
                   len([m for m in enviados if "ZOMBI" in m]) == 1,
                   f"{len([m for m in enviados if 'ZOMBI' in m])} mensajes "
@@ -6739,6 +6766,258 @@ def prueba_19b():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-C - fidelidad de la simulacion: carreras que borraban parciales,
+# la IA que seguia decidiendo apagada, y el neto de los rugs.
+# ---------------------------------------------------------------------
+def prueba_19c():
+    bloque("19-C - carreras del paper, IA apagada de verdad y neto de rugs")
+    import contextlib
+    import io
+    import paper_trading as pt
+    import ejecucion_simulada as es
+    from db import get_conn, set_setting, get_setting
+
+    conn = get_conn()
+    enviados = []
+    tg_real, sol_real, cot_real = pt._tg, pt._sol_a_usd, es.cotizar_venta
+    _prev = {k: get_setting(conn, k, None)
+             for k in ("paper_total_pct", "paper_parcial_min_pct",
+                       "ia_local_activa", "paper_tp_pct", "paper_sl_pct",
+                       "paper_timeout_h")}
+    try:
+        pt._tg = lambda t: enviados.append(t)
+        pt._sol_a_usd = lambda *a, **k: 100.0
+        set_setting(conn, "paper_tp_pct", "999999")
+        set_setting(conn, "paper_sl_pct", "999999")
+        set_setting(conn, "paper_timeout_h", "999999")
+        set_setting(conn, "paper_parcial_min_pct", "0")
+        set_setting(conn, "paper_total_pct", "95")
+
+        def pos_nueva(mint, **campos):
+            conn.execute("DELETE FROM paper_trades WHERE mint=?", (mint,))
+            base = {"fraccion_restante": 1.0, "pnl_realizado_usd": 0.0,
+                    "tokens_raw": None, "gestion": None, "status": "abierta"}
+            base.update(campos)
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (mint, symbol, wallet, entry_price, entry_ts, stake_sol,
+                    stake_usd, status, fraccion_restante,
+                    pnl_realizado_usd, tokens_raw, gestion)
+                   VALUES (?,?,'W',1.0,1,1.0,100.0,?,?,?,?,?)""",
+                (mint, mint, base["status"], base["fraccion_restante"],
+                 base["pnl_realizado_usd"], base["tokens_raw"],
+                 base["gestion"]))
+            conn.commit()
+            return conn.execute("SELECT * FROM paper_trades WHERE mint=?",
+                                (mint,)).fetchone()
+
+        # ── 1) El cierre ya no pisa un parcial que llega a mitad ─────
+        # Se simula la carrera REAL: `update_open_trades` lee la fila y,
+        # mientras cotiza en Jupiter (hasta 12 s), un worker de
+        # LaserStream copia una venta parcial. La inyeccion se hace
+        # DENTRO de la cotizacion, que es exactamente donde ocurre.
+        fila_vieja = pos_nueva("CARRERA", tokens_raw="1000")
+        inyectadas = [0]
+
+        def _cotiza_e_inyecta(mint, tokens, su):
+            if inyectadas[0] == 0:
+                inyectadas[0] += 1
+                conn.execute(
+                    "UPDATE paper_trades SET fraccion_restante=0.2, "
+                    "pnl_realizado_usd=80.0, tokens_raw='200' "
+                    "WHERE mint='CARRERA'")
+                conn.commit()
+            return {"usd_salida": 0.0, "precio_efectivo": 1.0,
+                    "slippage_pct": 0.0}
+
+        es.cotizar_venta = _cotiza_e_inyecta
+        with contextlib.redirect_stdout(io.StringIO()):
+            # `fila_vieja` es la foto ANTIGUA, como la que arrastra el job
+            pt._close(conn, fila_vieja, 1.0, "tiempo", "⏱")
+        f = conn.execute("SELECT * FROM paper_trades "
+                         "WHERE mint='CARRERA'").fetchone()
+        comprobar("la posición se cierra igual", f["status"] == "cerrada",
+                  f"status = {f['status']}")
+        # precio == entrada, asi que pct = 0 y pnl_usd = 0 + realizado.
+        # Con el bug: 100*1.0*0/100 + 0 = 0 (los 80 $ desaparecen).
+        comprobar("el parcial que llegó a mitad NO se pierde del histórico",
+                  f["pnl_usd"] is not None and abs(f["pnl_usd"] - 80.0) < 1e-6,
+                  f"pnl_usd = {f['pnl_usd']} (con el bug sale 0.0: se "
+                  f"cerraba con la fracción y lo realizado ANTIGUOS)")
+        comprobar("y se recalculó con la fila fresca, no con la foto vieja",
+                  inyectadas[0] == 1, "la inyección no llegó a ocurrir")
+
+        # ── 2) Dos parciales a la vez: ninguno pisa al otro ──────────
+        fila_vieja = pos_nueva("PARCIAL2", tokens_raw="1000")
+        inyectadas[0] = 0
+
+        def _cotiza_e_inyecta2(mint, tokens, su):
+            if inyectadas[0] == 0:
+                inyectadas[0] += 1
+                conn.execute(
+                    "UPDATE paper_trades SET fraccion_restante=0.4, "
+                    "pnl_realizado_usd=25.0 WHERE mint='PARCIAL2'")
+                conn.commit()
+            return {"usd_salida": 0.0, "precio_efectivo": 1.0,
+                    "slippage_pct": 0.0}
+
+        es.cotizar_venta = _cotiza_e_inyecta2
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._venta_parcial(conn, fila_vieja, 1.0, 50.0, firma="F-A")
+        f = conn.execute("SELECT * FROM paper_trades "
+                         "WHERE mint='PARCIAL2'").fetchone()
+        # Con el arreglo: el espejo del 50% se aplica sobre 0.4 → 0.2.
+        # Con el bug: sobre 1.0 → 0.5, y los 25 $ del otro parcial se
+        # pisan con 0.
+        comprobar("el segundo espejo se aplica sobre la fracción FRESCA",
+                  abs((f["fraccion_restante"] or 0) - 0.2) < 1e-9,
+                  f"fracción = {f['fraccion_restante']} (con el bug: 0.5)")
+        comprobar("y no borra lo realizado por el parcial que iba delante",
+                  abs((f["pnl_realizado_usd"] or 0) - 25.0) < 1e-6,
+                  f"realizado = {f['pnl_realizado_usd']} (con el bug: 0.0)")
+        es.cotizar_venta = cot_real
+
+        # ── 3) El neto de un rug ya no ignora lo realizado ───────────
+        fila = pos_nueva("RUG", fraccion_restante=0.2,
+                         pnl_realizado_usd=80.0, tokens_raw=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, fila, 0.0001, "sin liquidez", "💀")
+        f = conn.execute("SELECT * FROM paper_trades "
+                         "WHERE mint='RUG'").fetchone()
+        # neto = realizado - stake*frac - costos = 80 - 100*0.2 - 0 = 60
+        comprobar("un rug con parciales sin cotizar ya no se apunta como "
+                  "pérdida total",
+                  f["pnl_usd_neto"] is not None
+                  and abs(f["pnl_usd_neto"] - 60.0) < 1e-6,
+                  f"pnl_usd_neto = {f['pnl_usd_neto']} "
+                  f"(con el bug: -100.0, la pérdida del importe entero)")
+        comprobar("y sigue siendo peor que el bruto (el resto murió)",
+                  f["pnl_usd_neto"] < (f["pnl_usd"] or 0) + 1e-9,
+                  f"neto {f['pnl_usd_neto']} vs bruto {f['pnl_usd']}")
+
+        # Caso comun intacto: sin parciales, el neto es el de siempre.
+        fila = pos_nueva("RUG2", fraccion_restante=1.0,
+                         pnl_realizado_usd=0.0, tokens_raw=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, fila, 0.0001, "sin liquidez", "💀")
+        f = conn.execute("SELECT * FROM paper_trades "
+                         "WHERE mint='RUG2'").fetchone()
+        comprobar("un rug SIN parciales sigue dando la pérdida del importe",
+                  abs(f["pnl_usd_neto"] + 100.0) < 1e-6,
+                  f"pnl_usd_neto = {f['pnl_usd_neto']}")
+
+        # ── 4) Con ia_local_activa=0, la IA NO decide las salidas ────
+        import decision_ia as di
+        dec_real = di.decidir_salida
+        llamadas = [0]
+
+        def _espia_decidir(*a, **k):
+            llamadas[0] += 1
+            return {"salida": "holdear", "max_min": 60,
+                    "decidido_por": "ia_local", "razon": "prueba"}
+
+        di.decidir_salida = _espia_decidir
+        try:
+            for activa, esperado in (("0", 0), ("1", 1)):
+                set_setting(conn, "ia_local_activa", activa)
+                pos_nueva("IAOFF", gestion="ia")
+                llamadas[0] = 0
+                fila = conn.execute("SELECT * FROM paper_trades "
+                                    "WHERE mint='IAOFF'").fetchone()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    pt.close_on_wallet_sell(
+                        conn,
+                        {"mint": "IAOFF", "wallet": "W", "side": "venta",
+                         "ts": 1, "signature": f"sig-ia-{activa}"},
+                        {"price": 1.0, "symbol": "IAOFF", "liq": 50000},
+                        {"known": True, "fully_sold": True,
+                         "pct_sold": 100.0})
+                f = conn.execute("SELECT * FROM paper_trades "
+                                 "WHERE mint='IAOFF'").fetchone()
+                if activa == "0":
+                    comprobar("con ia_local_activa=0 NO se llama a la IA "
+                              "aunque la fila diga gestion='ia'",
+                              llamadas[0] == 0,
+                              f"se llamó {llamadas[0]} veces — bloquea un "
+                              f"worker hasta 135 s y puede holdear en "
+                              f"pleno modo copia pura")
+                    comprobar("y la posición se cierra copiando la venta",
+                              f["status"] == "cerrada",
+                              f"status = {f['status']}, "
+                              f"política = {f['politica']}")
+                else:
+                    comprobar("con ia_local_activa=1 el experimento A/B "
+                              "sigue funcionando igual que antes",
+                              llamadas[0] == 1,
+                              f"se llamó {llamadas[0]} veces")
+                    comprobar("y su decisión de holdear se respeta",
+                              f["politica"] == "holdear",
+                              f"política = {f['politica']}")
+        finally:
+            di.decidir_salida = dec_real
+            set_setting(conn, "ia_local_activa", "0")
+
+        # ── 5) Una venta del 0% no se copia ni consume el evento ─────
+        set_setting(conn, "paper_parcial_min_pct", "0")
+        pos_nueva("CERO")
+        fila_id = conn.execute("SELECT id FROM paper_trades "
+                               "WHERE mint='CERO'").fetchone()["id"]
+        conn.execute("DELETE FROM paper_fills WHERE trade_id=?", (fila_id,))
+        conn.commit()
+        enviados.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt.close_on_wallet_sell(
+                conn,
+                {"mint": "CERO", "wallet": "W", "side": "venta", "ts": 1,
+                 "signature": "sig-cero"},
+                {"price": 1.0, "symbol": "CERO", "liq": 50000},
+                {"known": True, "fully_sold": False, "pct_sold": 0.0})
+        f = conn.execute("SELECT * FROM paper_trades "
+                         "WHERE mint='CERO'").fetchone()
+        comprobar("una venta del 0% no toca la posición",
+                  f["status"] == "abierta"
+                  and abs((f["fraccion_restante"] or 1) - 1.0) < 1e-9,
+                  f"status={f['status']} frac={f['fraccion_restante']}")
+        _fills = conn.execute(
+            "SELECT COUNT(*) c FROM paper_fills WHERE trade_id=?",
+            (fila_id,)).fetchone()["c"]
+        comprobar("ni consume la firma: si el dato llega bien luego, se "
+                  "puede reprocesar", _fills == 0,
+                  f"quedaron {_fills} eventos apuntados")
+        comprobar("y no manda ningún mensaje de 'vendió el 0%'",
+                  not [m for m in enviados if "CERO" in m],
+                  str(enviados))
+
+        # ── 6) El preset de copia pura ya no crea una trampa ─────────
+        import telegram_bot as tb
+        comprobar("/copiapura ya no fuerza paper_total_pct a 100",
+                  tb._COPIA_PURA.get("paper_total_pct") != "100",
+                  "con 100 la rama de cierre total es inalcanzable salvo "
+                  "que la ⭐ baje del 2%: el resto se queda abierto para "
+                  "siempre y bloquea re-copiar ese token")
+        comprobar("la clave sigue en el preset (si no, /copiapura off no "
+                  "la restauraría)",
+                  "paper_total_pct" in tb._COPIA_PURA)
+        comprobar("y las demás claves del modo copia pura no se han tocado",
+                  tb._COPIA_PURA.get("paper_tp_pct") == "999999"
+                  and tb._COPIA_PURA.get("paper_sl_pct") == "999999"
+                  and tb._COPIA_PURA.get("paper_timeout_h") == "999999"
+                  and tb._COPIA_PURA.get("paper_hold_extra") == "0"
+                  and tb._COPIA_PURA.get("ia_local_activa") == "0",
+                  str(tb._COPIA_PURA))
+    finally:
+        pt._tg, pt._sol_a_usd = tg_real, sol_real
+        es.cotizar_venta = cot_real
+        for k, v in _prev.items():
+            if v is not None:
+                set_setting(conn, k, v)
+        for m in ("CARRERA", "PARCIAL2", "RUG", "RUG2", "IAOFF", "CERO"):
+            conn.execute("DELETE FROM paper_trades WHERE mint=?", (m,))
+        conn.commit()
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -6771,6 +7050,7 @@ def main():
     prueba_18q_salud_base()
     prueba_19a()
     prueba_19b()
+    prueba_19c()
 
     print("\n" + "─" * 60)
     if _FALLOS:

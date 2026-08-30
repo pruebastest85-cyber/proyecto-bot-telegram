@@ -1518,7 +1518,33 @@ _COPIA_PURA = {
     # por las claves de ESTE dict a proposito).
     "paper_max_abiertas": "50",       # no descartar señales en los picos
     "paper_parcial_min_pct": "0",     # copiar también las ventas pequeñas
-    "paper_total_pct": "100",         # cerrar solo cuando ella cierra
+    # (19-C) Estaba en "100" con la idea de "cerrar solo cuando ella
+    # cierra", y creaba una TRAMPA sin salida.
+    #
+    # El espejo vende un PORCENTAJE de lo que queda, asi que con el tope
+    # en 100 la rama de cierre total es INALCANZABLE salvo que
+    # `db.fully_sold` diga que la ⭐ bajo del 2% de su bolsa. Si vende el
+    # 96% y no vuelve a tocar el token —lo normal despues de una salida—
+    # nuestra posicion se queda viva con el 4%… y con `/copiapura on` no
+    # hay TP (999999), ni SL (999999), ni reloj (999999), ni hold extra
+    # (0) que la recojan. El barrido de zombis solo actua por debajo de
+    # 1e-3 de fraccion, y a proposito: cerrar en firme con UNA lectura de
+    # precio ya grabo un -99% falso una vez.
+    #
+    # Y la fila viva bloquea TODA re-copia de ese token, porque
+    # `open_trade` no abre una segunda posicion del mismo mint. El
+    # enfriamiento de reentrada tampoco llega a aplicarse, porque solo
+    # mira las CERRADAS y esta no cierra jamas.
+    #
+    # MEDIDO en la base del dueño el 30/8/2026: de 5 posiciones abiertas,
+    # TRES llevaban 4 dias asi (restos del 7,7%, 3,6% y 50%), ocupando
+    # plaza y con su token bloqueado.
+    #
+    # 95 es ademas el defecto de siempre del codigo, asi que esto no
+    # inventa un umbral nuevo: deja de forzar el que hacia daño. La clave
+    # se queda en el dict para que `/copiapura off` siga restaurando lo
+    # que hubiera antes.
+    "paper_total_pct": "95",          # "ya salió": se cierra entera
     "paper_hold_extra": "0",          # no quedarse dentro tras su venta
     "ia_local_activa": "0",           # que la IA no decida las salidas
 }
