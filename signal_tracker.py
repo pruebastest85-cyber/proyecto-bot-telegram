@@ -584,13 +584,29 @@ def _alert_milestone(conn, s, pct: float, price: float,
         img = make_multiple_card(mult, simbolo, subida, base, price,
                                  alias, hace, mc_base=mc0, mc_now=mc1,
                                  pos_top=_pos)
-        tg_send_photo(img, caption)
-        enviado = True
+        # (19-D) Se mira el RESULTADO. `tg_send_photo` no devolvía nada y
+        # aquí se daba por enviada: un 400 (Markdown roto por el símbolo
+        # del token) o un 429 dejaban la alerta en el aire.
+        enviado = bool(tg_send_photo(img, caption))
     except Exception as e:
         print(f"· Tarjeta de imagen falló, uso texto: {e}")
     if not enviado:
-        tg_send(caption)
+        enviado = bool(tg_send(caption))
 
+    # ── (19-D) MARCAR DESPUÉS DE ENTREGAR, NO ANTES ──────────────────
+    # `key` es el candado del escalón y es MONOTÓNICO: `_hito` solo avisa
+    # múltiplos MAYORES que el guardado. Marcarlo sin haber entregado
+    # nada no retrasaba la alerta: la mataba para siempre — ese x5 no
+    # vuelve a sonar jamás, y el x10 tampoco lo compensa porque cada
+    # escalón se avisa una sola vez.
+    #
+    # `tg_send` ya reintenta en texto plano por dentro y devuelve si
+    # Telegram aceptó (Ola 17-L), así que llegar aquí con False significa
+    # que el mensaje NO existe en ninguna forma.
+    if not enviado:
+        print(f"· Hito x{mult} de {simbolo} NO se pudo entregar; no marco "
+              f"el escalón, se reintenta en la próxima pasada")
+        return
     set_setting(conn, key, mult)      # marca el múltiplo avisado para el token
     print(f"🚀 Alerta de subida: {simbolo} x{mult}")
 

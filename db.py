@@ -603,6 +603,28 @@ _INDICES_TARDIOS = (
     "CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)",
     "CREATE INDEX IF NOT EXISTS idx_wallets_tracked "
     "ON wallets(is_tracked)",
+    # (19-D) "UNA posición abierta por token", cerrado EN EL ESQUEMA.
+    #
+    # Hasta ahora era solo una comprobación en Python
+    # (`paper_trading.open_trade`: SELECT … status='abierta' y, si no hay
+    # nada, INSERT) con TRES llamadas HTTP en medio —DexScreener, Helius
+    # DAS y Jupiter—, o sea segundos de ventana, y `paper_trades` no
+    # tenía NINGUNA restricción de unicidad que lo respaldara. Dos ⭐
+    # comprando el mismo mint con segundos de diferencia —que es
+    # exactamente el escenario del consenso— dejaban dos filas abiertas:
+    # doble apuesta, dos plazas del tope, y `close_on_wallet_sell` usa
+    # `fetchone()` sin ORDER BY, así que cierra una y la otra queda
+    # eterna bloqueando el token.
+    #
+    # Índice ÚNICO PARCIAL: solo restringe las filas ABIERTAS, así que el
+    # mismo mint puede acumular todas las cerradas que haga falta (en la
+    # base del dueño hay uno con 31). Soportado por SQLite desde 3.8 y
+    # por Postgres. Si alguna base ya tuviera duplicados vivos, la
+    # creación falla y `_crear_indices_tardios` la omite con su mensaje,
+    # sin tumbar el arranque — comprobado el 30/8 contra la base del
+    # dueño: 5 abiertas y ningún mint repetido.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_abierta_unica "
+    "ON paper_trades(mint) WHERE status='abierta'",
 )
 
 

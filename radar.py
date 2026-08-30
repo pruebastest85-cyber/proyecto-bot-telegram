@@ -379,19 +379,38 @@ def escanear() -> int:
             # no se escribe en Telegram. El contador cuenta HALLAZGOS, no
             # mensajes: apagar el aviso no puede cambiar lo que el radar
             # dice haber encontrado.
+            # (19-D) El SÍMBOLO va escapado. Lo elige quien crea el token
+            # y se interpolaba crudo dentro de `*…*`: un ticker con `_`,
+            # `*`, `` ` `` o `[` hace que Telegram devuelva 400. Los
+            # alias de `nombres` no hace falta escaparlos: salen de una
+            # lista fija de palabras sin metacaracteres
+            # (`aliases.make_alias`, determinista).
+            #
+            # OJO — lo que NO se cambia: la marca `alertado:N` de abajo se
+            # sigue escribiendo pase lo que pase con el envío, y es
+            # CORRECTO. Aquí la marca registra el HALLAZGO, no el mensaje:
+            # en modo oculto (`_mudo`) no se envía nada a propósito, y el
+            # `INSERT OR IGNORE` de arriba dejó la fila en 'examinando',
+            # así que NO marcarla la quemaría para siempre — ese mint no
+            # se volvería a examinar ni entraría al seguimiento.
             try:
                 if not _mudo:
                     from realtime import tg_send
-                    tg_send(
+                    from token_report import _esc
+                    if not tg_send(
                         f"📡 *RADAR: smart money en token recién nacido*\n"
-                        f"💎 *{sym}* · {c['edad_min']} min de vida · "
+                        f"💎 *{_esc(sym)}* · {c['edad_min']} min de vida · "
                         f"liq ${c['liq']:,.0f}\n"
                         f"{linea_seg}\n"
                         f"👥 De tu base ({len(conocidas)}): "
                         + ", ".join(nombres) + "\n"
                         f"`{c['mint']}`\n"
                         f"📊 [DexScreener](https://dexscreener.com/solana/"
-                        f"{c['mint']})")
+                        f"{c['mint']})"
+                    ):
+                        print(f"· Radar: Telegram rechazó el aviso de "
+                              f"{sym}; el hallazgo SÍ queda registrado y "
+                              f"sale en /radar")
             except Exception as e:
                 print(f"· Radar: alerta falló: {e}")
             conn.execute(

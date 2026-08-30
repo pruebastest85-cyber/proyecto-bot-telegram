@@ -297,12 +297,21 @@ def meta_score(inf: dict, cluster: dict | None, health: dict,
 
 # ─────────────────────────── MOTOR ──────────────────────────────────
 
-def _send(text: str):
+def _send(text: str) -> bool:
+    """(19-D) Devuelve si Telegram ACEPTO el mensaje.
+
+    Antes no devolvia nada y `on_buy` marcaba `alerted_stage` ANTES de
+    llamar aqui: una alerta rechazada (400 por Markdown roto, 429 por
+    ritmo) quedaba apuntada como enviada. Doble daño: el dueño no recibia
+    la ALPHA, y `/metricas` contaba esa fila como alertada al calcular la
+    tasa de falsos positivos — o sea, una metrica construida sobre
+    alertas que nunca salieron."""
     try:
         from realtime import tg_send
-        tg_send(text)
+        return bool(tg_send(text))
     except Exception as e:
         print(f"· Predicción: no pude enviar alerta: {e}")
+        return False
 
 
 def _risk_pct(token_ctx: dict) -> float:
@@ -369,7 +378,7 @@ def _alert_stage(pred_row, inf, conf, meta, followers, health, token_ctx):
     if liq:
         lines.append(f"Liquidez: ${liq:,.0f}")
     lines.append("\n_Alerta emitida por superar el umbral de confianza._")
-    _send("\n".join(lines))
+    return _send("\n".join(lines))          # (19-D) propaga la entrega
 
 
 def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
@@ -505,10 +514,8 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                     conn.commit()
                     if (_should_push(tier, conn)
                             and stage > (row["alerted_stage"] or 0)):
-                        conn.execute(
-                            "UPDATE predictions SET alerted_stage=? "
-                            "WHERE id=?", (stage, row["id"]))
-                        conn.commit()
+                        # (19-D) La marca se pone DESPUES del envio, ver
+                        # el aviso mas abajo; aqui solo se prepara.
                         fresh = conn.execute(
                             "SELECT * FROM predictions WHERE id=?",
                             (row["id"],)).fetchone()
@@ -541,7 +548,29 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                                  health, _ctx_al)
         if aviso:
             # Fuera del candado: la red no bloquea a nadie.
-            _alert_stage(*aviso)
+            # (19-D) Y la marca del escalón se pone DESPUÉS, solo si
+            # Telegram aceptó. Antes se escribía `alerted_stage` con su
+            # commit ANTES de llegar aquí: como la condición de aviso es
+            # `stage > alerted_stage`, un rechazo (400 por el símbolo del
+            # token, 429 por ritmo) mataba esa etapa para siempre — y
+            # además `/metricas` la contaba como alertada al calcular la
+            # tasa de falsos positivos, o sea una métrica construida
+            # sobre alertas que nunca salieron.
+            _fresh = aviso[0]
+            if _alert_stage(*aviso) and _fresh is not None:
+                try:
+                    conn.execute(
+                        "UPDATE predictions SET alerted_stage=? "
+                        "WHERE id=? AND COALESCE(alerted_stage,0) < ?",
+                        (_fresh["stage"], _fresh["id"], _fresh["stage"]))
+                    conn.commit()
+                except Exception as e:
+                    print(f"· Predicción: no pude marcar la etapa "
+                          f"entregada ({e})")
+            elif _fresh is not None:
+                print(f"· Predicción {_fresh['id']}: la confirmación de "
+                      f"etapa {_fresh['stage']} no se entregó; no la "
+                      f"marco, se reintenta en la próxima llegada")
         return
 
     # No hay predicción abierta: ¿este comprador es LÍDER con seguidores?
@@ -636,14 +665,23 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
         return
 
     if _should_push(tier, conn):
-        conn.execute(
-            "UPDATE predictions SET alerted_stage=1 "
-            "WHERE leader=? AND mint=? AND status='abierta'", (wallet, mint))
-        conn.commit()
+        # (19-D) ENVIAR PRIMERO, MARCAR DESPUES. Antes se escribia
+        # `alerted_stage=1` y se commiteaba ANTES de enviar; si Telegram
+        # rechazaba, la prediccion quedaba "alertada" sin que el dueño
+        # hubiera visto nada, y ademas contaminaba la tasa de falsos
+        # positivos de /metricas.
         row = conn.execute(
             "SELECT * FROM predictions WHERE leader=? AND mint=? "
             "AND status='abierta'", (wallet, mint)).fetchone()
-        _alert_stage(row, inf, conf, meta, followers, health, token_ctx)
+        if _alert_stage(row, inf, conf, meta, followers, health, token_ctx):
+            conn.execute(
+                "UPDATE predictions SET alerted_stage=1 "
+                "WHERE leader=? AND mint=? AND status='abierta'",
+                (wallet, mint))
+            conn.commit()
+        else:
+            print(f"· Predicción de {mint[:8]}…: la ALPHA no se entregó; "
+                  f"no la marco como alertada")
 
 
 def evaluate_due(conn):

@@ -329,19 +329,44 @@ def open_trade(conn, trade: dict, token: dict, score,
             gestion = "ia" if n_previas % 2 else "reglas"
     except Exception:
         pass
-    conn.execute(
-        """INSERT INTO paper_trades
-           (signature, wallet, mint, symbol, stake_sol, stake_usd,
-            entry_price, entry_ts, signal_score, status,
-            tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
-            gestion, origen)
-           VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?)""",
-        (trade["signature"], trade["wallet"], trade["mint"], sym,
-         stake, stake_usd, price, trade["ts"], score,
-         str(cot["tokens_raw"]) if cot else None,
-         cot.get("slippage_pct") if cot else None,
-         costo_entrada, round(demora, 2), gestion, origen))
-    conn.commit()
+    # (19-D) El INSERT puede chocar ahora con el índice ÚNICO PARCIAL
+    # `idx_paper_abierta_unica` (una fila abierta por mint). Ese choque
+    # NO es un error: significa que otro hilo abrió la posición mientras
+    # este cotizaba en Jupiter — o sea, exactamente la carrera que el
+    # índice viene a cerrar. Se trata como "ya existe" y se sale sin
+    # abrir la segunda, que es lo que la comprobación de más arriba
+    # pretendía y no podía garantizar.
+    #
+    # Se captura por NOMBRE de clase y no por tipo importado porque los
+    # dos motores lanzan excepciones distintas (`sqlite3.IntegrityError`
+    # y `psycopg2.errors.UniqueViolation`) y este archivo no importa
+    # ninguno de los dos. Cualquier otra excepción se vuelve a lanzar:
+    # tragarlas sería esconder un fallo real de escritura.
+    try:
+        conn.execute(
+            """INSERT INTO paper_trades
+               (signature, wallet, mint, symbol, stake_sol, stake_usd,
+                entry_price, entry_ts, signal_score, status,
+                tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
+                gestion, origen)
+               VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?)""",
+            (trade["signature"], trade["wallet"], trade["mint"], sym,
+             stake, stake_usd, price, trade["ts"], score,
+             str(cot["tokens_raw"]) if cot else None,
+             cot.get("slippage_pct") if cot else None,
+             costo_entrada, round(demora, 2), gestion, origen))
+        conn.commit()
+    except Exception as e:
+        _nombre = type(e).__name__
+        if "Integrity" in _nombre or "Unique" in _nombre:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"· Paper: otro hilo abrió {sym} mientras cotizaba; "
+                  f"no abro una segunda posición del mismo token")
+            return False
+        raise
     # (Ola 12, restaurado 22/8: el commit 3761eaf lo piso sin querer)
     # Resolver el creador del token EN FONDO (1 llamada RPC): la
     # vigilancia dev-sell necesita saber quien es el dev, y el camino

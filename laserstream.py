@@ -63,6 +63,9 @@ _COLA_MAX = 1000           # rafagas sin crear un hilo por mensaje
 import queue as _queue
 _COLA: "_queue.Queue" = _queue.Queue(maxsize=_COLA_MAX)
 _WORKERS: list = []
+# (19-D) Anti-ruido del aviso de cola llena: una tormenta descarta
+# cientos seguidas y no hace falta una fila de /errores por cada una.
+_ULTIMO_AVISO_COLA = [0.0]
 
 
 def _worker() -> None:
@@ -201,8 +204,6 @@ def _procesar(mensaje: str) -> None:
 
     _ESTADO["recibidas"] += 1
     _ESTADO["ultimo"] = time.time()      # (17-N) señal de vida REAL
-    if slot:
-        _guardar_slot(int(slot))
     # Pool FIJO de workers (Ola 5, auditoria 19/8 - M4): antes se lanzaba
     # UN HILO POR MENSAJE — con rafagas de 150+ billeteras, decenas de
     # hilos concurrentes peleando por la escritura de SQLite ("database
@@ -212,9 +213,41 @@ def _procesar(mensaje: str) -> None:
     try:
         _COLA.put_nowait(t)
     except Exception:
+        # ── (19-D) EL DESCARTE NO AVANZA EL SLOT, Y NO ES MUDO ────────
+        #
+        # `_guardar_slot` se llamaba ARRIBA, ANTES de encolar. Si la cola
+        # de 1.000 estaba llena, la transaccion se tiraba con un `print`
+        # —sin `errores.record`— pero el slot YA habia avanzado y se
+        # persistia en `settings.laserstream_slot`. Al reconectar,
+        # `fromSlot` reanudaba DESPUES de esas transacciones: la señal no
+        # existe, `positions` queda descuadrada, y no hay ni una linea en
+        # /errores que lo delate. LaserStream es la UNICA via de ingesta
+        # del bot (sin PUBLIC_URL el webhook no recibe nada), asi que lo
+        # que se pierde ahi no lo recupera nadie.
+        #
+        # Ahora el slot solo avanza si la transaccion quedo ENCOLADA. Al
+        # reconectar, `fromSlot` vuelve a pedir desde la ultima que si se
+        # acepto; los repes mueren en el INSERT OR IGNORE por firma, que
+        # es exactamente para lo que esta.
         _ESTADO["descartadas"] = _ESTADO.get("descartadas", 0) + 1
         print("· LaserStream: cola llena; transaccion descartada "
-              f"({_ESTADO['descartadas']} en total)")
+              f"({_ESTADO['descartadas']} en total); el slot NO avanza")
+        # Anti-ruido: en una tormenta se descartan cientos seguidas y no
+        # hace falta una fila por cada una para enterarse.
+        _ahora = time.time()
+        if _ahora - _ULTIMO_AVISO_COLA[0] > 300:
+            _ULTIMO_AVISO_COLA[0] = _ahora
+            try:
+                from errores import record
+                record("laserstream.cola_llena", RuntimeError(
+                    f"cola llena ({_COLA_MAX}); {_ESTADO['descartadas']} "
+                    f"transacciones descartadas desde el arranque. Los "
+                    f"{N_WORKERS} workers no dan abasto."))
+            except Exception as e:
+                print(f"  · (y no pude registrarlo en /errores: {e})")
+        return
+    if slot:
+        _guardar_slot(int(slot))
 
 
 def _bucle() -> None:

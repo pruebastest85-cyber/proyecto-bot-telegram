@@ -7018,6 +7018,278 @@ def prueba_19c():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-D - nada se pierde en silencio: el slot, las alertas y la
+# segunda posicion del mismo token.
+# ---------------------------------------------------------------------
+def prueba_19d():
+    bloque("19-D - el slot, las alertas que se perdian y la doble posición")
+    import contextlib
+    import io
+    import time as _t_mod
+    from db import get_conn
+
+    conn = get_conn()
+
+    # ── 1) La cola llena NO avanza el slot, y deja rastro ────────────
+    import laserstream as ls
+    _put_real = ls._COLA.put_nowait
+    _guardado = []
+    _gs_real = ls._guardar_slot
+    _reg = []
+    try:
+        ls._guardar_slot = lambda s: _guardado.append(s)
+
+        def _cola_llena(t):
+            raise Exception("Full")
+
+        ls._COLA.put_nowait = _cola_llena
+        ls._ULTIMO_AVISO_COLA[0] = 0.0
+        import errores as _er
+        _rec_real = _er.record
+        _er.record = lambda mod, e, *a, **k: _reg.append((mod, str(e)))
+        try:
+            _msg = {"params": {"result": {
+                "slot": 999888777,
+                "blockTime": 1_700_000_000,
+                "transaction": {"transaction": {
+                    "signatures": ["FIRMA-COLA"],
+                    "message": {"accountKeys": ["W"]}},
+                    "meta": {"err": None, "fee": 5000,
+                             "preBalances": [1], "postBalances": [1],
+                             "preTokenBalances": [], "postTokenBalances": []}},
+            }}}
+            with contextlib.redirect_stdout(io.StringIO()) as _out:
+                ls._procesar(__import__("json").dumps(_msg))
+            _texto = _out.getvalue()
+        finally:
+            _er.record = _rec_real
+        comprobar("con la cola llena, el slot NO se guarda",
+                  _guardado == [],
+                  f"se guardó {_guardado}: al reconectar, fromSlot "
+                  f"reanudaría DESPUÉS de la transacción descartada y "
+                  f"esa señal no la recupera nadie")
+        comprobar("el descarte se registra en /errores, no solo en consola",
+                  any("cola_llena" in m for m, _ in _reg), str(_reg))
+        comprobar("y la consola lo dice claramente",
+                  "el slot NO avanza" in _texto, _texto[-200:])
+
+        # Y con la cola OK, el slot sí avanza (no se ha roto el camino
+        # normal, que es lo que de verdad importa proteger).
+        _guardado.clear()
+        _encolados = []
+        ls._COLA.put_nowait = lambda t: _encolados.append(t)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ls._procesar(__import__("json").dumps(_msg))
+        comprobar("con la cola OK el slot sí avanza, como siempre",
+                  _guardado == [999888777] and len(_encolados) == 1,
+                  f"slot={_guardado} encolados={len(_encolados)}")
+    finally:
+        ls._COLA.put_nowait = _put_real
+        ls._guardar_slot = _gs_real
+
+    # ── 2) tg_send_photo dice si Telegram aceptó ─────────────────────
+    import realtime as rt
+    import inspect as _insp
+    comprobar("tg_send_photo declara que devuelve bool",
+              "-> bool" in _insp.getsource(rt.tg_send_photo).split("\n")[0],
+              "sin valor de retorno, quien llama no puede saber si la "
+              "tarjeta llegó")
+
+    # ── 3) El hito xN no se marca si no se entregó ───────────────────
+    # Se llama a la funcion de PRODUCCION `_alert_milestone`, no a una
+    # copia de su decision: con solo mirar el codigo, revertir el arreglo
+    # dejaria la suite verde.
+    import signal_tracker as st
+    from db import get_setting, set_setting as _sset
+    _sp_real, _ts_real = rt.tg_send_photo, rt.tg_send
+    _top_prev = None
+    _mk_real = None
+    try:
+        import card_image as _ci
+        _mk_real = _ci.make_multiple_card
+        _ci.make_multiple_card = lambda *a, **k: b"jpeg-de-prueba"
+        # La señal: precio de entrada 1.0 y precio actual 5.0 → x5.
+        conn.execute("DELETE FROM signals WHERE mint='MHITO'")
+        conn.execute("DELETE FROM settings WHERE key LIKE '%MHITO%'")
+        conn.commit()
+        _s = {"mint": "MHITO", "wallet": "WHITO", "price_usd": 1.0,
+              "symbol": "HITO", "mc": None, "ts": int(_t_mod.time()) - 3600}
+        # Sin filtro de top: con `top_alertas=0`, `top_addresses` devuelve
+        # None y `en_top` pasa a todo el mundo. Si no, la señal muere en
+        # la verja del top ANTES de llegar al envío — y ese camino SÍ
+        # marca el escalón a propósito (se decidió no alertar, no es un
+        # fallo de entrega). Lo destapó esta misma prueba.
+        _top_prev = get_setting(conn, "top_alertas", None)
+        _sset(conn, "top_alertas", "0")
+        for entregado, debe_marcar in ((False, False), (True, True)):
+            conn.execute("DELETE FROM settings WHERE key LIKE '%MHITO%'")
+            conn.commit()
+            rt.tg_send_photo = lambda *a, **k: entregado
+            rt.tg_send = lambda *a, **k: entregado
+            with contextlib.redirect_stdout(io.StringIO()):
+                st._alert_milestone(conn, _s, 400.0, 5.0)
+            _marcado = get_setting(conn, "mult_alert:MHITO", None)
+            if debe_marcar:
+                comprobar("entregado: el escalón xN SÍ se marca",
+                          _marcado is not None,
+                          f"marca = {_marcado!r} — si no se marca, la "
+                          f"misma tarjeta se repetiría cada 15 min")
+            else:
+                comprobar("NO entregado: el escalón no se marca (marcarlo "
+                          "mataría ese xN para siempre, el candado es "
+                          "monotónico)",
+                          _marcado is None, f"marca = {_marcado!r}")
+    finally:
+        rt.tg_send_photo, rt.tg_send = _sp_real, _ts_real
+        if _mk_real is not None:
+            _ci.make_multiple_card = _mk_real
+        if _top_prev is not None:
+            _sset(conn, "top_alertas", _top_prev)
+        conn.execute("DELETE FROM settings WHERE key LIKE '%MHITO%'")
+        conn.execute("DELETE FROM signals WHERE mint='MHITO'")
+        conn.commit()
+
+    # ── 4) dev_watch: enviar primero, marcar después, símbolo escapado
+    import dev_watch as dw
+    _src_dw = _insp.getsource(dw)
+    comprobar("dev_watch escapa el símbolo del token en las dos alertas",
+              _src_dw.count("_esc(") >= 2,
+              "un ticker con _ * ` o [ hace que Telegram devuelva 400 y "
+              "la señal de rug más fiable se pierde")
+    for _fn, _nombre in ((dw.alerta_dev_en_vivo
+                          if hasattr(dw, "alerta_dev_en_vivo") else None,
+                          "vía en vivo"),):
+        pass
+    # La propiedad que importa se comprueba sobre el texto: la marca no
+    # puede estar ANTES del envío en ninguna de las dos rutas.
+    _i_env = _src_dw.find("DEV VENDIÓ (en vivo)")
+    _i_marca = _src_dw.find("dev_alerted=1 WHERE id=?", _i_env)
+    comprobar("(en vivo) el UPDATE dev_alerted va DESPUÉS del envío",
+              _i_env != -1 and _i_marca != -1 and _i_marca > _i_env,
+              f"envío en {_i_env}, marca en {_i_marca}")
+    _i_env2 = _src_dw.find("DEV VENDIÓ* —")
+    _i_marca2 = _src_dw.find("dev_alerted=1 WHERE id=?", _i_env2)
+    comprobar("(pasada periódica) también",
+              _i_env2 != -1 and _i_marca2 != -1 and _i_marca2 > _i_env2,
+              f"envío en {_i_env2}, marca en {_i_marca2}")
+
+    # ── 5) predictions: la ALPHA se marca solo si salió ──────────────
+    import predictions as pr
+    _src_pr = _insp.getsource(pr)
+    comprobar("_send de predictions devuelve bool",
+              "def _send(text: str) -> bool" in _src_pr,
+              "sin retorno no se puede saber si la ALPHA salió")
+    comprobar("_alert_stage propaga el resultado del envío",
+              "return _send(" in _src_pr,
+              "el resultado se tiraba")
+    _i_al = _src_pr.find("if _alert_stage(row, inf, conf")
+    _i_mk = _src_pr.find("alerted_stage=1", _i_al)
+    comprobar("al ABRIR, alerted_stage se escribe después del envío",
+              _i_al != -1 and _i_mk != -1 and _i_mk > _i_al,
+              f"envío en {_i_al}, marca en {_i_mk}")
+
+    # ── 6) El radar NO cambia de orden (y es correcto) ───────────────
+    import radar as rd
+    _src_rd = _insp.getsource(rd)
+    comprobar("el radar escapa el símbolo",
+              "_esc(sym)" in _src_rd, "ticker crudo dentro de *…*")
+    comprobar("pero SIGUE marcando el hallazgo pase lo que pase con el "
+              "envío (en modo oculto no hay mensaje, y no marcarlo "
+              "quemaría el mint para siempre)",
+              _src_rd.find("alertado:") != -1
+              and "resultado=?, smart=? WHERE mint=?" in _src_rd,
+              "si esto cambia, un token en modo oculto se queda en "
+              "'examinando' y el INSERT OR IGNORE impide reexaminarlo")
+
+    # ── 7) Una sola posición ABIERTA por token, por esquema ──────────
+    import db as _db
+    _idx = " ".join(_db._INDICES_TARDIOS)
+    comprobar("existe el índice único parcial de paper_trades",
+              "idx_paper_abierta_unica" in _idx, _idx[-200:])
+    comprobar("y es PARCIAL (solo las abiertas): el mismo mint puede "
+              "tener muchas cerradas",
+              "WHERE status='abierta'" in _idx, _idx[-200:])
+    _reales = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    comprobar("el índice existe de verdad en la base",
+              "idx_paper_abierta_unica" in _reales, str(sorted(_reales)))
+    # Comportamiento: el segundo INSERT abierto del mismo mint REBOTA…
+    conn.execute("DELETE FROM paper_trades WHERE mint='DOBLE'")
+    conn.commit()
+    conn.execute(
+        "INSERT INTO paper_trades (mint, symbol, wallet, entry_price, "
+        "entry_ts, stake_sol, status) VALUES "
+        "('DOBLE','DOBLE','W',1.0,1,1.0,'abierta')")
+    conn.commit()
+    _choco = False
+    try:
+        conn.execute(
+            "INSERT INTO paper_trades (mint, symbol, wallet, entry_price, "
+            "entry_ts, stake_sol, status) VALUES "
+            "('DOBLE','DOBLE','W2',1.0,2,1.0,'abierta')")
+        conn.commit()
+    except Exception as e:
+        _choco = "Integrity" in type(e).__name__ or "Unique" in type(e).__name__
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    comprobar("dos posiciones ABIERTAS del mismo token: la base lo impide",
+              _choco,
+              "el INSERT pasó: la restricción no está activa y la carrera "
+              "del consenso sigue pudiendo abrir dos")
+    # …pero cerrar la primera y abrir otra SÍ tiene que poder hacerse.
+    conn.execute("UPDATE paper_trades SET status='cerrada' "
+                 "WHERE mint='DOBLE'")
+    conn.commit()
+    _ok_reentrada = True
+    try:
+        conn.execute(
+            "INSERT INTO paper_trades (mint, symbol, wallet, entry_price, "
+            "entry_ts, stake_sol, status) VALUES "
+            "('DOBLE','DOBLE','W2',1.0,3,1.0,'abierta')")
+        conn.commit()
+    except Exception as e:
+        _ok_reentrada = False
+        print(f"    (rebotó: {e})")
+    comprobar("y con la anterior CERRADA se puede volver a copiar el "
+              "token (si no, el índice rompería la reentrada)",
+              _ok_reentrada, "el índice está de más y bloquea reentradas")
+    conn.execute("DELETE FROM paper_trades WHERE mint='DOBLE'")
+    conn.commit()
+
+    # ── 8) La vía normal del paper toma el candado por mint ──────────
+    _src_rt = _insp.getsource(rt)
+    _i_paper = _src_rt.find("paper_trading.open_trade(conn, trade, t, "
+                            "score_sig)")
+    _ventana = _src_rt[max(0, _i_paper - 700):_i_paper]
+    comprobar("la vía normal abre la posición DENTRO del candado por mint",
+              "with _lock_mint(" in _ventana,
+              "sin candado, dos ⭐ comprando el mismo mint en el mismo "
+              "bloque abren dos posiciones")
+    # Y el candado no puede anidarse consigo mismo (no es reentrante).
+    import ast as _ast
+    _bloques = []
+
+    class _V(_ast.NodeVisitor):
+        def visit_With(self, node):
+            for it in node.items:
+                c = it.context_expr
+                if (isinstance(c, _ast.Call)
+                        and getattr(c.func, "id", "") == "_lock_mint"):
+                    _bloques.append((node.lineno, node.end_lineno))
+            self.generic_visit(node)
+
+    _V().visit(_ast.parse(_src_rt))
+    _anidados = [(a, b) for a, b in _bloques
+                 for c, d in _bloques if (a, b) != (c, d) and a > c and b < d]
+    comprobar("y ningún bloque _lock_mint contiene a otro (sería un "
+              "bloqueo permanente del worker: el candado NO es reentrante)",
+              not _anidados, f"anidados: {_anidados}")
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -7051,6 +7323,7 @@ def main():
     prueba_19a()
     prueba_19b()
     prueba_19c()
+    prueba_19d()
 
     print("\n" + "─" * 60)
     if _FALLOS:

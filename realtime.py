@@ -240,10 +240,18 @@ def tg_send(text: str, buttons: list | None = None) -> bool:
         return False
 
 
-def tg_send_photo(photo_bytes: bytes, caption: str = ""):
-    """Envía una foto con caption (Markdown) al admin — para tarjetas."""
+def tg_send_photo(photo_bytes: bytes, caption: str = "") -> bool:
+    """Envía una foto con caption (Markdown) al admin — para tarjetas.
+
+    (19-D) Devuelve True SOLO si Telegram aceptó la foto, igual que
+    `tg_send` desde la Ola 17-L. Antes no devolvía nada, así que quien
+    llamaba no podía distinguir "entregada" de "rechazada por un 400 de
+    Markdown o un 429 de ritmo" — y `signal_tracker` marcaba el hito xN
+    como avisado igual, con el candado del escalón monotónico: ese x5 no
+    volvía a sonar nunca.
+    """
     if not (BOT_TOKEN and ADMIN_ID):
-        return
+        return False
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
@@ -260,8 +268,11 @@ def tg_send_photo(photo_bytes: bytes, caption: str = ""):
             if not r.ok:
                 print(f"· Foto TG rechazada ({r.status_code}): "
                       f"{r.text[:200]}")
+                return False
+        return True
     except requests.RequestException as e:
         print(f"· No se pudo enviar foto TG: {e}")
+        return False
 
 
 def tracked_addresses(conn=None) -> list[str]:
@@ -1425,12 +1436,42 @@ def _proc(txs: list[dict], conn):
 
         # Paper trading: abre posición simulada con la compra alertada;
         # si es venta de la ⭐ que dio la señal, cierra la simulada.
+        #
+        # (19-D) DENTRO DEL CANDADO POR MINT, como el camino caliente.
+        #
+        # El comentario de la cabecera de este archivo explica por qué
+        # existe `_lock_mint`: "una posición por token" es un
+        # comprobar-luego-insertar en `open_trade` (SELECT en :242,
+        # INSERT en :337) y entre medias hay TRES llamadas HTTP —
+        # DexScreener, Helius DAS y Jupiter—, o sea segundos. Pero solo
+        # el camino caliente lo tomaba; esta vía normal, no.
+        #
+        # Escenario real: el camino caliente no consigue precio (un 429
+        # de DexScreener) para dos compras del mismo mint hechas por dos
+        # ⭐ en el mismo bloque; las dos caen aquí, en dos workers
+        # distintos, los dos SELECT no ven nada y salen DOS filas
+        # abiertas del mismo token. Después `close_on_wallet_sell` usa
+        # `fetchone()` sin ORDER BY, así que cierra una y la otra queda
+        # eterna ocupando plaza y bloqueando el mint.
+        #
+        # CUIDADO al mover esto: `_lock_mint` NO es reentrante (por
+        # dentro es un `threading.Lock`), así que anidarlo con otro
+        # `with _lock_mint` del MISMO mint en el MISMO hilo congela el
+        # worker para siempre. Comprobado antes de añadirlo: los tres
+        # bloques que lo toman en este archivo (líneas ~873, ~987 y este)
+        # son disjuntos —ninguno contiene a otro—, y ni `open_trade` ni
+        # `close_on_wallet_sell` ni nada de lo que llaman (ejecucion_
+        # simulada, salidas, decision_ia, dev_watch, signal_tracker,
+        # card_image, unrealized_pnl) vuelve a pedirlo. El único otro
+        # módulo que lo usa es `predictions._candado_mint`, y su llamada
+        # (`on_buy`) queda muy por encima de aquí, fuera de este bloque.
         try:
             import paper_trading
-            if es_compra:
-                paper_trading.open_trade(conn, trade, t, score_sig)
-            else:
-                paper_trading.close_on_wallet_sell(conn, trade, t, pos)
+            with _lock_mint(trade["mint"]):
+                if es_compra:
+                    paper_trading.open_trade(conn, trade, t, score_sig)
+                else:
+                    paper_trading.close_on_wallet_sell(conn, trade, t, pos)
         except Exception as e:
             print(f"· Paper trading falló: {e}")
 

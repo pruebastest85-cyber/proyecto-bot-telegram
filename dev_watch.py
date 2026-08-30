@@ -103,21 +103,42 @@ def alerta_dev_inmediata(conn, trade: dict) -> int:
          int(trade.get("ts") or 0) or 2**62)).fetchall()
     if not rows:
         return 0
+    # ── (19-D) ENVIAR PRIMERO, MARCAR DESPUÉS ────────────────────────
+    # Antes se ponía `dev_alerted=1` y se hacía commit ANTES de enviar.
+    # Como `dev_alerted=0` es la condición del SELECT de arriba, un envío
+    # fallido dejaba la fila marcada PARA SIEMPRE: la que este mismo
+    # módulo llama "la señal de rug más fiable que existe" no volvía a
+    # avisar nunca de ese token.
+    #
+    # Y el fallo no es hipotético: el símbolo se interpolaba CRUDO dentro
+    # de `*…*`. Un memecoin con `_`, `*`, `` ` `` o `[` en el ticker
+    # —que los hay, y lo elige quien crea el token— hace que Telegram
+    # devuelva 400. `tg_send` reintenta en texto plano, pero si también
+    # falla (429 por ritmo) devuelve False y la alerta se perdía en
+    # silencio. Ahora se escapa con la misma función que ya usa
+    # `token_report`, y solo se marca si Telegram aceptó.
+    enviado = False
+    try:
+        from realtime import tg_send
+        from token_report import _esc
+        sym = _esc(rows[0]["symbol"] or trade["mint"][:8])
+        enviado = bool(tg_send(
+            f"🚨 *DEV VENDIÓ (en vivo)* — *{sym}*\n"
+            f"El creador del token (`{trade['wallet'][:8]}…`) acaba "
+            f"de vender ~{trade.get('sol') or 0:.2f} SOL de su bolsa. "
+            f"Suele preceder al desplome inmediato.\n"
+            f"Tienes posición de paper abierta: revisa /paper.\n"
+            f"`{trade['mint']}`"))
+    except Exception as e:
+        print(f"· dev_watch: no pude avisar en vivo: {e}")
+    if not enviado:
+        print("· dev_watch: la alerta EN VIVO no se entregó; NO marco las "
+              "posiciones, para que se reintente en la próxima venta")
+        return 0
     for r in rows:
         conn.execute("UPDATE paper_trades SET dev_alerted=1 WHERE id=?",
                      (r["id"],))
     conn.commit()
-    try:
-        from realtime import tg_send
-        sym = rows[0]["symbol"] or trade["mint"][:8]
-        tg_send(f"🚨 *DEV VENDIÓ (en vivo)* — *{sym}*\n"
-                f"El creador del token (`{trade['wallet'][:8]}…`) acaba "
-                f"de vender ~{trade.get('sol') or 0:.2f} SOL de su bolsa. "
-                f"Suele preceder al desplome inmediato.\n"
-                f"Tienes posición de paper abierta: revisa /paper.\n"
-                f"`{trade['mint']}`")
-    except Exception as e:
-        print(f"· dev_watch: no pude avisar en vivo: {e}")
     return len(rows)
 
 
@@ -173,6 +194,28 @@ def revisar_devs() -> int:
                            int(r["entry_ts"] or 0)):
             time.sleep(0.3)
             continue
+        # (19-D) Mismo orden que en la vía en vivo: enviar, y marcar solo
+        # si Telegram aceptó. Y el símbolo escapado, que era el motivo
+        # más probable de rechazo.
+        enviado = False
+        try:
+            from realtime import tg_send
+            from token_report import _esc
+            enviado = bool(tg_send(
+                f"🚨 *DEV VENDIÓ* — *{_esc(r['symbol'])}*\n"
+                f"El creador del token "
+                f"(`{r['dev_wallet'][:8]}…`) movió/vendió su bolsa. "
+                f"Suele preceder al desplome.\n"
+                f"Tienes posición de paper abierta en este token: "
+                f"revisa /paper.\n`{r['mint']}`"))
+        except Exception as e:
+            print(f"· dev_watch: no pude avisar: {e}")
+        if not enviado:
+            print(f"· dev_watch: la alerta de {r['symbol']} no se "
+                  f"entregó; NO la marco, se reintenta en la próxima "
+                  f"pasada")
+            time.sleep(0.3)
+            continue
         conn = get_conn()
         try:
             conn.execute(
@@ -181,16 +224,6 @@ def revisar_devs() -> int:
             conn.commit()
         finally:
             conn.close()
-        try:
-            from realtime import tg_send
-            tg_send(f"🚨 *DEV VENDIÓ* — *{r['symbol']}*\n"
-                    f"El creador del token "
-                    f"(`{r['dev_wallet'][:8]}…`) movió/vendió su bolsa. "
-                    f"Suele preceder al desplome.\n"
-                    f"Tienes posición de paper abierta en este token: "
-                    f"revisa /paper.\n`{r['mint']}`")
-        except Exception as e:
-            print(f"· dev_watch: no pude avisar: {e}")
         avisadas += 1
         time.sleep(0.3)
     if avisadas:
