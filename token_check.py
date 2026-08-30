@@ -27,8 +27,21 @@ import config
 #     revocar una autoridad es un evento raro. Cache larga.
 # Además la parte de seguridad es la CARA (2 llamadas) y la que más
 # falla: cada acierto de cache es un `sin_seguridad` menos.
-DEX_TTL_S = int(os.getenv("TOKEN_DEX_TTL_S", "45"))
-RUG_TTL_S = int(os.getenv("TOKEN_RUG_TTL_S", "1800"))
+# (19-A) Conversion protegida. De este modulo dependen las señales, el
+# radar, las predicciones y el paper: una errata en el .env lo mataba
+# ENTERO en el import, con el resto del bot arrancando en apariencia
+# normal hasta que algo pedia un precio.
+def _int_env(nombre, defecto):
+    try:
+        return int(float(os.getenv(nombre, defecto)))
+    except (TypeError, ValueError):
+        print(f"· {nombre}={os.getenv(nombre)!r} no es un numero; "
+              f"se usa {defecto}")
+        return int(defecto)
+
+
+DEX_TTL_S = _int_env("TOKEN_DEX_TTL_S", 45)
+RUG_TTL_S = _int_env("TOKEN_RUG_TTL_S", 1800)
 _CACHE_MAX = 500
 
 _dex_cache: dict = {}

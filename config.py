@@ -197,5 +197,9 @@ HELIUS_CREDITS_RPC = _int("HELIUS_CREDITS_RPC", 10)
 HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 10_000_000)
 HELIUS_STOP_AT_PCT = _int("HELIUS_STOP_AT_PCT", 85)   # pausar al 85%
 
-HELIUS_DELAY = float(os.getenv("HELIUS_DELAY", "0.1"))
+# (19-A) Era la UNICA linea de este archivo que convertia a pelo. Y este
+# archivo lo importa el repo ENTERO, asi que un `HELIUS_DELAY=0,1` en el
+# .env lanzaba ValueError EN EL IMPORT: no arranca nada, y el supervisor
+# entra en bucle de reinicios sin rollback. Ahora cae al defecto.
+HELIUS_DELAY = _float("HELIUS_DELAY", 0.1)
 DEXSCREENER_DELAY = 0.3

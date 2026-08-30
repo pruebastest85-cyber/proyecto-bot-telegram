@@ -6383,6 +6383,201 @@ def prueba_18q_salud_base():
         conn.close()
 
 
+# ---------------------------------------------------------------------
+# OLA 19-A - indices que faltaban, arranque a prueba de erratas y
+# secretos fuera del control de versiones.
+# ---------------------------------------------------------------------
+def prueba_19a():
+    bloque("19-A - indices, arranque a prueba de erratas y .gitignore")
+    import json as _json
+    import os as _os
+    import subprocess as _sp
+    import time as _t
+    import db as _db
+    from db import get_conn
+
+    conn = get_conn()
+
+    # ── 1) Los indices nuevos existen de verdad tras el arranque ──────
+    idx = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    for n in ("idx_signals_ts", "idx_wallets_tracked"):
+        comprobar(f"el indice {n} se crea al arrancar", n in idx,
+                  f"indices presentes: {sorted(idx)}")
+
+    # ── 2) Y sirven: el plan deja de ser un escaneo completo ──────────
+    # Esta es la prueba que importa. Que el indice exista no basta: hay
+    # que comprobar que el planificador LO ELIGE, porque un indice cuyo
+    # prefijo no coincide con el WHERE no se usa (que es justo lo que
+    # pasaba con (mint, ts) y (wallet, ts) en la consulta anti-spam).
+    def _plan(sql):
+        return " | ".join(str(r[-1]) for r in
+                          conn.execute("EXPLAIN QUERY PLAN " + sql))
+
+    p_spam = _plan("SELECT COUNT(*) c FROM signals WHERE ts>=1 "
+                   "AND alert_intento=1 AND signature<>'x'")
+    comprobar("anti-spam global (solo ts) usa idx_signals_ts",
+              "idx_signals_ts" in p_spam and "SCAN signals\n" not in p_spam
+              and not p_spam.startswith("SCAN signals |")
+              and p_spam != "SCAN signals",
+              p_spam)
+
+    p_p3 = _plan("SELECT s.wallet, s.chg_24h FROM signals s "
+                 "JOIN wallets w ON w.address=s.wallet "
+                 "WHERE w.is_tracked=1 AND s.side='compra' "
+                 "AND s.chg_24h IS NOT NULL")
+    comprobar("la puerta 3 en LOTE entra por las ⭐, no por las señales",
+              "idx_wallets_tracked" in p_p3 and "SCAN s" not in p_p3, p_p3)
+
+    p_sen = _plan("SELECT * FROM signals ORDER BY ts DESC LIMIT 10")
+    comprobar("/senales ya no ordena en un arbol temporal",
+              "TEMP B-TREE" not in p_sen, p_sen)
+
+    # ── 3) corte_actividad: un valor malo CIERRA, nunca abre ──────────
+    # El fallo real: `float(os.getenv(...))` a pelo lanzaba ValueError,
+    # `top_addresses` lo capturaba y devolvia None = SIN FILTRO. La misma
+    # errata cerraba la puerta en wallet_ident y la ABRIA aqui.
+    _prev = _os.environ.get("TOP_ACTIVITY_HOURS")
+    try:
+        def _horas_con(valor):
+            """(horas, error). Que LANCE tambien es un fallo: era justo
+            lo que hacia `float()` a pelo, y esa excepcion es la que
+            `top_addresses` convertia en 'sin filtro'."""
+            _os.environ["TOP_ACTIVITY_HOURS"] = valor
+            try:
+                return ((_t.time() - _db.corte_actividad()) / 3600, None)
+            except Exception as _e:
+                return (None, f"{type(_e).__name__}: {_e}")
+
+        for malo in ("48h", "4,8", "", "cero", "0", "-5"):
+            _h, _err = _horas_con(malo)
+            comprobar(f"TOP_ACTIVITY_HOURS={malo!r} cae al defecto de 48 h",
+                      _err is None and abs(_h - 48) < 0.2,
+                      _err or f"salieron {_h:.1f} h")
+        _h, _err = _horas_con("72")
+        comprobar("un valor valido si se respeta",
+                  _err is None and abs(_h - 72) < 0.2,
+                  _err or f"salieron {_h:.1f} h")
+
+        _os.environ["TOP_ACTIVITY_HOURS"] = "48h"
+        try:
+            r = _db.top_addresses(conn, 50)
+            _err = None
+        except Exception as _e:
+            r, _err = None, f"{type(_e).__name__}: {_e}"
+        comprobar("top_addresses NO falla-abierto con una errata",
+                  _err is None and r is not None,
+                  _err or "devolvio None, que significa 'sin filtro de "
+                  "actividad': alertarian y se copiarian ⭐ dormidas")
+    finally:
+        if _prev is None:
+            _os.environ.pop("TOP_ACTIVITY_HOURS", None)
+        else:
+            _os.environ["TOP_ACTIVITY_HOURS"] = _prev
+
+    # ── 4) Los tres espejos calculan el corte en UN solo sitio ────────
+    import inspect as _insp
+    import wallet_ident as _wi
+    for _fn, _nombre in ((_db.top_wallets, "db.top_wallets"),
+                         (_db._operativas, "db._operativas"),
+                         (_wi.posicion, "wallet_ident.posicion")):
+        _src = _insp.getsource(_fn)
+        comprobar(f"{_nombre} usa corte_actividad() y no lo recalcula",
+                  "corte_actividad()" in _src
+                  and 'getenv("TOP_ACTIVITY_HOURS"' not in _src,
+                  "sigue habiendo una copia literal del corte")
+
+    # ── 5) Una errata en el .env ya no impide ARRANCAR ────────────────
+    # Se comprueba en un proceso aparte a proposito: hay que ver el
+    # IMPORT del modulo con la variable envenenada, y recargar modulos ya
+    # importados dentro de la suite dejaria basura para las demas pruebas.
+    _env = dict(_os.environ)
+    _env.update({
+        "HELIUS_DELAY": "0,1",          # coma decimal
+        "PORT": "8080abc",
+        "TOKEN_DEX_TTL_S": "45s",
+        "TOKEN_RUG_TTL_S": "",
+        "RADAR_GANADOR_X": "3,0",
+        "CLUSTERS_TTL_S": "media hora",
+        "CLUSTER_MAX_MIEMBROS": "cuarenta",
+        "AUTO_CYCLE_HOURS": "2h",
+        "TELEGRAM_ADMIN_ID": "1",
+        "DATABASE_URL": "",
+    })
+    _env.pop("DATABASE_URL")
+    _codigo = (
+        "import json, config, realtime, token_check, radar, clusters, "
+        "telegram_bot\n"
+        "print('__VALORES__' + json.dumps({"
+        "'HELIUS_DELAY': config.HELIUS_DELAY,"
+        "'PORT': realtime.PORT,"
+        "'DEX_TTL_S': token_check.DEX_TTL_S,"
+        "'RUG_TTL_S': token_check.RUG_TTL_S,"
+        "'GANADOR_X': radar.GANADOR_X,"
+        "'CLUSTERS_TTL': clusters._TTL,"
+        "'CLUSTER_MAX': clusters.MAX_MIEMBROS_LIDERAZGO,"
+        "'AUTO_CYCLE_HOURS': telegram_bot.AUTO_CYCLE_HOURS}))"
+    )
+    _raiz = _os.path.dirname(_os.path.abspath(__file__))
+    _p = _sp.run([sys.executable, "-c", _codigo], cwd=_raiz, env=_env,
+                 capture_output=True, text=True, timeout=180)
+    comprobar("con OCHO variables mal escritas, los modulos IMPORTAN igual",
+              _p.returncode == 0,
+              (_p.stderr or "")[-400:])
+    _vals = {}
+    for _l in (_p.stdout or "").splitlines():
+        if _l.startswith("__VALORES__"):
+            _vals = _json.loads(_l[len("__VALORES__"):])
+    _esperado = {"HELIUS_DELAY": 0.1, "PORT": 8080, "DEX_TTL_S": 45,
+                 "RUG_TTL_S": 1800, "GANADOR_X": 3.0, "CLUSTERS_TTL": 1800,
+                 "CLUSTER_MAX": 40, "AUTO_CYCLE_HOURS": 6.0}
+    for _k, _v in _esperado.items():
+        comprobar(f"{_k} cae a su defecto en vez de tumbar el arranque",
+                  _k in _vals and abs(float(_vals[_k]) - _v) < 1e-9,
+                  f"salio {_vals.get(_k)!r}, se esperaba {_v!r}")
+
+    # AUTO_CYCLE_HOURS=0 era el caso silencioso: no lanza excepcion, pero
+    # `_con_reloj` hace `if intervalo:` y el 0 es falsy, asi que se salta
+    # la guarda del reloj y el ciclo correria en CADA sondeo.
+    _env0 = dict(_env)
+    _env0["AUTO_CYCLE_HOURS"] = "0"
+    _p0 = _sp.run([sys.executable, "-c",
+                   "import telegram_bot as t;"
+                   "print('__H__', t.AUTO_CYCLE_HOURS)"],
+                  cwd=_raiz, env=_env0, capture_output=True, text=True,
+                  timeout=180)
+    comprobar("AUTO_CYCLE_HOURS=0 no deja el ciclo sin guarda de reloj",
+              "__H__ 6.0" in (_p0.stdout or ""),
+              (_p0.stdout or "") + (_p0.stderr or "")[-200:])
+
+    # ── 6) Los secretos y la base quedan fuera del control de versiones
+    _gi = open(_os.path.join(_raiz, ".gitignore"), encoding="utf-8").read()
+    for _patron, _porque in (
+            ("bot_local.env", "el .env REAL del PC, con las cuatro claves"),
+            ("*.env", "cualquier otro .env"),
+            ("*.db", "la base de 330 MB con el historico irreversible"),
+            ("*.db-wal", "los archivos vivos de SQLite en WAL"),
+            ("backups/", "los respaldos comprimidos")):
+        comprobar(f".gitignore cubre {_patron} ({_porque})",
+                  _patron in _gi, "no aparece en .gitignore")
+
+    # ── 7) Ninguna dependencia puede saltar de version MAYOR sola ─────
+    _req = open(_os.path.join(_raiz, "requirements.txt"),
+                encoding="utf-8").read()
+    _lineas = [l.strip() for l in _req.splitlines()
+               if l.strip() and not l.strip().startswith("#")]
+    comprobar("requirements.txt sigue declarando las 6 dependencias",
+              len(_lineas) == 6, f"hay {len(_lineas)}: {_lineas}")
+    for _l in _lineas:
+        comprobar(f"{_l.split('>')[0]} lleva techo de version mayor",
+                  "<" in _l,
+                  f"'{_l}' deja que pip instale la siguiente mayor sola "
+                  f"en cualquier despliegue")
+
+    conn.close()
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -6413,6 +6608,7 @@ def main():
     prueba_18o_medidas()
     prueba_18p_radar()
     prueba_18q_salud_base()
+    prueba_19a()
 
     print("\n" + "─" * 60)
     if _FALLOS:

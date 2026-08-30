@@ -49,7 +49,17 @@ def _int_env(n, d):
     try:
         return int(float(os.getenv(n, d)))
     except (TypeError, ValueError):
+        print(f"· {n}={os.getenv(n)!r} no es un numero; se usa {d}")
         return d
+
+
+def _float_env(n, d):
+    """(19-A) Gemela de _int_env para los umbrales decimales."""
+    try:
+        return float(os.getenv(n, d))
+    except (TypeError, ValueError):
+        print(f"· {n}={os.getenv(n)!r} no es un numero; se usa {d}")
+        return float(d)
 
 
 ACTIVO = _int_env("RADAR_ACTIVO", 1)
@@ -66,7 +76,10 @@ SILENCIOSO_DEF = _int_env("RADAR_SILENCIOSO", 1)
 # al catalogo de ganadores y el ciclo analiza a TODOS sus compradores
 # tempranos — los desconocidos que compraron junto a tus conocidas entran
 # al embudo horas antes que con el descubrimiento clasico.
-GANADOR_X = float(os.getenv("RADAR_GANADOR_X", "3.0") or 3.0)
+# (19-A) Era la unica variable del radar sin conversion protegida: un
+# `RADAR_GANADOR_X=3,0` con coma mataba el modulo ENTERO en el import,
+# con el bot funcionando en apariencia normal.
+GANADOR_X = _float_env("RADAR_GANADOR_X", 3.0)
 SEG_MAX_H = _int_env("RADAR_SEG_MAX_H", 48)
 
 

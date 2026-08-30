@@ -50,7 +50,22 @@ if ADMIN_ID <= 0:
         f"TELEGRAM_ADMIN_ID debe ser un ID de Telegram positivo, no "
         f"{ADMIN_ID}. Con 0 el filtro de administrador queda desactivado."
     )
-AUTO_CYCLE_HOURS = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
+# (19-A) Conversion protegida. Dos fallos, no uno:
+#   · Una errata (`AUTO_CYCLE_HOURS=2h`, coma decimal) lanzaba ValueError
+#     EN EL IMPORT: el bot no arranca y el supervisor entra en bucle de
+#     reinicios sin rollback.
+#   · Un 0 daba intervalo 0, y `_con_reloj` hace `if intervalo:`, o sea
+#     que el 0 es falsy y SE SALTA la guarda del reloj: el ciclo completo
+#     (que gasta creditos de Helius) correria en cada sondeo de 30 min.
+#   Ambos casos caen al defecto en vez de romper.
+try:
+    AUTO_CYCLE_HOURS = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
+    if AUTO_CYCLE_HOURS <= 0:
+        raise ValueError("debe ser > 0")
+except (TypeError, ValueError) as _e:
+    print(f"· AUTO_CYCLE_HOURS={os.getenv('AUTO_CYCLE_HOURS')!r} no vale "
+          f"({_e}); se usan 6 h")
+    AUTO_CYCLE_HOURS = 6.0
 
 # Evita que el ciclo automático y un comando manual corran a la vez
 cycle_lock = threading.Lock()

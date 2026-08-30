@@ -38,7 +38,14 @@ LAMPORTS = 1_000_000_000
 LAST_HOOK_TS = None   # última vez que Helius nos mandó algo (watchdog)
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 PUBLIC_URL = PUBLIC_URL.removeprefix("https://").removeprefix("http://")
-PORT = int(os.getenv("PORT", "8080"))
+# (19-A) Conversion protegida: un PORT con errata lanzaba ValueError en
+# el import de este modulo, que importa medio repo → el bot no arranca y
+# el supervisor entra en bucle. Cae al defecto y lo dice.
+try:
+    PORT = int(os.getenv("PORT", "8080"))
+except (TypeError, ValueError):
+    print(f"· PORT={os.getenv('PORT')!r} no es un numero; se usa 8080")
+    PORT = 8080
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

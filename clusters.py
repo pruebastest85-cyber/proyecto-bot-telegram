@@ -56,9 +56,22 @@ MIN_COMPS_LIDER = 6
 #   c) tope de miembros en el calculo de liderazgo, y se DICE cuando se
 #      recorta (un tope silencioso se lee como "lo mire todo").
 _CACHE = {"c": None, "ts": 0.0, "fallo": 0.0}
-_TTL = int(os.getenv("CLUSTERS_TTL_S", "1800"))        # 30 min
+
+
+def _int_env(n, d):
+    """(19-A) Conversion protegida: una errata en el .env mataba este
+    modulo en el import, y de el dependen /clusters, el Meta Score de las
+    predicciones y la ficha del ADN."""
+    try:
+        return int(float(os.getenv(n, d)))
+    except (TypeError, ValueError):
+        print(f"· {n}={os.getenv(n)!r} no es un numero; se usa {d}")
+        return int(d)
+
+
+_TTL = _int_env("CLUSTERS_TTL_S", 1800)                # 30 min
 _BUILD_LOCK = threading.Lock()
-MAX_MIEMBROS_LIDERAZGO = int(os.getenv("CLUSTER_MAX_MIEMBROS", "40"))
+MAX_MIEMBROS_LIDERAZGO = _int_env("CLUSTER_MAX_MIEMBROS", 40)
 
 
 def _pg() -> bool:

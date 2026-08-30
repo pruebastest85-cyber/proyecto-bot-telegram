@@ -1,4 +1,36 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# ── Secretos (19-A) ───────────────────────────────────────────────────
+# La regla `.env` sola ignoraba UN archivo llamado exactamente `.env`, y
+# el que existe de verdad en la carpeta de produccion del PC se llama
+# `bot_local.env` — con TELEGRAM_BOT_TOKEN, HELIUS_API_KEY,
+# BIRDEYE_API_KEY y ANTHROPIC_API_KEY dentro. Esa carpeta es un clon real
+# del repo, asi que un `git add .` descuidado publicaba las cuatro claves.
 .env
+*.env
+*.env.bak*
+bot_local.env
+
+# ── Base de datos e historico ─────────────────────────────────────────
+# `wallets.db` son 330 MB y contiene lo unico irreversible del sistema
+# (appearances y signals). Los -wal/-shm son los archivos vivos de
+# SQLite en modo WAL.
+*.db
+*.db-wal
+*.db-shm
+
+# ── Respaldos y volcados ──────────────────────────────────────────────
+backups/
+wallets_backup_*
+backup_*.json
+*.gz
+
+# ── Entornos y lanzadores locales ─────────────────────────────────────
+# Los .bat del PC cargan las variables de entorno, o sea que pueden
+# llevar claves escritas dentro. Ninguno vive hoy en el repo; si algun
+# dia hiciera falta versionar uno SIN secretos: `git add -f <archivo>`.
+venv/
+.venv/
+*.bat

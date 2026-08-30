@@ -37,12 +37,13 @@ def posicion(conn, address: str, tope: int = 200):
     if not address:
         return None
     try:
-        import time as _t
-        import os as _os
         # ESPEJO de db.top_wallets (19/8): mismo corte de actividad de
-        # 48 h, ajustable con TOP_ACTIVITY_HOURS. Si cambia alla, aqui.
-        _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
-        corte = int(_t.time()) - int(_horas * 3600)
+        # 48 h, ajustable con TOP_ACTIVITY_HOURS. (19-A) El calculo ya no
+        # esta escrito aqui: lo hace `db.corte_actividad()`, el mismo que
+        # usan `top_wallets` y `_operativas`, asi que los tres espejos no
+        # pueden discrepar aunque alguien cambie el defecto en un sitio.
+        from db import corte_actividad
+        corte = corte_actividad()
         rows = conn.execute(
             """SELECT w.address FROM wallets w
                LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions

@@ -576,11 +576,33 @@ _INDICES_TARDIOS = (
     # consulta POR BILLETERA escaneaba la tabla entera y ordenaba en un
     # árbol temporal — y hay dos por ⭐ y por pasada: la racha perdedora
     # (cada 15 min) y el rendimiento medido. Con 188.000 señales ya se
-    # nota. NO arregla la consulta en LOTE de la puerta 3
-    # (`filtro_calidad.medidas` sin billetera), que recorre las señales
-    # de todas las ⭐ y seguirá escaneando.
+    # nota.
     "CREATE INDEX IF NOT EXISTS idx_signals_wallet_ts "
     "ON signals(wallet, ts)",
+    # (19-A) Los dos escaneos completos que quedaban, MEDIDOS con
+    # EXPLAIN QUERY PLAN sobre la base real del dueño (193.393 señales,
+    # 330 MB):
+    #
+    #   · Anti-spam global de `realtime` (tope de alertas por hora):
+    #     filtra SOLO por `ts`, asi que ni (mint, ts) ni (wallet, ts) le
+    #     sirven — el prefijo del indice no es la columna del WHERE.
+    #     Plan medido: `SCAN signals`. Corre en el HILO DE INGESTA, en
+    #     cada señal que llega a la compuerta, mientras ese mismo
+    #     proceso quiere el candado de escritura: es combustible directo
+    #     de los "database is locked". Y crece para siempre, porque
+    #     `signals` no se poda. Sirve ademas a `/senales` (que hoy
+    #     escanea y ordena en un arbol temporal para enseñar 10 filas) y
+    #     al resumen diario.
+    #
+    #   · Puerta 3 en LOTE (`filtro_calidad.medidas` sin billetera):
+    #     plan medido `SCAN s` sobre las 193k filas. Con este indice el
+    #     motor puede entrar por las ⭐ (7 hoy) y buscar sus señales por
+    #     `idx_signals_wallet_ts`. Corre en la PRIMERA conexion de cada
+    #     proceso (`_preparar_*` llama a `clasificar`), o sea en cada
+    #     reinicio del supervisor.
+    "CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_wallets_tracked "
+    "ON wallets(is_tracked)",
 )
 
 
@@ -1285,6 +1307,41 @@ def recompute_scores(conn, min_winning_tokens: int, max_tracked: int = 60):
         print(f"· Presupuesto de atención omitido: {_e}")
 
 
+def corte_actividad() -> int:
+    """Marca de tiempo por debajo de la cual una billetera cuenta como
+    DORMIDA (TOP_ACTIVITY_HOURS, 48 h por defecto).
+
+    (19-A) Existia escrito tres veces —`top_wallets`, `_operativas` y
+    `wallet_ident.posicion`— como `float(os.getenv(...))` a pelo, y eso
+    daba DOS problemas:
+
+      1. Una errata en la variable (`TOP_ACTIVITY_HOURS=48h`, una coma
+         decimal) lanzaba ValueError. En `wallet_ident.posicion` el
+         try/except de la funcion lo convertia en "sin posicion"; en
+         `_operativas` lo cazaba `top_addresses` y devolvia None, que
+         significa SIN FILTRO. O sea: la misma errata cerraba una puerta
+         y ABRIA la otra, dejando alertar y copiar a ⭐ dormidas sin que
+         nada lo dijera. Un fallo debe cerrar, nunca abrir.
+      2. Los tres sitios son ESPEJO obligatorio: si el corte se calcula
+         distinto, el puesto que enseña la tarjeta deja de coincidir con
+         el que decide quien alerta.
+
+    Aqui el valor invalido cae al defecto y se dice por consola.
+    """
+    import time as _t
+    import os as _os
+    _crudo = _os.getenv("TOP_ACTIVITY_HOURS", "48")
+    try:
+        _horas = float(_crudo)
+        if _horas <= 0:
+            raise ValueError("debe ser > 0")
+    except (TypeError, ValueError) as _e:
+        print(f"· TOP_ACTIVITY_HOURS={_crudo!r} no es un numero de horas "
+              f"valido ({_e}); se usa el defecto de 48 h")
+        _horas = 48.0
+    return int(_t.time()) - int(_horas * 3600)
+
+
 def top_wallets(conn, limit=20):
     # Primero las ⭐ rastreadas, ordenadas por su calidad real (Wallet Score
     # 0-100 de la IA); luego el resto de candidatas por el score de
@@ -1303,11 +1360,9 @@ def top_wallets(conn, limit=20):
     # sin operar en 24 h y 9 estrellas activas ese dia FUERA del top. Las
     # de score alto que operan una vez por semana tapaban a las diarias.
     # Ajustable sin codigo con TOP_ACTIVITY_HOURS. Espejo obligatorio en
-    # wallet_ident.posicion().
-    import time as _t
-    import os as _os
-    _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
-    corte = int(_t.time()) - int(_horas * 3600)
+    # wallet_ident.posicion() y en _operativas(): los tres usan
+    # `corte_actividad()` para que no puedan discrepar (19-A).
+    corte = corte_actividad()
     return conn.execute(
         """SELECT w.address, w.winning_tokens_count, w.total_buys_sol,
                   w.score, w.is_tracked, w.ai_class, w.alias, w.pnl_30d,
@@ -1390,10 +1445,7 @@ def _operativas(conn, limit: int) -> set:
     # Consecuencia buscada: el conjunto puede ser MAS pequeño que el tope
     # (hoy 33 en vez de 35). Un cupo vacio no se rellena con una ⭐ del
     # puesto 148; copiar peor no es mejor que copiar menos.
-    import time as _t
-    import os as _os
-    _horas = float(_os.getenv("TOP_ACTIVITY_HOURS", "48"))
-    corte = int(_t.time()) - int(_horas * 3600)
+    corte = corte_actividad()          # espejo de top_wallets (19-A)
     rows = conn.execute(
         """SELECT w.address, w.is_tracked, w.confirmada,
                   COALESCE(actividad.ult, 0) AS ult
