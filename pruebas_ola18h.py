@@ -6578,6 +6578,167 @@ def prueba_19a():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-B - ningun dato incorrecto entra al historico: la comision de
+# red, el detector de bots y las "ganadoras" que nunca se compraron.
+# ---------------------------------------------------------------------
+def prueba_19b():
+    bloque("19-B - comision de red, detector de bots y ventas sin compra")
+    import random as _rnd
+    import time as _time
+    import helius_rpc as _hr
+    import wallet_metrics as _wm
+    import wallet_profiler as _wp
+
+    # ── 1) traducir() trae la comision ───────────────────────────────
+    _entrada = {
+        "blockTime": 1_700_000_000, "slot": 5,
+        "transaction": {"signatures": ["FIRMA"],
+                        "message": {"accountKeys": ["W"]}},
+        "meta": {"fee": 5_000_100, "err": None,
+                 "preBalances": [1_000_000_000],
+                 "postBalances": [900_000_000],
+                 "preTokenBalances": [], "postTokenBalances": []},
+    }
+    _t = _hr.traducir(_entrada)
+    comprobar("traducir() incluye la clave 'fee'", "fee" in (_t or {}),
+              "sin ella, wallet_profiler._sol_delta lee 0 SIEMPRE y el "
+              "PnL sale sesgado a negativo en todo el sistema")
+    comprobar("traducir() devuelve la comision en lamports, sin tocar",
+              (_t or {}).get("fee") == 5_000_100, str((_t or {}).get("fee")))
+    _sin = _hr.traducir({"transaction": {}, "meta": {}})
+    comprobar("una tx sin meta.fee da 0, no None (int() no puede fallar)",
+              (_sin or {}).get("fee") == 0, str((_sin or {}).get("fee")))
+    comprobar("y no se ha perdido ninguna clave del contrato anterior",
+              all(k in (_t or {}) for k in
+                  ("signature", "timestamp", "slot", "feePayer",
+                   "transactionError", "tokenTransfers", "nativeTransfers",
+                   "accountData")),
+              sorted((_t or {}).keys()))
+
+    # ── 2) El sesgo desaparece de verdad en _sol_delta ────────────────
+    # Compra de 1 SOL EXACTA con 0,0050001 SOL de comision, pagada por W.
+    # `accountData` ya trae la comision descontada, asi que el coste del
+    # TOKEN solo sale bien si se le devuelve.
+    _tx = {"feePayer": "W", "fee": 5_000_100,
+           "accountData": [{"account": "W",
+                            "nativeBalanceChange": -(1_000_000_000
+                                                     + 5_000_100)}],
+           "nativeTransfers": []}
+    _con = _wp._sol_delta(_tx, "W")
+    comprobar("el coste del token es 1 SOL exacto, sin la comision dentro",
+              abs(_con + 1.0) < 1e-9, f"salio {_con:+.7f} SOL")
+    _tx_sin = {k: v for k, v in _tx.items() if k != "fee"}
+    _sin_fee = _wp._sol_delta(_tx_sin, "W")
+    comprobar("sin la clave 'fee' la compra sale MAS CARA (el bug viejo)",
+              _sin_fee < _con - 1e-9,
+              f"con fee {_con:+.7f} vs sin fee {_sin_fee:+.7f}")
+    # La venta se sesga al reves: parece que entro menos SOL del que entro.
+    _tx_v = {"feePayer": "W", "fee": 5_000_100,
+             "accountData": [{"account": "W",
+                              "nativeBalanceChange": (1_000_000_000
+                                                      - 5_000_100)}],
+             "nativeTransfers": []}
+    comprobar("y la venta da 1 SOL exacto, no menos",
+              abs(_wp._sol_delta(_tx_v, "W") - 1.0) < 1e-9,
+              f"salio {_wp._sol_delta(_tx_v, 'W'):+.7f} SOL")
+
+    # ── 3) active_hours_24 mide DENTRO de un dia ─────────────────────
+    def _horas(ts):
+        """Replica exacta del calculo nuevo, para poder comparar."""
+        _por = {}
+        for _x in ts:
+            _g = _time.gmtime(_x)
+            _por.setdefault((_g.tm_year, _g.tm_yday), set()).add(_g.tm_hour)
+        return max((len(_h) for _h in _por.values()), default=0)
+
+    _base = 1_700_000_000
+    _rnd.seed(11)
+    # Humano que duerme 8 h pero cuya franja SE DESPLAZA de dia en dia.
+    # Sobre la muestra entera cubre las 24 horas; en un dia, nunca mas de
+    # una franja corta. Este es el caso que marcaba 3.190 billeteras.
+    _humano = []
+    for _d in range(45):
+        _ini = _rnd.randrange(0, 24)
+        for _k in range(6):
+            _humano.append(_base + _d * 86400
+                           + ((_ini + _k) % 24) * 3600
+                           + _rnd.randrange(3600))
+    _viejo_h = len({_time.gmtime(_x).tm_hour for _x in _humano})
+    comprobar("el humano de horario cambiante cubria 22+ horas con el "
+              "calculo viejo (o sea: se marcaba bot)", _viejo_h >= 22,
+              f"con el calculo viejo daba {_viejo_h}/24")
+    comprobar("con el calculo nuevo ya NO llega al umbral de bot",
+              _horas(_humano) < 22,
+              f"sigue dando {_horas(_humano)}/24 en un solo dia")
+
+    # Bot de verdad: opera las 24 h del dia, todos los dias.
+    _bot = [_base + _d * 86400 + _h * 3600 + _rnd.randrange(3600)
+            for _d in range(10) for _h in range(24)]
+    comprobar("un bot 24/7 de verdad se sigue marcando", _horas(_bot) >= 22,
+              f"solo {_horas(_bot)}/24 — el detector dejaria de servir")
+
+    # Propiedad de seguridad del cambio: el valor nuevo NUNCA es mayor que
+    # el viejo, asi que esto solo puede DESMARCAR. Ninguna billetera limpia
+    # hoy puede pasar a marcarse por este cambio.
+    for _n, _ts in (("humano", _humano), ("bot", _bot)):
+        comprobar(f"({_n}) el valor nuevo nunca supera al viejo",
+                  _horas(_ts) <= len({_time.gmtime(_x).tm_hour
+                                      for _x in _ts}),
+                  "el cambio podria marcar billeteras que antes no marcaba")
+
+    # Y que el perfilador use ESE calculo, no otro.
+    import inspect as _insp
+    _src = _insp.getsource(_wp.profile_wallet)
+    comprobar("profile_wallet agrupa por dia antes de contar horas",
+              "_horas_por_dia" in _src and "tm_yday" in _src,
+              "sigue contando horas sobre la muestra entera")
+
+    # ── 4) Las ventas sin compra dejan de ser ganadoras gratis ───────
+    _tokens = {
+        "REAL_PERDEDORA": {"buys": 1, "sells": 1, "sol_out": 2.0,
+                           "sol_in": 1.0, "pnl_sol": -1.0},
+        "REAL_GANADORA": {"buys": 1, "sells": 1, "sol_out": 2.0,
+                          "sol_in": 3.0, "pnl_sol": 1.0},
+        "FANTASMA_1": {"buys": 0, "sells": 1, "sol_out": 0.0,
+                       "sol_in": 0.5, "pnl_sol": 0.5},
+        "FANTASMA_2": {"buys": 0, "sells": 1, "sol_out": 0.0,
+                       "sol_in": 0.2, "pnl_sol": 0.2},
+    }
+    _cerr_viejo = [i for i in _tokens.values() if i["sells"] > 0]
+    _cerr_nuevo = [i for i in _tokens.values()
+                   if i["sells"] > 0 and i["buys"] > 0]
+
+    def _wr(c):
+        return round(100 * sum(1 for i in c if i["pnl_sol"] > 0) / len(c))
+
+    comprobar("el criterio viejo daba 75% de acierto (pasaba el filtro)",
+              _wr(_cerr_viejo) == 75, f"dio {_wr(_cerr_viejo)}%")
+    comprobar("el criterio nuevo da el 50% real (no pasa, y es la verdad)",
+              _wr(_cerr_nuevo) == 50, f"dio {_wr(_cerr_nuevo)}%")
+
+    _m = _wm.trade_metrics(_tokens)
+    comprobar("trade_metrics cuenta 2 cerradas, no 4",
+              _m["closed"] == 2, f"conto {_m['closed']}")
+    comprobar("y su profit_factor ya no lo infla el dinero regalado",
+              _m["profit_factor"] == 1.0, str(_m["profit_factor"]))
+
+    # ESPEJO: las dos listas se calculan igual en los dos modulos.
+    for _fn, _nombre in ((_wp.profile_wallet, "wallet_profiler"),
+                         (_wm.trade_metrics, "wallet_metrics")):
+        _s = _insp.getsource(_fn)
+        comprobar(f"{_nombre} exige buys > 0 para contar una cerrada",
+                  'buys", 0) > 0' in _s or 'i["buys"] > 0' in _s,
+                  "una venta sin compra volveria a contar como ganadora")
+
+    # Y el airdrop vendido sigue sumando al PnL total: lo que se le quita
+    # es contar como posicion ACERTADA, no el dinero.
+    comprobar("el dinero del airdrop no se pierde del PnL",
+              abs(sum(i["pnl_sol"] for i in _tokens.values()) - 0.7) < 1e-9,
+              "el PnL total deberia seguir siendo la suma de todos")
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -6609,6 +6770,7 @@ def main():
     prueba_18p_radar()
     prueba_18q_salud_base()
     prueba_19a()
+    prueba_19b()
 
     print("\n" + "─" * 60)
     if _FALLOS:

@@ -47,7 +47,14 @@ def trade_metrics(tokens: dict) -> dict:
     m["ventas"] = sum(int(i.get("sells", 0) or 0) for i in tokens.values())
     m["compras"] = sum(int(i.get("buys", 0) or 0) for i in tokens.values())
 
-    closed = [i for i in tokens.values() if i.get("sells", 0) > 0]
+    # (19-B) ESPEJO de `wallet_profiler`: una posicion solo esta "cerrada"
+    # si se vio la compra Y la venta. Sin `buys > 0`, un mint con la
+    # compra fuera de la muestra daba `pnl_sol = sol_in - 0 > 0` — una
+    # ganadora que nunca existio — e inflaba profit_factor, expectancy y
+    # max_drawdown, que son las cifras con las que `grading` corona Elite.
+    # Si esta condicion cambia aqui, cambia alli (y al reves).
+    closed = [i for i in tokens.values()
+              if i.get("sells", 0) > 0 and i.get("buys", 0) > 0]
     if not closed:
         return m
     m["closed"] = len(closed)

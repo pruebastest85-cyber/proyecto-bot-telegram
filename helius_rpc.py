@@ -142,7 +142,31 @@ def _account_data(tx_msg, meta) -> list[dict]:
 
 
 def traducir(entrada: dict) -> dict | None:
-    """Convierte una transacción del RPC al formato que usa el resto del bot."""
+    """Convierte una transacción del RPC al formato que usa el resto del bot.
+
+    (19-B) FALTABA `fee`, y eso sesgaba el PnL de TODO el sistema.
+
+    `wallet_profiler._sol_delta` parte del cambio de SOL nativo de la
+    cuenta (`accountData`), que INCLUYE la comisión de red, y luego se la
+    devuelve para quedarse solo con el precio del token:
+    `return raw + fee + tip`. Lee la comisión de `tx.get("fee", 0)`.
+
+    Este diccionario no traia esa clave, asi que desde que el RPC es la
+    ruta preferente (`USE_RPC_HISTORY=1`, el defecto) `fee` valia SIEMPRE
+    0: cada compra se contabilizaba mas cara de lo que fue y cada venta
+    mas barata. Es exactamente el sesgo sistematico a negativo que el
+    docstring de `_sol_delta` dice haber corregido — y que seguia vivo
+    porque la correccion se escribio para el camino antiguo (la Enhanced
+    API si devuelve `fee`) y nadie la trajo a este.
+
+    Aguas abajo envenenaba `pnl_total`, `net_pnl_sol`, `pnl_30d`, el
+    winrate y el neto de la puerta 1 (que exige > 0 ESTRICTAMENTE) y el
+    veredicto de `grading`. Es aditivo: nadie mas lee esta clave, asi que
+    añadirla no cambia ningun otro consumidor.
+
+    `meta.fee` viene en lamports, que es la unidad que `_sol_delta`
+    espera (divide entre LAMPORTS).
+    """
     try:
         tx = entrada.get("transaction") or {}
         meta = entrada.get("meta") or {}
@@ -152,6 +176,7 @@ def traducir(entrada: dict) -> dict | None:
             "signature": firmas[0] if firmas else "",
             "timestamp": entrada.get("blockTime"),
             "slot": entrada.get("slot"),
+            "fee": meta.get("fee") or 0,
             "feePayer": _fee_payer(msg),
             "transactionError": meta.get("err"),
             "tokenTransfers": _token_transfers(meta),

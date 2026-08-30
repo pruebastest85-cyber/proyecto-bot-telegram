@@ -349,7 +349,26 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
     else:
         result["hold_median_min"] = None
     # Win rate sobre posiciones cerradas
-    closed = [i for i in tokens.values() if i["sells"] > 0]
+    #
+    # (19-B) Exige TAMBIEN haber visto la compra. Con solo `sells > 0`, un
+    # mint cuya compra quedo FUERA de la muestra (o cuyo SOL se atribuyo a
+    # otro mint en una tx multi-token) entraba como cerrada con
+    # `sol_out = 0`, o sea `pnl_sol = sol_in - 0 > 0`: **ganadora
+    # garantizada**. Eso inflaba `win_rate_pct` y, por la misma lista,
+    # `profit_factor`, `expectancy` y `max_drawdown` de `wallet_metrics`
+    # — las cifras con las que `grading` y la IA deciden promover.
+    #
+    # El resultado era un desacople medible: la IA promovia con numeros
+    # optimistas y la puerta 1 del filtro, que SI exige compra
+    # (`filtro_calidad`: `sol_in > 0 and sol_out > 0 and tok_in > 0`),
+    # las tumbaba despues. Medido en la base del dueño el 30/8: el 1,7%
+    # de las posiciones de 90 dias son ventas sin compra en la muestra.
+    #
+    # Lo que NO se toca: el airdrop vendido sigue sumando al
+    # `pnl_total_sol` (es dinero que entro de verdad); lo que deja de
+    # hacer es contar como una posicion ACERTADA.
+    closed = [i for i in tokens.values()
+              if i["sells"] > 0 and i["buys"] > 0]
     if closed:
         result["win_rate_pct"] = round(
             100 * sum(1 for i in closed if i["pnl_sol"] > 0) / len(closed))
@@ -363,8 +382,42 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
         round(100 * sum(1 for h in holds if h <= 1) / len(holds))
         if holds else None)
     # Actividad 24/7: horas del día (0-23) con transacciones; un humano duerme
-    result["active_hours_24"] = len(
-        {time.gmtime(t).tm_hour for t in timestamps if t})
+    #
+    # (19-B) Se mide DENTRO DE UN DIA, no sobre la muestra entera.
+    #
+    # Antes era `len({gmtime(t).tm_hour for t in timestamps})` sobre TODA
+    # la muestra — hasta 5.000 transacciones, que pueden abarcar semanas o
+    # meses. Con eso, cubrir 22 de las 24 horas no prueba que la billetera
+    # no duerma: prueba que ha operado muchos dias distintos. La
+    # esperanza de huecos con 200 transacciones repartidas es
+    # 24·(23/24)^200 ≈ 0,006, o sea que CUALQUIER humano activo cruzaba
+    # el umbral de `ai_analyst._hard_bot_reason` (>= 22 horas y >= 200
+    # txs) y se marcaba `is_bot=1`, que es una condena permanente: sale
+    # de la cola de evaluacion, del /top, de la vigilancia en tiempo real
+    # y se le borra el historial.
+    #
+    # MEDIDO en la base del dueño el 30/8/2026: 3.190 de las 6.827
+    # billeteras marcadas como bot lo estaban por este motivo — casi la
+    # mitad, y el motivo mas frecuente con diferencia. Era el tapon de
+    # ENTRADA del embudo.
+    #
+    # Ahora: el maximo de horas distintas cubiertas EN UN MISMO DIA (UTC),
+    # que es lo que el nombre y el comentario prometian. El valor nuevo es
+    # siempre <= al viejo, asi que este cambio solo puede DESMARCAR: una
+    # billetera que hoy no esta señalada no puede pasar a estarlo.
+    #
+    # OJO: esto arregla los perfilados NUEVOS. Las 3.190 ya marcadas
+    # siguen con `is_bot=1` porque nadie las vuelve a mirar; deshacerlo es
+    # una decision del dueño (ver la nota de entrega de la ola).
+    _horas_por_dia: dict = {}
+    for _t in timestamps:
+        if not _t:
+            continue
+        _g = time.gmtime(_t)
+        _horas_por_dia.setdefault((_g.tm_year, _g.tm_yday), set()).add(
+            _g.tm_hour)
+    result["active_hours_24"] = max(
+        (len(_hs) for _hs in _horas_por_dia.values()), default=0)
     # Compras de tamaño idéntico: % de la compra más repetida
     if len(buy_sizes) >= 5:
         mas_comun = max(buy_sizes.count(s) for s in set(buy_sizes))
