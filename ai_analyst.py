@@ -311,9 +311,27 @@ def cupo_evaluaciones(conn, base: int) -> tuple[int, str]:
         techo = int(getattr(_c, "EVAL_MAX_POR_CICLO", 400))
         suelo = int(getattr(_c, "EVAL_MIN_POR_CICLO", 10))
         coste_def = float(getattr(_c, "EVAL_COSTE_CREDITOS", 300))
-        horas = float(getattr(_c, "AUTO_CYCLE_HOURS", 6)) or 6.0
     except Exception as e:
         return base, f"cupo fijo (no pude leer la configuración: {e})"
+    # (19-L) `AUTO_CYCLE_HOURS` NO vive en `config`: lo lee `telegram_bot`
+    # del entorno y punto. La 19-K hacía `getattr(config,
+    # "AUTO_CYCLE_HOURS", 6)`, que siempre caía al 6 del defecto. Con el
+    # ciclo real del dueño (2 h) eso repartía el presupuesto entre 4
+    # ciclos al día en vez de 12: el cupo salía TRIPLE del que se
+    # pretendía. Se vio porque el número medido en su PC decía "4
+    # ciclos/día" con `AUTO_CYCLE_HOURS=2` en su `.env`.
+    #
+    # Se lee del entorno igual que en `telegram_bot`, y con la misma
+    # tolerancia a erratas: cualquier cosa que no sea un número positivo
+    # razonable cae al defecto, porque un valor absurdo aquí multiplica
+    # el gasto.
+    horas = 6.0
+    try:
+        _h = float(os.getenv("AUTO_CYCLE_HOURS", "6"))
+        if 0 < _h <= 168:
+            horas = _h
+    except (TypeError, ValueError):
+        pass
     try:
         import helius_budget as hb
         usados = hb.creditos_usados(conn)

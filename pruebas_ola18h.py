@@ -8286,6 +8286,7 @@ def prueba_19k():
     import asyncio as _aio
     import contextlib
     import io
+    import os as _os
     import time as _tt
     import types as _ty
     import config as cfg
@@ -8298,7 +8299,7 @@ def prueba_19k():
     conn = get_conn()
     prev = {k: getattr(cfg, k, None) for k in
             ("EVAL_ADAPTATIVO", "EVAL_MAX_POR_CICLO", "EVAL_MIN_POR_CICLO",
-             "EVAL_COSTE_CREDITOS", "MAX_EVAL_PER_CYCLE", "AUTO_CYCLE_HOURS",
+             "EVAL_COSTE_CREDITOS", "MAX_EVAL_PER_CYCLE",
              "MIN_WINNING_TOKENS", "MIN_BUY_SOL", "MIN_ENTRY_MULTIPLE")}
     _usados_real = hb.creditos_usados
     _dia_real = hb.dia_del_ciclo
@@ -8329,7 +8330,6 @@ def prueba_19k():
         cfg.EVAL_MAX_POR_CICLO = 400
         cfg.EVAL_MIN_POR_CICLO = 10
         cfg.EVAL_COSTE_CREDITOS = 300
-        cfg.AUTO_CYCLE_HOURS = 2.0
 
         # ── 1) El cupo sale del presupuesto que QUEDA ────────────────
         # Con la cuota casi intacta el cupo sube MUY por encima del
@@ -8342,6 +8342,47 @@ def prueba_19k():
                   cupo > 50, f"cupo={cupo} · {por}")
         comprobar("pero NUNCA pasa del techo duro",
                   cupo <= cfg.EVAL_MAX_POR_CICLO, cupo)
+
+        # ── 1a) AUTO_CYCLE_HOURS sale del ENTORNO, no de `config` ────
+        # La 19-K lo leia con getattr(config, "AUTO_CYCLE_HOURS", 6) y
+        # ese atributo NO EXISTE en config: solo vive en el entorno, que
+        # es de donde lo lee telegram_bot. Siempre caia al 6 del
+        # defecto, asi que con el ciclo real del dueño (2 h) repartia el
+        # presupuesto entre 4 ciclos al dia en vez de 12 y el cupo salia
+        # TRIPLE. Un fallo de reparto aqui es gasto irreversible.
+        import config as _cfg_mod
+        comprobar("AUTO_CYCLE_HOURS no esta en config (por eso hay que "
+                  "leerlo del entorno)",
+                  not hasattr(_cfg_mod, "AUTO_CYCLE_HOURS"),
+                  "si alguien lo añade a config, este comentario y la "
+                  "lectura de os.getenv hay que revisarlos")
+        _env_prev = _os.environ.get("AUTO_CYCLE_HOURS")
+        try:
+            hb.creditos_usados = lambda c: 0
+            hb.dia_del_ciclo = lambda c=None: 1
+            cfg.EVAL_MAX_POR_CICLO = 100000     # que no estorbe el techo
+            _os.environ["AUTO_CYCLE_HOURS"] = "2"
+            c2, p2 = aa.cupo_evaluaciones(conn, 50)
+            comprobar("con el ciclo de 2 h cuenta 12 ciclos al dia",
+                      "12 ciclos/día" in p2, p2)
+            _os.environ["AUTO_CYCLE_HOURS"] = "6"
+            c6, p6 = aa.cupo_evaluaciones(conn, 50)
+            comprobar("con el ciclo de 6 h cuenta 4",
+                      "4 ciclos/día" in p6, p6)
+            comprobar("y el cupo de 2 h es la TERCERA parte del de 6 h "
+                      "(el mismo gasto diario, repartido en mas ciclos)",
+                      abs(c2 * 3 - c6) <= 3, f"2h={c2} · 6h={c6}")
+            _os.environ["AUTO_CYCLE_HOURS"] = "0"
+            _c0, p0 = aa.cupo_evaluaciones(conn, 50)
+            comprobar("un AUTO_CYCLE_HOURS invalido cae al defecto, no "
+                      "revienta ni divide por cero",
+                      "4 ciclos/día" in p0, p0)
+        finally:
+            if _env_prev is None:
+                _os.environ.pop("AUTO_CYCLE_HOURS", None)
+            else:
+                _os.environ["AUTO_CYCLE_HOURS"] = _env_prev
+            cfg.EVAL_MAX_POR_CICLO = 400
 
         # ── 1b) El TECHO duro muerde de verdad ──────────────────────
         # El ultimo dia del ciclo con la cuota casi intacta el reparto da
