@@ -7841,6 +7841,129 @@ def prueba_19g():
 
 
 
+# ---------------------------------------------------------------------
+# OLA 19-H - /copiapura on pone al dia el preset sin pasar por el estado
+# apagado, que es el peligroso.
+# ---------------------------------------------------------------------
+def prueba_19h():
+    bloque("19-H - /copiapura on re-aplica sin tener que apagar")
+    import asyncio as _aio
+    import contextlib
+    import io
+    import json as _json
+    import types as _ty
+    import telegram_bot as tb
+    from db import get_conn, get_setting, set_setting
+
+    conn = get_conn()
+    dichos = []
+
+    class _Chat:
+        async def send_message(self, txt, **k):
+            dichos.append(txt)
+
+    class _Msg:
+        chat = _Chat()
+
+        async def reply_text(self, txt, **k):
+            dichos.append(txt)
+
+    upd = _ty.SimpleNamespace(message=_Msg(),
+                              effective_user=_ty.SimpleNamespace(id=1))
+
+    def correr(*args):
+        dichos.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _aio.run(tb.cmd_copia_pura(upd, _ty.SimpleNamespace(
+                args=list(args))))
+        return dichos[-1] if dichos else ""
+
+    _prev_estado = {k: get_setting(conn, k, None) for k in tb._COPIA_PURA}
+    _prev_foto = get_setting(conn, "copia_pura_previo", None)
+    try:
+        # ── 1) _mismo_ajuste no confunde formatos ────────────────────
+        comprobar("'50' y '50.0' son el mismo ajuste",
+                  tb._mismo_ajuste("50.0", "50"),
+                  "si no, el preset se re-aplicaría entero cada vez")
+        comprobar("'100' y '95' NO son el mismo ajuste",
+                  not tb._mismo_ajuste("100", "95"))
+        comprobar("un ajuste sin fijar (None) cuenta como desviado",
+                  not tb._mismo_ajuste(None, "95"))
+        comprobar("y los no numéricos se comparan como texto",
+                  tb._mismo_ajuste("local", "local")
+                  and not tb._mismo_ajuste("nube", "local"))
+
+        # ── 2) El escenario REAL del dueño: encendida con un ajuste
+        #      desviado porque el preset cambió en una versión nueva.
+        _foto = {k: None for k in tb._COPIA_PURA}
+        _foto["ia_local_activa"] = "1"
+        set_setting(conn, "copia_pura_previo",
+                    _json.dumps(_foto, ensure_ascii=False))
+        for k, v in tb._COPIA_PURA.items():
+            set_setting(conn, k, v)
+        set_setting(conn, "paper_total_pct", "100")     # el valor viejo
+        conn.commit()
+
+        _txt = correr("on")
+        comprobar("con la copia pura YA encendida, /copiapura on corrige "
+                  "el ajuste desviado",
+                  tb._mismo_ajuste(get_setting(conn, "paper_total_pct", None),
+                                   tb._COPIA_PURA["paper_total_pct"]),
+                  f"paper_total_pct quedó en "
+                  f"{get_setting(conn, 'paper_total_pct', None)!r}")
+        comprobar("y dice exactamente qué cambió",
+                  "paper_total_pct" in _txt and "100" in _txt,
+                  f"respuesta = {_txt[:120]!r}")
+
+        # Lo CRÍTICO: en ningún momento se pasa por los valores de
+        # fábrica. Si el TP/SL/reloj quedaran vivos aunque fuera un
+        # instante, el job de 15 min podría cerrar posiciones de días.
+        for k, d in (("paper_tp_pct", 100.0), ("paper_sl_pct", 50.0),
+                     ("paper_timeout_h", 48.0)):
+            import paper_trading as _pt
+            comprobar(f"{k} sigue desactivado (nunca vuelve al defecto "
+                      f"de fábrica {d:g})",
+                      _pt._f(conn, k, d) >= 999999,
+                      f"vale {_pt._f(conn, k, d)} — con el defecto vivo, "
+                      f"el job de 15 min cerraría posiciones que el dueño "
+                      f"quiere holdear")
+
+        # ── 3) La foto para deshacer NO se pisa ──────────────────────
+        _foto2 = _json.loads(get_setting(conn, "copia_pura_previo", "{}"))
+        comprobar("la foto de los valores previos sobrevive intacta",
+                  _foto2 == _foto,
+                  "si se re-guardara, /copiapura off restauraría los "
+                  "valores del MODO en vez de los originales: el modo "
+                  "dejaría de poder apagarse de verdad")
+
+        # ── 4) Sin desviaciones, no toca nada y lo dice ──────────────
+        _txt = correr("on")
+        comprobar("una segunda pasada no encuentra nada que corregir",
+                  "cuadran" in _txt, f"respuesta = {_txt[:100]!r}")
+
+        # ── 5) Y encender desde APAGADO sigue funcionando igual ──────
+        set_setting(conn, "copia_pura_previo", "")
+        conn.commit()
+        _txt = correr("on")
+        comprobar("desde apagado, /copiapura on enciende como siempre",
+                  "ENCENDIDA" in _txt, f"respuesta = {_txt[:100]!r}")
+        comprobar("y aplica el preset entero, con el valor NUEVO",
+                  all(tb._mismo_ajuste(get_setting(conn, k, None), v)
+                      for k, v in tb._COPIA_PURA.items()),
+                  {k: get_setting(conn, k, None) for k in tb._COPIA_PURA})
+        comprobar("guardando la foto para poder deshacer",
+                  bool(get_setting(conn, "copia_pura_previo", "")))
+    finally:
+        for k, v in _prev_estado.items():
+            if v is not None:
+                set_setting(conn, k, v)
+        if _prev_foto is not None:
+            set_setting(conn, "copia_pura_previo", _prev_foto)
+        conn.commit()
+        conn.close()
+
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -7878,6 +8001,7 @@ def main():
     prueba_19e()
     prueba_19f()
     prueba_19g()
+    prueba_19h()
 
     print("\n" + "─" * 60)
     if _FALLOS:

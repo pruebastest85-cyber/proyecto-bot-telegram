@@ -1667,6 +1667,22 @@ _COPIA_PURA = {
 }
 
 
+def _mismo_ajuste(a, b) -> bool:
+    """(19-H) ¿El ajuste guardado significa lo mismo que el del preset?
+
+    Compara por NUMERO cuando los dos lo son: `set_setting` guarda texto y
+    distintos caminos escriben "50", "50.0" o 50 para el mismo valor, así
+    que un `!=` de cadenas daría diferencias que no lo son y re-aplicaría
+    el preset entero cada vez.
+    """
+    if a is None:
+        return False
+    try:
+        return float(str(a).strip()) == float(str(b).strip())
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
 @solo_admin
 async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Enciende o apaga el modo copia pura del paper trading.
@@ -1695,7 +1711,58 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         "salidas).\nEncender: `/copiapura on`")
             if accion == "on":
                 if activo:
-                    return "🧬 Ya estaba encendida. `/copiapura off` la quita."
+                    # ── (19-H) YA ENCENDIDA: RE-APLICAR LO DESVIADO ──
+                    #
+                    # Antes respondía "Ya estaba encendida" y se iba. El
+                    # problema es que los ajustes viven en `settings` y el
+                    # preset vive en el CÓDIGO: en cuanto el preset cambia
+                    # (la 19-C bajó `paper_total_pct` de 100 a 95, porque
+                    # con 100 la rama de cierre total era inalcanzable y
+                    # dejaba posiciones vivas que nada podía cerrar), la
+                    # base se queda con el valor viejo y no había forma de
+                    # ponerla al día salvo `/copiapura off` + `on`.
+                    #
+                    # Y ese rodeo es PELIGROSO, no un incordio. Al apagar
+                    # se restauran los valores previos, que en esta
+                    # instalación son None —el dueño nunca configuró un TP
+                    # ni un SL— y None se guarda como CADENA VACÍA, que no
+                    # desactiva nada: `_f` hace `float("" or 100.0)` y
+                    # devuelve el DEFECTO DEL CÓDIGO. O sea que durante
+                    # esos segundos vuelven un take-profit del +100%, un
+                    # stop-loss del −50% y un reloj de 48 h que nadie
+                    # pidió — y el job del paper corre cada 15 min: si cae
+                    # en medio, cierra por "tiempo" posiciones de más de
+                    # dos días. Nadie debería arriesgar eso para corregir
+                    # un ajuste.
+                    #
+                    # `copia_pura_previo` NO se vuelve a guardar: la foto
+                    # de lo que había ANTES de encender el modo tiene que
+                    # sobrevivir, o `/copiapura off` dejaría de poder
+                    # restaurar lo original.
+                    _cambios = []
+                    for k, v in _COPIA_PURA.items():
+                        _act = get_setting(conn, k, None)
+                        if not _mismo_ajuste(_act, v):
+                            set_setting(conn, k, v)
+                            _cambios.append((k, _act, v))
+                    if not _cambios:
+                        return ("🧬 Ya estaba encendida y los nueve "
+                                "ajustes cuadran con el modo.\n"
+                                "`/copiapura off` la quita.")
+                    conn.commit()
+                    _det = "\n".join(
+                        "• `{}`: {} → *{}*".format(
+                            _k, _a if _a not in (None, "") else "(sin fijar)",
+                            _v)
+                        for _k, _a, _v in _cambios)
+                    _plural = ("ajustes no cuadraban" if len(_cambios) > 1
+                               else "ajuste no cuadraba")
+                    return ("🧬 *Ya estaba encendida, pero {} {} con el "
+                            "modo.*\nLos he vuelto a poner:\n\n{}\n\n"
+                            "_No he tocado la foto de los valores previos: "
+                            "`/copiapura off` sigue restaurando lo que "
+                            "había antes de encenderla._".format(
+                                len(_cambios), _plural, _det))
                 previo = {k: get_setting(conn, k, None)
                           for k in _COPIA_PURA}
                 set_setting(conn, "copia_pura_previo",
