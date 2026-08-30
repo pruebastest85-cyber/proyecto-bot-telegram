@@ -8281,6 +8281,310 @@ def prueba_19j():
         conn.close()
 
 
+def prueba_19k():
+    bloque("19-K - cupo por presupuesto y vaciado de la cola de una sentada")
+    import asyncio as _aio
+    import contextlib
+    import io
+    import time as _tt
+    import types as _ty
+    import config as cfg
+    import ai_analyst as aa
+    import helius_budget as hb
+    import telegram_bot as tb
+    import vaciar_cola as vc
+    from db import get_conn
+
+    conn = get_conn()
+    prev = {k: getattr(cfg, k, None) for k in
+            ("EVAL_ADAPTATIVO", "EVAL_MAX_POR_CICLO", "EVAL_MIN_POR_CICLO",
+             "EVAL_COSTE_CREDITOS", "MAX_EVAL_PER_CYCLE", "AUTO_CYCLE_HOURS",
+             "MIN_WINNING_TOKENS", "MIN_BUY_SOL", "MIN_ENTRY_MULTIPLE")}
+    _usados_real = hb.creditos_usados
+    _dia_real = hb.dia_del_ciclo
+    dichos = []
+
+    class _Chat:
+        async def send_message(self, txt, **k):
+            dichos.append(txt)
+
+    class _Msg:
+        chat = _Chat()
+
+        async def reply_text(self, txt, **k):
+            dichos.append(txt)
+
+    upd = _ty.SimpleNamespace(message=_Msg(),
+                              effective_user=_ty.SimpleNamespace(id=1))
+
+    def correr(*args):
+        dichos.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _aio.run(tb.cmd_vaciar_cola(upd, _ty.SimpleNamespace(
+                args=list(args))))
+        return dichos[-1] if dichos else ""
+
+    try:
+        cfg.EVAL_ADAPTATIVO = 1
+        cfg.EVAL_MAX_POR_CICLO = 400
+        cfg.EVAL_MIN_POR_CICLO = 10
+        cfg.EVAL_COSTE_CREDITOS = 300
+        cfg.AUTO_CYCLE_HOURS = 2.0
+
+        # ── 1) El cupo sale del presupuesto que QUEDA ────────────────
+        # Con la cuota casi intacta el cupo sube MUY por encima del
+        # numero fijo: ese era justo el desperdicio (1,5 M de 10 M
+        # gastados y la cola sin bajar).
+        hb.creditos_usados = lambda c: 0
+        hb.dia_del_ciclo = lambda c=None: 1
+        cupo, por = aa.cupo_evaluaciones(conn, 50)
+        comprobar("con la cuota intacta el cupo sube sobre el fijo",
+                  cupo > 50, f"cupo={cupo} · {por}")
+        comprobar("pero NUNCA pasa del techo duro",
+                  cupo <= cfg.EVAL_MAX_POR_CICLO, cupo)
+
+        # ── 1b) El TECHO duro muerde de verdad ──────────────────────
+        # El ultimo dia del ciclo con la cuota casi intacta el reparto da
+        # miles por ciclo (8,5 M / 1 dia / 12 ciclos / 300 = 2.361). Sin
+        # techo, un ciclo lanzaria 2.361 perfilados de golpe y ese gasto
+        # NO se puede deshacer. El techo existe para eso, no de adorno.
+        hb.creditos_usados = lambda c: 0
+        hb.dia_del_ciclo = lambda c=None: 30
+        cupo_t, por_t = aa.cupo_evaluaciones(conn, 50)
+        comprobar("el ultimo dia del ciclo el reparto se dispara…",
+                  int(hb.CUOTA_MENSUAL * hb.FRENO_PCT / 100.0
+                      / 1 / 12 / 300) > cfg.EVAL_MAX_POR_CICLO,
+                  "el escenario ya no dispara el techo: prueba invalida")
+        comprobar("…y el techo duro lo corta en seco",
+                  cupo_t == cfg.EVAL_MAX_POR_CICLO,
+                  f"cupo={cupo_t} · techo={cfg.EVAL_MAX_POR_CICLO} · {por_t}")
+
+        # ── 2) Con la cuota casi gastada, RECORTA por debajo del fijo ─
+        # Aqui esta el valor de todo esto: un numero fijo seguiria
+        # gastando igual el ultimo dia del ciclo con la cuota en las
+        # ultimas.
+        hb.creditos_usados = lambda c: int(hb.CUOTA_MENSUAL * 0.84)
+        hb.dia_del_ciclo = lambda c=None: 20
+        cupo2, por2 = aa.cupo_evaluaciones(conn, 50)
+        comprobar("con la cuota casi gastada el cupo BAJA del fijo",
+                  cupo2 < 50, f"cupo={cupo2} · {por2}")
+        comprobar("y lo dice en el motivo, no lo hace en silencio",
+                  "RECORTADO" in por2, por2)
+
+        # ── 3) Pasado el freno, cupo CERO ────────────────────────────
+        hb.creditos_usados = lambda c: int(hb.CUOTA_MENSUAL * 0.90)
+        cupo3, por3 = aa.cupo_evaluaciones(conn, 50)
+        comprobar("pasado el freno del 85% el cupo es CERO",
+                  cupo3 == 0, f"cupo={cupo3} · {por3}")
+
+        # ── 4) El interruptor devuelve el numero fijo ────────────────
+        cfg.EVAL_ADAPTATIVO = 0
+        cupo4, por4 = aa.cupo_evaluaciones(conn, 50)
+        comprobar("EVAL_ADAPTATIVO=0 devuelve el numero fijo de siempre",
+                  cupo4 == 50, f"cupo={cupo4} · {por4}")
+        cfg.EVAL_ADAPTATIVO = 1
+
+        # ── 5) `limite` manda sobre el cupo (lo usa /vaciarcola) ─────
+        vistos = {}
+        _prof_real = aa.profile_wallet
+
+        def _perfil_falso(addr):
+            vistos[addr] = vistos.get(addr, 0) + 1
+            return {"tx_sampled": 0}
+        try:
+            aa.profile_wallet = _perfil_falso
+            conn.execute("DELETE FROM wallets")
+            conn.execute("DELETE FROM appearances")
+            for i in range(12):
+                w = f"COLA{i:02d}"
+                conn.execute(
+                    "INSERT INTO wallets (address, winning_tokens_count, "
+                    "is_bot, is_tracked) VALUES (?,3,0,0)", (w,))
+                conn.execute(
+                    "INSERT INTO appearances (wallet, mint, reason, "
+                    "buy_sol, entry_multiple) VALUES (?,?,'x',5.0,10.0)",
+                    (w, f"M{i}"))
+            conn.commit()
+            with contextlib.redirect_stdout(io.StringIO()):
+                aa.evaluate_tracked(conn, limite=4)
+            comprobar("con `limite` se perfilan EXACTAMENTE esas",
+                      len(vistos) == 4, f"perfiladas {len(vistos)}")
+            comprobar("y `limite=0` no perfila a nadie",
+                      aa.evaluate_tracked(conn, limite=0) == 0)
+
+            # ── 6) en_cola() cuenta LO MISMO que evaluate_tracked mira ─
+            # Las dos consultas estan escritas por separado; esta prueba
+            # existe para que no se separen en silencio.
+            comprobar("vaciar_cola.en_cola() cuadra con la cola real",
+                      vc.en_cola(conn) == 12, vc.en_cola(conn))
+        finally:
+            aa.profile_wallet = _prof_real
+
+        # ── 7) El ensayo del mando no arranca nada ───────────────────
+        hb.creditos_usados = lambda c: 100_000
+        hb.dia_del_ciclo = lambda c=None: 5
+        _txt = correr()
+        comprobar("/vaciarcola sin argumento es un ENSAYO",
+                  "Ensayo" in _txt, _txt[:120])
+        comprobar("el ensayo enseña cola, coste y margen",
+                  "En cola" in _txt and "créditos" in _txt
+                  and "freno" in _txt, _txt[:200])
+        comprobar("el ensayo NO arranca el vaciado", not vc.corriendo())
+
+        # ── 8) `parar` y `estado` sin nada en marcha ─────────────────
+        comprobar("parar sin nada en marcha lo dice",
+                  "ningún vaciado" in correr("parar"))
+        comprobar("estado sin nada en marcha lo dice",
+                  "ningún vaciado" in correr("estado"))
+
+        # ── 9) Un numero de creditos mal escrito no arranca nada ─────
+        _txt = correr("si", "mil")
+        comprobar("un techo que no es un numero se rechaza sin arrancar",
+                  "No entiendo" in _txt and not vc.corriendo(), _txt[:100])
+
+        # ── 10) El bucle respeta el FRENO sin gastar un credito ──────
+        # Se comprueba de verdad: si arrancara igual, `_un_trozo` habria
+        # corrido al menos una vez.
+        trozos = []
+        _trozo_real = vc._un_trozo
+        _puede_real = hb.puede_llamar
+        try:
+            vc._un_trozo = lambda lim: trozos.append(lim) or 0
+            hb.puede_llamar = lambda conn=None: False
+            avisos = []
+            vc.arrancar(techo_creditos=0, avisar=avisos.append)
+            for _ in range(50):
+                if not vc.corriendo():
+                    break
+                _tt.sleep(0.05)
+            comprobar("con el freno activo el vaciado no perfila NADA",
+                      trozos == [], trozos)
+            comprobar("y dice por que se paro",
+                      "freno" in vc.estado()["motivo_fin"],
+                      vc.estado()["motivo_fin"])
+
+            # ── 11) Con la cola vacia termina solo ───────────────────
+            hb.puede_llamar = lambda conn=None: True
+            trozos.clear()
+            vc.arrancar(techo_creditos=0, avisar=avisos.append)
+            for _ in range(50):
+                if not vc.corriendo():
+                    break
+                _tt.sleep(0.05)
+            comprobar("con la cola vacia hace una pasada y para",
+                      len(trozos) == 1, trozos)
+            comprobar("y avisa al terminar",
+                      any("terminado" in a for a in avisos), avisos[-2:])
+
+            # ── 11a) Candado ocupado NO es cola vacia ────────────────
+            # `_un_trozo` devuelve -1 cuando el ciclo automatico tiene el
+            # `cycle_lock`. Eso NO es un fallo ni el final: es "vuelve
+            # luego". Si se confundiera con el 0 de "cola vacia", lanzar
+            # /vaciarcola justo mientras corre el ciclo automatico
+            # abortaria el vaciado en silencio y el dueño creeria que se
+            # ha hecho.
+            _esp = vc.ESPERA_CANDADO
+            _vueltas = {"n": 0}
+
+            def _ocupado_luego_vacio(lim):
+                _vueltas["n"] += 1
+                return -1 if _vueltas["n"] <= 3 else 0
+            try:
+                vc.ESPERA_CANDADO = 0.01
+                vc._un_trozo = _ocupado_luego_vacio
+                vc.arrancar(techo_creditos=0, avisar=None)
+                for _ in range(80):
+                    if not vc.corriendo():
+                        break
+                    _tt.sleep(0.05)
+                comprobar("con el candado ocupado espera y REINTENTA, "
+                          "no aborta",
+                          _vueltas["n"] == 4, f"{_vueltas['n']} intentos")
+                comprobar("y solo termina cuando la cola esta de verdad "
+                          "vacia",
+                          vc.estado()["motivo_fin"] == "cola vacía",
+                          vc.estado()["motivo_fin"])
+                # Y el -1 NO se suma al contador: si se confundiera con
+                # un numero de perfiladas, cada espera por el candado
+                # RESTARIA una del total y el informe final mentiria
+                # (con 3 esperas: "-3 perfiladas").
+                comprobar("una espera por el candado no cuenta como "
+                          "billetera perfilada",
+                          vc.estado()["hechas"] == 0,
+                          f"hechas={vc.estado()['hechas']} tras 3 esperas")
+            finally:
+                vc.ESPERA_CANDADO = _esp
+
+            # ── 11b) El TECHO de creditos para el vaciado ────────────
+            # Sin esto, `/vaciarcola si 1000000` mentiria: el dueño cree
+            # que ha puesto un limite de gasto y el bucle seguiria hasta
+            # el freno del 85%, que esta MUY por encima. Se simula un
+            # contador de creditos que sube en cada vuelta.
+            _gasto = {"n": 0}
+
+            def _sube(c=None):
+                _gasto["n"] += 400
+                return _gasto["n"]
+            _usados_guardado = hb.creditos_usados
+            try:
+                hb.creditos_usados = _sube
+                trozos.clear()
+                vc._un_trozo = lambda lim: trozos.append(lim) or 1
+                vc.arrancar(techo_creditos=1000, avisar=None)
+                for _ in range(80):
+                    if not vc.corriendo():
+                        break
+                    _tt.sleep(0.05)
+                comprobar("el vaciado se para al llegar al techo de "
+                          "creditos que puso el dueño",
+                          "techo" in vc.estado()["motivo_fin"],
+                          vc.estado()["motivo_fin"])
+                comprobar("y para PRONTO, no cuando le apetece",
+                          len(trozos) <= 4,
+                          f"{len(trozos)} trozos con techo de 1.000 "
+                          f"creditos y 400 por vuelta")
+            finally:
+                hb.creditos_usados = _usados_guardado
+            vc._un_trozo = lambda lim: trozos.append(lim) or 0
+
+            # ── 12) No se pueden lanzar DOS a la vez ─────────────────
+            # Dos bucles perfilando la misma cola gastarian la cuota dos
+            # veces sobre las mismas billeteras.
+            vc._un_trozo = lambda lim: (_tt.sleep(0.3), 1)[1]
+            comprobar("el primero arranca", vc.arrancar(avisar=None))
+            comprobar("el segundo NO arranca mientras corre el primero",
+                      not vc.arrancar(avisar=None))
+            comprobar("parar() devuelve True cuando hay uno corriendo",
+                      vc.parar())
+            for _ in range(80):
+                if not vc.corriendo():
+                    break
+                _tt.sleep(0.05)
+            comprobar("y el bucle se entera y termina",
+                      not vc.corriendo() and
+                      "parado a mano" in vc.estado()["motivo_fin"],
+                      vc.estado()["motivo_fin"])
+        finally:
+            vc._un_trozo = _trozo_real
+            hb.puede_llamar = _puede_real
+
+        # ── 13) El mando esta dado de alta ───────────────────────────
+        import io as _io
+        comprobar("/vaciarcola esta dado de alta en el bot",
+                  'CommandHandler("vaciarcola"' in _io.open(
+                      tb.__file__, encoding="utf-8").read())
+    finally:
+        hb.creditos_usados = _usados_real
+        hb.dia_del_ciclo = _dia_real
+        for k, v in prev.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM appearances")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -8320,6 +8624,7 @@ def main():
     prueba_19g()
     prueba_19h()
     prueba_19j()
+    prueba_19k()
 
     print("\n" + "─" * 60)
     if _FALLOS:

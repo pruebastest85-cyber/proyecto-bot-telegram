@@ -2101,6 +2101,119 @@ async def cmd_reembudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_vaciar_cola(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Perfila de una sentada TODA la cola de billeteras en espera.
+
+    /vaciarcola              → ensayo: cuántas hay y cuánto costaría.
+    /vaciarcola si           → lo lanza, hasta vaciarla o hasta el freno.
+    /vaciarcola si 1000000   → igual, pero parando a 1 M de créditos.
+    /vaciarcola parar        → alto inmediato (acaba el trozo en curso).
+    /vaciarcola estado       → por dónde va.
+
+    (19-K) Medido el 30/8: 8.647 en cola, 8.617 sin perfilar nunca. A 50
+    por ciclo eran 14 días, y entran nuevas cada día.
+    """
+    import vaciar_cola as vc
+    args = [a.strip().lower() for a in (ctx.args or [])]
+    accion = args[0] if args else ""
+    chat = update.message.chat
+
+    if accion == "parar":
+        txt = ("🛑 Parando: el trozo en curso termina y ahí se queda."
+               if vc.parar() else "No hay ningún vaciado en marcha.")
+        await _send_md(chat, txt)
+        return
+
+    if accion == "estado":
+        e = vc.estado()
+        if not e["corriendo"]:
+            await _send_md(chat, (
+                f"⏹️ Parado. Último vaciado: *{e['hechas']:,}* "
+                f"perfiladas · {e['motivo_fin']}") if e["hechas"]
+                else "No hay ningún vaciado en marcha.")
+            return
+        _h = (_t.time() - e["inicio"]) / 3600 if e["inicio"] else 0
+        await _send_md(chat, (
+            f"⏳ *Vaciando la cola*\nPerfiladas: *{e['hechas']:,}* "
+            f"en {_h:.1f} h\nPararlo: `/vaciarcola parar`"))
+        return
+
+    if accion in ("si", "sí", "yes") and vc.corriendo():
+        await _send_md(chat, "Ya hay un vaciado en marcha. "
+                             "Mira `/vaciarcola estado`.")
+        return
+
+    def _numeros() -> dict:
+        conn = get_conn()
+        try:
+            return vc.ensayo(conn)
+        finally:
+            conn.close()
+
+    d = await asyncio.to_thread(_numeros)
+    if not d["en_cola"]:
+        await _send_md(chat, "✅ La cola está vacía: no hay nadie "
+                             "esperando perfilado.")
+        return
+
+    if accion not in ("si", "sí", "yes"):
+        _horas = d["en_cola"] * 3.0 / 3600      # ~3 s por billetera
+        _cabe = ("sí" if d["total"] <= d["hasta_freno"]
+                 else f"NO — solo caben {d['caben']:,}")
+        await _send_md(chat, (
+            f"🧪 *Ensayo de vaciado de cola*\n\n"
+            f"En cola: *{d['en_cola']:,}* billeteras\n"
+            f"Coste por perfilado: {d['coste']:,.0f} créditos "
+            f"_({d['coste_origen']})_\n"
+            f"Coste total estimado: *{d['total']:,}* créditos\n"
+            f"Margen hasta el freno del 85%: {d['hasta_freno']:,}\n"
+            f"¿Cabe entero? *{_cabe}*\n"
+            f"Tardaría: ~{_horas:.1f} h\n\n"
+            f"Lanzarlo: `/vaciarcola si`\n"
+            f"Con techo de gasto: `/vaciarcola si 1000000`\n\n"
+            f"_Se para solo al vaciar la cola, al llegar al freno o al "
+            f"techo que pongas. Puedes cortarlo con_ `/vaciarcola parar`_. "
+            f"Perfilar NO da estrellas: cuando acabe, `/promover` decide "
+            f"con lo aprendido, y eso es gratis._"))
+        return
+
+    techo = 0
+    if len(args) > 1:
+        try:
+            techo = max(0, int(float(args[1].replace(".", "")
+                                     .replace(",", ""))))
+        except (TypeError, ValueError):
+            await _send_md(chat, f"No entiendo `{args[1]}` como número de "
+                                 f"créditos. Ejemplo: "
+                                 f"`/vaciarcola si 1000000`")
+            return
+
+    _loop = asyncio.get_running_loop()
+
+    def _avisar(texto: str) -> None:
+        # El bucle vive en un hilo suyo y no puede tocar el event loop de
+        # Telegram directamente. `run_coroutine_threadsafe` devuelve el
+        # aviso al hilo correcto.
+        try:
+            asyncio.run_coroutine_threadsafe(_send_md(chat, texto), _loop)
+        except Exception as e:
+            print(f"· vaciarcola: aviso perdido ({e})")
+
+    if not vc.arrancar(techo_creditos=techo, avisar=_avisar):
+        await _send_md(chat, "Ya hay un vaciado en marcha.")
+        return
+    await _send_md(chat, (
+        f"🚀 *Vaciado en marcha.*\n\n"
+        f"{d['en_cola']:,} billeteras · ~{d['total']:,} créditos · "
+        f"~{d['en_cola'] * 3.0 / 3600:.1f} h\n"
+        + (f"Techo de gasto: {techo:,} créditos\n" if techo else "")
+        + f"\nVa en trozos de {vc.TROZO}, soltando el candado entre uno "
+          f"y otro, así que el ciclo automático y tus mandos siguen "
+          f"funcionando.\nTe aviso cada 500 y al terminar.\n"
+          f"Cortarlo: `/vaciarcola parar`"))
+
+
+@solo_admin
 async def cmd_promover(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Da estrella a las que pasan el embudo y no la tienen.
 
@@ -2490,6 +2603,7 @@ async def _post_init(app: Application):
             BotCommand("filtro", "Las tres puertas de la estrella"),
             BotCommand("reembudo", "Re-evaluar TODAS con el embudo"),
             BotCommand("promover", "Dar ⭐ a las que pasan el embudo"),
+            BotCommand("vaciarcola", "Perfilar TODA la cola de golpe"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -3215,6 +3329,7 @@ def main():
     app.add_handler(CommandHandler("filtro", cmd_filtro))
     app.add_handler(CommandHandler("reembudo", cmd_reembudo))
     app.add_handler(CommandHandler("promover", cmd_promover))
+    app.add_handler(CommandHandler("vaciarcola", cmd_vaciar_cola))
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))

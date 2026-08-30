@@ -121,7 +121,25 @@ MIN_WINNING_TOKENS = _int("MIN_WINNING_TOKENS", 1)
 # descubrimiento). Protege el webhook de Helius y el coste de evaluación.
 MAX_TRACKED_CANDIDATES = _int("MAX_TRACKED_CANDIDATES", 60)
 # Tope de billeteras que la IA perfila+evalúa por ciclo (coste Helius+IA).
+# (19-K) Con EVAL_ADAPTATIVO=1 esto pasa a ser el SUELO, no el tope: el
+# cupo real de cada ciclo lo calcula `ai_analyst.cupo_evaluaciones` con
+# el presupuesto de Helius que queda. El porqué, ahí.
 MAX_EVAL_PER_CYCLE = _int("MAX_EVAL_PER_CYCLE", 15)
+# (19-K) Cupo de perfilado ajustado al presupuesto que queda del ciclo.
+# 0 = volver al número fijo de MAX_EVAL_PER_CYCLE.
+EVAL_ADAPTATIVO = _int("EVAL_ADAPTATIVO", 1)
+# Techo duro del cupo por ciclo, pase lo que pase con el presupuesto.
+# Existe para que un error de cálculo no lance miles de perfilados de
+# golpe: ese gasto sería irreversible.
+EVAL_MAX_POR_CICLO = _int("EVAL_MAX_POR_CICLO", 400)
+# Suelo del cupo cuando el presupuesto da para ello. Evita que un ciclo
+# se quede en 1-2 perfilados y el embudo se pare.
+EVAL_MIN_POR_CICLO = _int("EVAL_MIN_POR_CICLO", 10)
+# Créditos que cuesta perfilar UNA billetera. Solo se usa mientras no
+# haya datos del ciclo para medirlo de verdad. Medido el 30/8 sobre
+# 7.798 perfilados reales: 279 (incluye tiempo real y radar, así que
+# sobreestima). Se deja en 300 por el lado seguro.
+EVAL_COSTE_CREDITOS = _int("EVAL_COSTE_CREDITOS", 300)
 # Presupuesto de atención: máximo de ⭐ en seguimiento activo. Si se supera,
 # las de menor Priority Score descienden. Mantiene el sistema ordenado.
 MAX_ELITE = _int("MAX_ELITE", 500)

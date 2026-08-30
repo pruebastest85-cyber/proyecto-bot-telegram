@@ -272,11 +272,109 @@ def _bump(conn, key: str, n: int = 1):
         pass
 
 
-def evaluate_tracked(conn) -> int:
+def cupo_evaluaciones(conn, base: int) -> tuple[int, str]:
+    """(19-K) Cuántas billeteras perfilar en ESTE ciclo, según el
+    presupuesto de Helius que queda.
+
+    El problema: `MAX_EVAL_PER_CYCLE` es un número fijo. Con 50 por ciclo
+    y un ciclo cada 2 h son 600 al día, y la cola medida el 30/8 tenía
+    **8.647** billeteras esperando (8.617 sin perfilar NUNCA): 14 días
+    para vaciarla, y entran nuevas cada día. Mientras tanto el
+    presupuesto se desperdiciaba: 1,5 M de créditos gastados de 10 M en
+    14 días de ciclo, con el ritmo proyectando 3,4 M sobre una cuota de
+    10 M.
+
+    Un número fijo no puede estar bien: si es bajo desperdicia cuota y
+    la cola no baja; si es alto, un mes con mucha actividad de tiempo
+    real se come la cuota y el freno del 85% corta el bot entero.
+
+    Aquí se reparte lo que QUEDA hasta el freno entre los días que
+    quedan de ciclo y los ciclos que caben en un día. El coste por
+    perfilado se mide de verdad: créditos del ciclo ÷ billeteras
+    perfiladas en el ciclo (medido el 30/8 sobre 7.798 perfilados
+    reales: 279 créditos, y eso incluye el gasto de tiempo real y radar,
+    así que sobreestima — que es el lado seguro). Si aún no hay datos
+    para medirlo, se usa `EVAL_COSTE_CREDITOS` (300).
+
+    `MAX_EVAL_PER_CYCLE` deja de ser el tope y pasa a ser el SUELO
+    cuando hay presupuesto de sobra; el techo es `EVAL_MAX_POR_CICLO`.
+    Si el presupuesto va justo, el cupo baja POR DEBAJO del suelo a
+    propósito: proteger la cuota manda sobre llenar el ciclo. El freno
+    del 85% sigue detrás como corte duro.
+
+    Se apaga con `EVAL_ADAPTATIVO=0`. Devuelve (cupo, explicación).
+    """
+    try:
+        import config as _c
+        if not int(getattr(_c, "EVAL_ADAPTATIVO", 1)):
+            return base, "cupo fijo (EVAL_ADAPTATIVO=0)"
+        techo = int(getattr(_c, "EVAL_MAX_POR_CICLO", 400))
+        suelo = int(getattr(_c, "EVAL_MIN_POR_CICLO", 10))
+        coste_def = float(getattr(_c, "EVAL_COSTE_CREDITOS", 300))
+        horas = float(getattr(_c, "AUTO_CYCLE_HOURS", 6)) or 6.0
+    except Exception as e:
+        return base, f"cupo fijo (no pude leer la configuración: {e})"
+    try:
+        import helius_budget as hb
+        usados = hb.creditos_usados(conn)
+        margen = hb.CUOTA_MENSUAL * hb.FRENO_PCT / 100.0 - usados
+        dia = max(1, hb.dia_del_ciclo(conn))
+    except Exception as e:
+        return base, f"cupo fijo (no pude leer el presupuesto: {e})"
+    if margen <= 0:
+        # Ya estamos en el freno: no gastar más. El corte duro lo hace
+        # `puede_llamar`, pero decirlo aquí evita montar la consulta.
+        return 0, "sin margen: el freno del 85% ya está activo"
+    # Coste REAL por perfilado, medido en este mismo ciclo.
+    coste = coste_def
+    origen = "estimado"
+    try:
+        perfiladas = conn.execute(
+            """SELECT COUNT(*) AS c FROM wallets
+               WHERE pnl_updated IS NOT NULL AND pnl_updated >= ?""",
+            (_inicio_ciclo_iso(conn),)).fetchone()["c"]
+        if perfiladas >= 50 and usados > 0:
+            coste = max(1.0, usados / float(perfiladas))
+            origen = f"medido sobre {perfiladas:,} perfilados"
+    except Exception:
+        pass
+    dias_quedan = max(1, 31 - dia)
+    ciclos_dia = max(1.0, 24.0 / horas)
+    cupo = int(margen / dias_quedan / ciclos_dia / coste)
+    # El suelo solo se aplica cuando de verdad cabe: si el presupuesto
+    # no da ni para el suelo, se respeta lo que da.
+    cupo = min(techo, max(cupo, min(suelo, int(margen / coste))))
+    if cupo >= base:
+        por = (f"{cupo} (adaptativo: quedan {margen:,.0f} créditos hasta "
+               f"el freno, {dias_quedan} día(s) de ciclo, "
+               f"{ciclos_dia:.0f} ciclos/día, {coste:,.0f} créd./perfilado "
+               f"{origen})")
+    else:
+        por = (f"{cupo} (adaptativo RECORTADO por debajo de "
+               f"MAX_EVAL_PER_CYCLE={base}: solo quedan {margen:,.0f} "
+               f"créditos hasta el freno)")
+    return cupo, por
+
+
+def _inicio_ciclo_iso(conn) -> str:
+    """Primer día del ciclo de facturación, en el mismo formato ISO que
+    guarda `pnl_updated` (para poder compararlos con `>=`)."""
+    try:
+        import helius_budget as hb
+        return hb._inicio_ciclo(conn).strftime("%Y-%m-%dT00:00:00+00:00")
+    except Exception:
+        return "0000-01-01T00:00:00+00:00"
+
+
+def evaluate_tracked(conn, limite: int | None = None) -> int:
     """
     Perfila y clasifica las billeteras ⭐ sin veredicto, sin alias, o con
     veredicto caducado (>REEVAL_DAYS días). Guarda alias + PnL y descarta
     las que la IA rechaza. Devuelve cuántas evaluó.
+
+    `limite` fuerza cuántas mirar en esta pasada, saltándose el cupo del
+    ciclo. Lo usa `/vaciarcola`, que trocea la cola en pasadas cortas
+    para no quedarse con el `cycle_lock` tomado durante horas.
     """
     _ensure_columns(conn)
     cutoff = (datetime.now(timezone.utc)
@@ -287,6 +385,13 @@ def evaluate_tracked(conn) -> int:
         _min = int(getattr(_cfg, "MIN_WINNING_TOKENS", 1))
     except Exception:
         _lim, _min = 20, 1
+    if limite is not None:
+        _lim = max(0, int(limite))
+    else:
+        _lim, _por = cupo_evaluaciones(conn, _lim)
+        print(f"  📐 cupo de este ciclo: {_por}")
+    if _lim <= 0:
+        return 0
     # Candidatas a perfilar: las mejores por score (temprano + capital) que
     # aún no tienen veredicto o cuyo veredicto caducó. NO requiere ser ⭐:
     # la IA decidirá si merecen la estrella según su PnL. Así se perfilan en
