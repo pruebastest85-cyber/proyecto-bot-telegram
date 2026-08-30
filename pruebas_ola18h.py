@@ -8695,6 +8695,158 @@ def prueba_19k():
         conn.close()
 
 
+def prueba_19n():
+    bloque("19-N - puerta de profit factor: cuanto gana por cada SOL que pierde")
+    import time as _t
+    import config as cfg
+    import filtro_calidad as fc
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    _prev = {k: getattr(cfg, k, None) for k in
+             ("FILTRO_PF_MIN", "FILTRO_TRES_PUERTAS", "FILTRO_WR_MIN",
+              "FILTRO_MIN_CERRADAS", "FILTRO_MIN_TOKENS",
+              "FILTRO_HOLD_MIN_MIN", "FILTRO_NETO_MIN")}
+    try:
+        cfg.FILTRO_TRES_PUERTAS = 1
+        cfg.FILTRO_WR_MIN = 0          # el escenario nuevo: sin winrate
+        cfg.FILTRO_MIN_CERRADAS = 8
+        cfg.FILTRO_MIN_TOKENS = 8
+        cfg.FILTRO_HOLD_MIN_MIN = 30
+        cfg.FILTRO_NETO_MIN = 0
+
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+
+        def op(w, m, side, sol, ts, tokens=100):
+            conn.execute(
+                "INSERT INTO trades (wallet, signature, mint, side, sol, "
+                "tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                (w, f"{w}{m}{side}{ts}{sol}", m, side, sol, tokens, ts))
+
+        def pos(w, m, entra, sale, hace_dias=10, hold_min=60):
+            t0 = ahora - hace_dias * 86400
+            op(w, m, "compra", entra, t0)
+            op(w, m, "venta", sale, t0 + int(hold_min * 60))
+
+        def alta(w):
+            # `historial(todas=True)` hace JOIN con wallets: sin la fila
+            # la billetera no existe para el filtro.
+            conn.execute("INSERT OR IGNORE INTO wallets (address, is_bot, "
+                         "is_tracked) VALUES (?,0,0)", (w,))
+
+        for _w in ("ASIMETRICA", "REGULAR", "PERFECTA", "SUERTUDA"):
+            alta(_w)
+
+        # ASIMETRICA: el caso "Jaguar Dorado". Falla mas veces de las
+        # que acierta (33% de acierto) pero cuando acierta gana MUCHO:
+        # 4 aciertos de +9 = +36, 8 fallos de -0,5 = -4. PF = 9.
+        for i in range(12):
+            pos("ASIMETRICA", f"A{i}", 1.0,
+                10.0 if i < 4 else 0.5, hace_dias=10 + i)
+        # REGULAR: acierta MAS veces (67%) y hasta gana dinero en neto
+        # (+1,2), pero sus ganancias son flojas al lado de sus perdidas:
+        # +3,2 contra -2,0. PF = 1,6. Tiene neto positivo A PROPOSITO,
+        # para que la unica puerta que la tumbe sea la del profit factor
+        # y la prueba mida lo que dice medir.
+        for i in range(12):
+            pos("REGULAR", f"R{i}", 1.0,
+                1.4 if i < 8 else 0.5, hace_dias=10 + i)
+        conn.commit()
+
+        h = fc.historial(conn, todas=True)
+        _a, _r = h["ASIMETRICA"], h["REGULAR"]
+        comprobar("el historial trae ahora el profit factor",
+                  _a.get("pf") is not None and _r.get("pf") is not None,
+                  {"asim": _a.get("pf"), "reg": _r.get("pf")})
+        comprobar("la asimetrica acierta MENOS que la regular",
+                  _a["wr"] < _r["wr"], f"{_a['wr']:.0f}% vs {_r['wr']:.0f}%")
+        comprobar("pero su profit factor es MUY superior",
+                  _a["pf"] > 5 and _r["pf"] < 2,
+                  f"asim={_a['pf']:.2f} reg={_r['pf']:.2f}")
+        comprobar("y las dos ganan dinero en neto: la unica diferencia "
+                  "que decide es el profit factor",
+                  _a["neto"] > 0 and _r["neto"] > 0,
+                  f"asim={_a['neto']:.1f} reg={_r['neto']:.1f}")
+
+        # ── Con la puerta APAGADA (defecto): las dos como antes ──────
+        cfg.FILTRO_PF_MIN = 0
+        _oa, _ma = fc.puertas_historial(_a)
+        comprobar("con la puerta apagada, la asimetrica pasa",
+                  _oa, _ma)
+
+        # ── Con la puerta ENCENDIDA a 2,0 ────────────────────────────
+        cfg.FILTRO_PF_MIN = 2.0
+        _oa, _ma = fc.puertas_historial(_a)
+        _or, _mr = fc.puertas_historial(_r)
+        comprobar("con pf_min=2, la de pocas veces pero mucho SIGUE "
+                  "pasando", _oa, _ma)
+        comprobar("y la de muchas veces pero poco YA NO pasa",
+                  not _or, _mr)
+        comprobar("y el motivo se entiende sin saber programar",
+                  "por cada SOL que pierde" in _mr, _mr)
+
+        # ── El umbral manda de verdad ────────────────────────────────
+        cfg.FILTRO_PF_MIN = 99.0
+        comprobar("subiendo el minimo por encima, ni la buena pasa",
+                  not fc.puertas_historial(_a)[0])
+        cfg.FILTRO_PF_MIN = 2.0
+
+        # ── Sin perdidas: tope simbolico, no division por cero ───────
+        for i in range(12):
+            pos("PERFECTA", f"P{i}", 1.0, 2.0, hace_dias=10 + i)
+        conn.commit()
+        _p = fc.historial(conn, todas=True)["PERFECTA"]
+        comprobar("una sin perdidas no revienta el calculo",
+                  _p["pf"] == 99.99, _p["pf"])
+        comprobar("y pasa la puerta", fc.puertas_historial(_p)[0])
+
+        # ── El orden importa: min_cerradas va DELANTE ────────────────
+        # Con 3 operaciones un profit factor enorme es suerte. El motivo
+        # tiene que hablar del historial corto, no del profit factor.
+        for i in range(3):
+            pos("SUERTUDA", f"S{i}", 1.0, 50.0, hace_dias=10 + i)
+        conn.commit()
+        _s = fc.historial(conn, todas=True)["SUERTUDA"]
+        _os, _ms = fc.puertas_historial(_s)
+        comprobar("con 3 operaciones no pasa aunque su PF sea enorme",
+                  not _os, f"pf={_s['pf']} {_ms}")
+        comprobar("y el motivo es el historial corto, no el PF",
+                  "historial corto" in _ms, _ms)
+
+        # ── Sin cerradas medibles no se cuela por un None ────────────
+        _vacia = {"cerradas": 20, "wr": 60.0, "tokens": 20,
+                  "hold_min": 60.0, "neto": 5.0, "pf": None}
+        _ov, _mv = fc.puertas_historial(_vacia)
+        comprobar("un profit factor ausente NO se toma por bueno",
+                  not _ov, _mv)
+
+        # ── Compatibilidad: un hist viejo sin la clave 'pf' ──────────
+        # `reevaluacion` construye a mano un dict por defecto; si le
+        # falta 'pf' esto no puede reventar.
+        _viejo = {"cerradas": 20, "wr": 60.0, "tokens": 20,
+                  "hold_min": 60.0, "neto": 5.0}
+        cfg.FILTRO_PF_MIN = 0
+        comprobar("un historial sin la clave 'pf' no rompe con la "
+                  "puerta apagada",
+                  fc.puertas_historial(_viejo)[0] is True)
+        cfg.FILTRO_PF_MIN = 2.0
+        comprobar("ni con la puerta encendida (falla, pero no revienta)",
+                  fc.puertas_historial(_viejo)[0] is False)
+    finally:
+        for k, v in _prev.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -8735,6 +8887,7 @@ def main():
     prueba_19h()
     prueba_19j()
     prueba_19k()
+    prueba_19n()
 
     print("\n" + "─" * 60)
     if _FALLOS:

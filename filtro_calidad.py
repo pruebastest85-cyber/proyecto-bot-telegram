@@ -76,6 +76,11 @@ def _cfg() -> dict:
         "prueba_dias": g("FILTRO_PRUEBA_DIAS", 14),
         "provisional": g("FILTRO_PROVISIONAL", 1),
         "neto_min": g("FILTRO_NETO_MIN", 0.0),
+        # (19-N) Profit factor minimo. 0 = puerta APAGADA, que es el
+        # defecto a proposito: desplegar el codigo no cambia a quien
+        # copia el bot de nadie. Se enciende poniendo el valor en el
+        # entorno, que es una decision del dueño, no de un despliegue.
+        "pf_min": g("FILTRO_PF_MIN", 0.0),
     }
 
 
@@ -202,7 +207,8 @@ def historial(conn, wallet: str | None = None,
     for r in rows:
         d = por.setdefault(r["wallet"],
                            {"cerradas": 0, "ganadas": 0, "tokens": 0,
-                            "holds": [], "neto": 0.0})
+                            "holds": [], "neto": 0.0,
+                            "gana": 0.0, "pierde": 0.0})
         sol_in = r["sol_in"] or 0
         sol_out = r["sol_out"] or 0
         tok_in = r["tok_in"] or 0
@@ -225,15 +231,36 @@ def historial(conn, wallet: str | None = None,
             d["cerradas"] += 1
             if sol_out > sol_in:
                 d["ganadas"] += 1
+                d["gana"] += sol_out - sol_in
+            else:
+                d["pierde"] += sol_in - sol_out
             if r["t_compra"] and r["t_venta"] \
                     and r["t_venta"] > r["t_compra"]:
                 d["holds"].append((r["t_venta"] - r["t_compra"]) / 60.0)
     res = {}
     for w, d in por.items():
         wr = (100.0 * d["ganadas"] / d["cerradas"]) if d["cerradas"] else None
+        # (19-N) PROFIT FACTOR: por cada SOL perdido, cuantos ganados.
+        # El winrate cuenta CUANTAS veces aciertas; esto cuenta CUANTO,
+        # que en memecoins es lo que paga. Caso real de la base del
+        # dueño: "Jaguar Dorado Beta" acierta el 44% —el filtro la
+        # echaba— pero en 90 dias gano 36,8 SOL y perdio 2,8: profit
+        # factor 13. En el paper hizo +1.565 USD, la mejor con
+        # diferencia.
+        #
+        # Sin perdidas se usa 99.99 como tope simbolico, igual que en
+        # `wallet_metrics.py`, para no dividir por cero ni inventar un
+        # infinito; con pocas operaciones eso puede ser suerte, y por eso
+        # la puerta de `min_cerradas` va DELANTE.
+        if d["pierde"] > 0:
+            pf = d["gana"] / d["pierde"]
+        elif d["gana"] > 0:
+            pf = 99.99
+        else:
+            pf = None                # sin cerradas medibles
         res[w] = {"cerradas": d["cerradas"], "wr": wr,
                   "tokens": d["tokens"], "hold_min": _mediana(d["holds"]),
-                  "neto": d["neto"]}
+                  "neto": d["neto"], "pf": pf}
     return res
 
 
@@ -317,6 +344,32 @@ def puertas_historial(hist: dict | None) -> tuple:
         return (False, f"no gana lo suficiente: neto {_n:+.1f} SOL "
                        f"(mínimo >{cfg['neto_min']:g}) en "
                        f"{cfg['ventana_dias']} días")
+    # (19-N) PROFIT FACTOR — cuánto se gana por cada SOL perdido.
+    #
+    # El winrate cuenta CUÁNTAS veces se acierta; esto cuenta CUÁNTO, y
+    # en memecoins es lo que paga: las ganadoras son pocas y enormes.
+    # Medido sobre las 20 billeteras del dueño con historial y copias
+    # medidas de verdad, correlación con el USD/copia real del paper:
+    # profit factor +0,44 · expectancy +0,37 · winrate +0,18 · ROI
+    # mediano +0,11. Y probando configuraciones enteras, con el corte de
+    # winrate el filtro iba AL REVÉS (las que entraban perdían 4,2
+    # USD/copia y las que quedaban fuera ganaban), mientras que
+    # `pf >= 2` separaba bien y seguía separando bien al repetir la
+    # prueba quitando la mejor billetera, las dos mejores y las tres
+    # mejores — que es la comprobación que importa cuando una sola
+    # billetera hace la mayor parte del beneficio.
+    #
+    # Va DESPUÉS de `min_cerradas` a propósito: con tres operaciones,
+    # un profit factor altísimo es suerte, no habilidad.
+    _pf = h.get("pf")
+    if cfg["pf_min"] > 0:
+        if _pf is None:
+            return (False, "sin operaciones cerradas medibles para "
+                           "calcular cuánto gana por cada SOL que pierde")
+        if _pf < cfg["pf_min"]:
+            return (False, f"gana {_pf:.2f} SOL por cada SOL que pierde "
+                           f"(mínimo {cfg['pf_min']:g}): sus ganadoras no "
+                           f"compensan sus perdedoras")
     # Puerta 2 — copiable
     if h["hold_min"] is None or h["hold_min"] < cfg["hold_min_min"]:
         _hm = "?" if h["hold_min"] is None else f"{h['hold_min']:.0f}"
