@@ -31,6 +31,32 @@ def _chk(nombre, estado, detalle, accion=""):
             "accion": accion}
 
 
+def _md_plano(txt) -> str:
+    """Neutraliza los símbolos que rompen el Markdown de Telegram.
+
+    (Ola 18-Q) `salud_text` envuelve cada consejo en cursiva: `_{accion}_`.
+    Si dentro se cuela una ruta o el texto de una excepción con un número
+    IMPAR de `_`, Telegram rechaza el mensaje ENTERO con un 400 y /salud
+    sale sin ningún formato por el reintento en texto plano. Y no es
+    hipotético: un `ImportError` cualquiera de este módulo dice
+    `No module named 'trades_store'`, con dos `_` y una comilla — el
+    aviso que avisa de los fallos se rompía justo cuando hay un fallo.
+
+    Los caracteres se QUITAN en vez de escaparse con `\\`, y la tabla es
+    la misma que usa `telegram_bot._MD_FUERA`, por la razón que allí está
+    escrita: el Markdown legacy no des-escapa la barra en todos los
+    contextos y acaban viéndose barras sueltas.
+
+    Solo se usa en los trozos que vienen de FUERA (rutas, textos de
+    excepción); el texto que escribimos nosotros conserva sus `backticks`
+    a propósito.
+    """
+    s = str(txt)
+    for _c, _r in (("*", ""), ("_", " "), ("`", ""), ("[", "("), ("]", ")")):
+        s = s.replace(_c, _r)
+    return s
+
+
 def _horas(ts):
     if not ts:
         return None
@@ -115,7 +141,8 @@ def _c_webhook():
 
         if ls_con and not ls_mudo:
             _extra = ("" if hook_conf else
-                      " · el webhook HTTP no aplica aquí (sin PUBLIC_URL)")
+                      " · el webhook HTTP no aplica aquí (sin "
+                      "`PUBLIC_URL`)")
             # (17-O) `descartadas` no lo miraba nadie: si la cola de
             # workers se llena, LaserStream sigue contando "recibidas" y
             # el chequeo daba verde mientras los datos se tiraban.
@@ -147,17 +174,19 @@ def _c_webhook():
             return _chk("Ingesta", CRIT,
                         f"LaserStream dice conectado pero lleva "
                         f"{ls_h * 60:.0f} min sin recibir nada"
-                        f"{' — ' + ls_err if ls_err else ''}",
+                        f"{' — ' + _md_plano(ls_err) if ls_err else ''}",
                         "suele ser una suscripción rechazada: revisa la "
                         "clave de Helius y reinicia el bot")
         # Ninguna via confirmada: el aviso depende de cuantas HAY.
         if not ls_activo and not hook_conf:
             return _chk("Ingesta", CRIT,
                         "no hay vía de entrada: LaserStream apagado "
-                        "(USE_LASERSTREAM=0) y sin PUBLIC_URL para el "
-                        "webhook", "sin ingesta no entra ninguna señal")
+                        "(`USE_LASERSTREAM`=0) y sin `PUBLIC_URL` para "
+                        "el webhook",
+                        "sin ingesta no entra ninguna señal")
         if ls_activo:
-            _d = f"LaserStream desconectado{' — ' + ls_err if ls_err else ''}"
+            _d = ("LaserStream desconectado"
+                  + (" — " + _md_plano(ls_err) if ls_err else ""))
             if not hook_conf:
                 # (17-M) Sin webhook posible es la unica via, pero un
                 # corte de segundos es NORMAL: el backoff de reconexion
@@ -174,9 +203,11 @@ def _c_webhook():
                     return _chk("Ingesta", WARN, _d + " (reconectando)",
                                 "normal tras un corte; si sigue en el "
                                 "próximo /salud, reinicia el bot")
-                return _chk("Ingesta", CRIT, _d + " y es la única vía",
-                            "sin PUBLIC_URL el webhook no puede recibir; "
-                            "reintenta solo, pero si sigue así reinicia")
+                return _chk("Ingesta", CRIT,
+                            _d + " y es la única vía (sin `PUBLIC_URL` "
+                            "el webhook no puede recibir)",
+                            "reintenta solo, pero si sigue así reinicia "
+                            "el bot")
             # (17-M) Con webhook configurado el viejo chequeo daba CRIT a
             # las 24 h de silencio. Devolver WARN aqui sin mirar el reloj
             # degradaba un apagon TOTAL (LaserStream caido + webhook mudo
@@ -224,7 +255,8 @@ def _c_webhook():
         return _chk("Ingesta", WARN, f"{hook_h:.0f} h sin transacciones",
                     "puede ser normal si las ⭐ están inactivas")
     except Exception as e:
-        return _chk("Ingesta", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Ingesta", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_senales(conn):
@@ -245,7 +277,8 @@ def _c_senales(conn):
                         "puede ser mercado tranquilo")
         return _chk("Señales", OK, f"{n24} en 24 h · {n7} en 7 días")
     except Exception as e:
-        return _chk("Señales", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Señales", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_medicion(conn):
@@ -444,7 +477,8 @@ def _c_medicion(conn):
                     + (f", {al_sin} sin precio de entrada" if al_sin else "")
                     + f" · 7 días){_ctx}")
     except Exception as e:
-        return _chk("Medición", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Medición", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_embudo(conn):
@@ -506,7 +540,8 @@ def _c_embudo(conn):
                         f"{wallets} candidatas · {evaluadas} evaluadas · "
                         f"{estrellas} ⭐")
     except Exception as e:
-        return _chk("Embudo", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Embudo", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_presupuesto(conn):
@@ -532,7 +567,8 @@ def _c_presupuesto(conn):
                         f"quedan {quedan} de {cap} (respaldo)")
         return _chk("Presupuesto IA nube", OK, f"{usadas}/{cap} usadas hoy")
     except Exception as e:
-        return _chk("Presupuesto IA nube", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Presupuesto IA nube", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_ia_local(conn):
@@ -547,17 +583,19 @@ def _c_ia_local(conn):
         import requests as _rq
         r = _rq.get(f"{url}/v1/models", timeout=4)
         if r.status_code >= 400:
-            return _chk("IA local", WARN, f"HTTP {r.status_code} en {url}")
+            return _chk("IA local", WARN,
+                        f"HTTP {r.status_code} en {_md_plano(url)}")
         modelos = [m.get("id") for m in r.json().get("data", [])]
         modelo = _modelo(conn)
         if modelo and modelos and modelo not in modelos:
             return _chk("IA local", WARN,
-                        f"conectada pero sin el modelo {modelo}",
+                        f"conectada pero sin el modelo {_md_plano(modelo)}",
                         "cárgalo en LM Studio (y revisa el auto-unload)")
-        return _chk("IA local", OK, f"responde · modelo {modelo}")
+        return _chk("IA local", OK,
+                    f"responde · modelo {_md_plano(modelo)}")
     except Exception as e:
         grave = CRIT if not os.getenv("ANTHROPIC_API_KEY") else WARN
-        return _chk("IA local", grave, f"no responde ({e})",
+        return _chk("IA local", grave, f"no responde ({_md_plano(e)})",
                     "¿PC apagada o túnel caído? repite /ialocal <url>")
 
 
@@ -568,8 +606,11 @@ def _c_apis():
                               os.getenv("TELEGRAM_BOT_TOKEN")))
               if not v]
     if faltan:
-        return _chk("Claves API", CRIT, "faltan: " + ", ".join(faltan),
-                    "configúralas en las variables de Railway")
+        return _chk("Claves API", CRIT,
+                    "faltan: " + ", ".join(f"`{_v}`" for _v in faltan)
+                    + " (van en `bot_local.env`)",
+                    "configúralas en el archivo de entorno del PC y "
+                    "reinicia")
     sin_nube = not os.getenv("ANTHROPIC_API_KEY")
     try:
         from ia_puente import hay_ia
@@ -578,7 +619,7 @@ def _c_apis():
         ia_ok = not sin_nube
     if not ia_ok:
         return _chk("Claves API", WARN, "sin IA disponible (ni local ni nube)",
-                    "configura /ialocal <url> o una ANTHROPIC_API_KEY")
+                    "configura /ialocal <url> o una clave de la nube")
     if sin_nube:
         return _chk("Claves API", OK,
                     "todas presentes · IA: local titular, sin nube")
@@ -611,34 +652,304 @@ def _c_helius(conn):
                         det + " — sobra cuota, se puede analizar más")
         return _chk("Créditos Helius", OK, det)
     except Exception as e:
-        return _chk("Créditos Helius", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Créditos Helius", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_base_datos(conn):
-    """Tamaño de la base: si crece de más, el backup por Telegram falla."""
+    """Salud del archivo de la base.
+
+    (Ola 18-Q, 30/8/2026) Antes esto daba ROJO por el TAMAÑO en MB y
+    mandaba "pasa a Postgres o baja MAX_TRADES_TOTAL". Los tres consejos
+    estaban mal medidos, comprobado en la base del dueño con 330 MB:
+
+      · SQLite mueve bases de varios GB sin despeinarse. El tamaño, por
+        sí solo, no pone en peligro nada.
+      · `trades` eran 154.821 filas con el tope en 300.000, así que bajar
+        MAX_TRADES_TOTAL no habría borrado ni una fila.
+      · Y el respaldo NO estaba en peligro: desde la Ola 16 la copia
+        verificada se guarda SIEMPRE en `backups/`; lo único que el
+        tamaño impide es mandarla por Telegram, que admite 50 MB. Que un
+        backup falte de verdad ya lo vigila `_c_backup`, y en ROJO.
+
+    Lo que sí puede matar al bot es que se llene el DISCO. Eso es lo que
+    se mira ahora. El resto es información: cuánto ocupa, cuánta de esa
+    cifra son huecos que SQLite ya reutiliza por su cuenta, y si la copia
+    diaria cabe o no en Telegram — dicho como un hecho, no como una
+    alarma. En el repo NO hay ningún VACUUM, así que aquí no se nombra
+    "compactar": sería mandar al dueño a un botón que no existe.
+    """
     try:
         import config as _cfg
+        try:
+            from db import USE_PG as _pg
+        except Exception:
+            _pg = False
         ruta = getattr(_cfg, "DB_PATH", None)
-        if not ruta or not os.path.exists(ruta):
+        if _pg or not ruta or not os.path.exists(ruta):
             return _chk("Base de datos", OK, "en Postgres o sin archivo local")
-        mb = os.path.getsize(ruta) / 1e6
+        # El `-wal` cuenta: la base se abre en WAL (db.py) y esos MB
+        # ocupan disco igual. Sin sumarlos, la cifra que ve el dueño y
+        # las varas de disco se quedan cortas justo cuando hay escritura
+        # pendiente, que es cuando más apretado va todo.
+        _bytes = os.path.getsize(ruta)
+        _wal_bytes = 0
+        for _sufijo in ("-wal", "-shm"):
+            try:
+                if os.path.exists(ruta + _sufijo):
+                    _wal_bytes += os.path.getsize(ruta + _sufijo)
+            except OSError:
+                pass
+        _bytes += _wal_bytes
+        mb = _bytes / 1e6
         try:
             from trades_store import estadisticas
             ops = estadisticas().get("operaciones", 0)
         except Exception:
             ops = 0
-        det = f"{mb:.0f} MB · {ops:,} operaciones guardadas"
-        # El backup va comprimido (~5x), así que el margen real es mayor
-        if mb > 300:
-            return _chk("Base de datos", CRIT, det,
-                        "demasiado grande incluso comprimida: pasa a "
-                        "Postgres (DATABASE_URL) o baja MAX_TRADES_TOTAL")
-        if mb > 200:
-            return _chk("Base de datos", WARN, det,
-                        "considera pasar a Postgres para crecer sin límite")
+        # Se DICE que el WAL va dentro: si no, el dueño ve aquí 480 MB y
+        # en el explorador de archivos 330, y no hay nada que se lo
+        # explique.
+        _tam_base = f"{mb:.0f} MB" if mb >= 1 else f"{mb * 1e3:.0f} KB"
+        det = (_tam_base
+               + (f" (incluye {_wal_bytes / 1e6:.0f} MB de WAL/SHM)"
+                  if _wal_bytes >= 1e6 else "")
+               + f" · {ops:,} operaciones guardadas")
+
+        # Huecos: filas ya borradas por las purgas cuyo espacio SQLite no
+        # le devuelve al disco. No es un problema, es espacio recuperable.
+        hueco_mb = 0.0
+        try:
+            _fl = conn.execute("PRAGMA freelist_count").fetchone()[0]
+            _ps = conn.execute("PRAGMA page_size").fetchone()[0]
+            hueco_mb = (_fl or 0) * (_ps or 0) / 1e6
+        except Exception:
+            hueco_mb = 0.0
+        if hueco_mb >= 20 and mb and hueco_mb / mb >= 0.15:
+            # No es un aviso: esas páginas SQLite las reutiliza para los
+            # datos nuevos. Se dicen para que el número de MB del archivo
+            # no asuste (en la base del dueño eran 77 de 330).
+            det += (f" · {hueco_mb:.0f} MB son huecos de purgas que se "
+                    f"reutilizan")
+
+        # La copia diaria: se guarda SIEMPRE en disco. Se dice si además
+        # cabe en Telegram, mirando el tamaño REAL de la última copia en
+        # vez de suponer una tasa de compresión.
+        _ult_mb = 0.0
+        try:
+            _dir = os.path.join(os.path.dirname(os.path.abspath(ruta)),
+                                "backups")
+            _cs = [os.path.join(_dir, f) for f in os.listdir(_dir)
+                   if "backup_" in f
+                   and os.path.isfile(os.path.join(_dir, f))]
+            if _cs:
+                _ult = max(_cs, key=os.path.getmtime)
+                _umb = os.path.getsize(_ult) / 1e6
+                # `max(0, ...)`: si el reloj del PC se atrasa (o la copia
+                # viene de un equipo con la hora adelantada) la resta sale
+                # negativa y el mensaje diría "hace -2 h".
+                _uh = max(0.0,
+                          (time.time() - os.path.getmtime(_ult)) / 3600)
+                # ¿Es una copia TERMINADA o un archivo que está a medias?
+                # El job copia con `shutil.copyfile` al nombre definitivo
+                # y solo DESPUÉS apunta la hora (`maintenance.py`). Si el
+                # disco se llena a mitad queda un archivo truncado con la
+                # fecha de hace un segundo, y sin este cruce /salud
+                # anunciaba "última copia 0 MB hace 0 h" justo encima de
+                # `_c_backup` gritando "SIN RESPALDO desde hace 90 h".
+                # Se miran los DOS relojes, porque el /backup manual usa
+                # el suyo.
+                #
+                # Pero el que no cuadre NO se dice como una acusación,
+                # porque hay un camino honrado que también deja el reloj
+                # sin marcar: el /backup manual guarda la copia, intenta
+                # mandarla por Telegram y solo marca su reloj DESPUÉS; si
+                # el envío revienta (el SSLError de siempre), la copia es
+                # buena y el reloj se queda sin poner. Así que sin marca
+                # se dice lo único que se sabe seguro —qué archivo hay
+                # ahí y de cuándo— y no se le llama "copia".
+                # El margen es de una hora: en el camino manual, entre
+                # guardar y marcar hay dos viajes a Telegram, y subir 50
+                # MB por una línea lenta pasa de sobra de unos minutos.
+                _reg = None
+                try:
+                    _a = float(get_setting(conn, "last_backup_ts", 0) or 0)
+                    _b = float(get_setting(
+                        conn, "last_backup_manual_ts", 0) or 0)
+                    _reg = max(_a, _b)
+                except Exception:
+                    _reg = None          # sin relojes: no se juzga
+                _registrada = (_reg is None
+                               or (_reg > 0
+                                   and os.path.getmtime(_ult)
+                                   <= _reg + 3600))
+                # Nunca se dice "0 MB" de algo que existe: con `.0f`
+                # una copia de 300 KB salía como "0 MB", que es justo la
+                # cifra que la línea de al lado usa para decir VACÍO —
+                # el mismo número para dos cosas opuestas. Por debajo de
+                # 1 MB se habla en KB.
+                _utam = (f"{_umb:.0f} MB" if _umb >= 1
+                         else f"{_umb * 1e3:.0f} KB")
+                if _umb <= 0:
+                    # 0 bytes no admite interpretación: no es una copia.
+                    det += (f" · en `backups/` el archivo más nuevo está "
+                            f"VACÍO (0 bytes, hace {_uh:.0f} h)")
+                elif not _registrada:
+                    det += (f" · archivo más nuevo en `backups/`: "
+                            f"{_utam} hace {_uh:.0f} h (ningún "
+                            f"backup lo ha registrado todavía)")
+                else:
+                    # Se dice la EDAD: sin ella esta línea podía anunciar
+                    # una copia de hace un mes como si fuera la de hoy. Y
+                    # se dice si CABE en Telegram, no si se envió: eso no
+                    # se sabe desde aquí (el POST puede haber muerto con
+                    # un SSLError, que es justo lo que dejó al bot tres
+                    # días sin respaldo).
+                    # La tasa de compresión solo se aprende de un `.gz`.
+                    # El /backup MANUAL guarda en `backups/` el `.db` SIN
+                    # comprimir (`telegram_bot` pasa a
+                    # `guardar_copia_en_disco` lo que devuelve
+                    # `make_backup`, y quien comprime es `maintenance`,
+                    # solo en el automático). Midiendo con ese `.db` la
+                    # tasa sale ≈1, la vara del temporal se va al tope de
+                    # 2× y /salud daría ROJO en el temporal durante 24 h
+                    # por haber pedido una copia a mano: el mismo rojo
+                    # falso que esta ola vino a quitar.
+                    if _ult.endswith(".gz"):
+                        _ult_mb = _umb
+                    det += (f" · última copia {_utam} hace "
+                            f"{_uh:.0f} h en `backups/`"
+                            + (" (no cabe en Telegram, tope 50 MB)"
+                               if _umb > 49 else " (cabe en Telegram)"))
+        except Exception:
+            pass
+
+        # LO ÚNICO QUE DE VERDAD IMPORTA: que quede sitio en el disco.
+        # Se miran los DOS sitios donde el backup necesita espacio, y con
+        # una vara DISTINTA en cada uno, porque necesitan cosas distintas:
+        #   · la carpeta de la base tiene que albergar la base Y la copia
+        #     rotada que se guarda a su lado (hasta 5): 2× la base, con un
+        #     suelo de 500 MB para que una base diminuta en un disco lleno
+        #     también avise.
+        #   · el temporal alberga, a la vez, la copia sin comprimir Y su
+        #     .gz (`maintenance` borra el .db DESPUÉS de escribir el .gz):
+        #     el pico es 1× + lo que comprima. Ese "lo que comprima" NO
+        #     se supone: se mide con el tamaño real de la última copia
+        #     (en la base del dueño, 142 de 330 MB → 1,48×). Sin copia
+        #     todavía, 1,5×. Y NO lleva suelo: un /tmp en tmpfs de 64 MB
+        #     es normal en contenedores, y medirlo con la vara de la otra
+        #     carpeta habría devuelto el rojo permanente que esta ola
+        #     vino a quitar, solo que en otro montaje y con un consejo
+        #     ("borra `backups/`") que allí no libera ni un byte.
+        # Se dice CUÁL de los dos es el que va justo: "GB libres" a secas
+        # sería el mínimo de dos sistemas de ficheros distintos contado
+        # como si fuera uno.
+        try:
+            import shutil as _sh
+            import tempfile as _tmpf
+            _base_dir = os.path.dirname(os.path.abspath(ruta)) or "."
+            _tmp_dir = _tmpf.gettempdir()
+            _libre_base = _sh.disk_usage(_base_dir).free
+            # ¿Son el MISMO volumen? Se pregunta al sistema (`st_dev`; en
+            # Windows, el número de serie del volumen), no se deduce de
+            # que los bytes libres coincidan: en el PC del dueño la base
+            # y `%TEMP%` están los dos en `C:`, las dos medidas se toman
+            # con microsegundos de diferencia y el propio bot está
+            # escribiendo el WAL — basta un bloque de deriva para que
+            # /salud hable de "el temporal" como si fuera otro disco.
+            try:
+                _mismo = (os.stat(_base_dir).st_dev
+                          == os.stat(_tmp_dir).st_dev)
+            except Exception:
+                _mismo = (os.path.normcase(os.path.abspath(_tmp_dir))
+                          == os.path.normcase(os.path.abspath(_base_dir)))
+            _libre_tmp = (_libre_base if _mismo
+                          else _sh.disk_usage(_tmp_dir).free)
+        except Exception as _e:
+            # Ciego, no sano: antes esto devolvía VERDE y la línea del
+            # disco desaparecía sin una palabra.
+            return _chk("Base de datos", WARN,
+                        det + " · no se pudo medir el disco",
+                        "comprueba los permisos de la carpeta "
+                        f"({_md_plano(_e)})")
+        det += (f" · {_libre_base / 1e9:.1f} GB libres donde vive la base"
+                + ("" if _mismo
+                   else f" y {_libre_tmp / 1e9:.1f} GB en el temporal"))
+        # La ruta del temporal se enseña SOLO si sale entera: `_md_plano`
+        # cambia `_` por espacio, así que un `C:\Users\juan_perez\...`
+        # saldría como una carpeta que no existe. Si lleva alguno de esos
+        # símbolos se nombra la variable y el dueño la mira él.
+        _tmp_txt = (f"({_md_plano(_tmp_dir)})"
+                    if not any(_s in _tmp_dir for _s in "*_`[]")
+                    else "(la carpeta de TMPDIR / %TEMP%)")
+        _rojo_base = max(mb * 1e6 * 2, 500e6)
+        _factor_tmp = 1.5
+        if _ult_mb > 0 and mb > 0:
+            _factor_tmp = min(2.0, max(1.3, 1.0 + _ult_mb / mb + 0.05))
+        _rojo_tmp = mb * 1e6 * _factor_tmp
+        _aviso_base = max(_rojo_base + min(mb * 1e6 * 4, 5e9), 1e9)
+        # Un solo volumen = un solo sitio: se queda la vara más
+        # exigente de las dos y el mensaje habla de un sitio solo. Si no,
+        # /salud diría "y en el temporal" de una carpeta que está en el
+        # mismo disco que acaba de nombrar, y mandaría a mirar TMPDIR
+        # cuando lo que hay que hacer es liberar ese disco.
+        if _mismo:
+            # La primera línea es un SEGURO, no lógica viva: con el tope
+            # de 2,0 en `_factor_tmp`, `_rojo_tmp` nunca pasa de
+            # `_rojo_base`. Se deja por si algún día se sube ese tope.
+            _rojo_base = max(_rojo_base, _rojo_tmp)
+            _aviso_base = max(_aviso_base, _rojo_tmp * 1.5)
+        _falta_base = _libre_base < _rojo_base
+        _falta_tmp = (not _mismo) and _libre_tmp < _rojo_tmp
+        if _falta_base or _falta_tmp:
+            # Los dos montajes pueden ir justos a la vez (y van SIEMPRE
+            # juntos cuando son el mismo disco). Decir solo uno dejaba al
+            # dueño arreglando la mitad y volviendo a ver el mismo rojo.
+            if _falta_base and _falta_tmp:
+                _donde = ("la carpeta de la base y el temporal "
+                          f"{_tmp_txt}")
+                _como = ("libera espacio o borra copias viejas de la "
+                         "carpeta de backups; el temporal necesita sitio "
+                         "para la copia sin comprimir (cambia TMPDIR si "
+                         "está en otro disco)")
+            elif _falta_base:
+                _donde = "la carpeta de la base"
+                _como = ("libera espacio o borra copias viejas de la "
+                         "carpeta de backups")
+            else:
+                _donde = f"el temporal {_tmp_txt}"
+                _como = ("el backup escribe ahí su copia sin comprimir; "
+                         "dale más espacio o cambia TMPDIR")
+            return _chk("Base de datos", CRIT,
+                        det, f"queda poco sitio en {_donde}: {_como}")
+        # Aviso previo, en LOS DOS montajes. Va SIEMPRE por encima de su
+        # línea roja: se suma un margen al umbral del rojo en vez de
+        # calcular una cifra suelta. Antes era `max(min(6×, 5 GB), 1 GB)`
+        # y para una base de 10 GB ese techo caía POR DEBAJO del rojo
+        # (20 GB), así que se pasaba de verde a rojo sin amarillo. El
+        # margen lleva su propio techo (5 GB) para que una base enorme no
+        # deje /salud en amarillo eterno, y suelo de 1 GB para que una
+        # base diminuta también tenga banda de aviso. El temporal lleva
+        # su propio aviso (1,5× su rojo) y sin suelo, por lo mismo que su
+        # rojo no lo lleva.
+        _poco_base = _libre_base < _aviso_base
+        _poco_tmp = (not _mismo) and _libre_tmp < _rojo_tmp * 1.5
+        if _poco_base or _poco_tmp:
+            if _poco_base and _poco_tmp:
+                _aviso = ("queda poco disco donde vive la base y en el "
+                          "temporal; vigila la carpeta de backups")
+            elif _poco_base:
+                _aviso = ("queda poco disco donde vive la base; vigila la "
+                          "carpeta de backups")
+            else:
+                _aviso = (f"queda poco sitio en el temporal "
+                          f"{_tmp_txt}, donde el backup escribe su copia "
+                          f"antes de comprimirla")
+            return _chk("Base de datos", WARN, det, _aviso)
         return _chk("Base de datos", OK, det)
     except Exception as e:
-        return _chk("Base de datos", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Base de datos", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_laserstream():
@@ -650,12 +961,16 @@ def _c_laserstream():
         e = estado()
         if e.get("conectado"):
             return _chk("LaserStream", OK,
-                        f"conectado · {e.get('recibidas', 0)} transacciones")
+                        f"conectado · {int(e.get('recibidas', 0) or 0)} "
+                        f"transacciones")
         return _chk("LaserStream", WARN,
-                    f"desconectado{' — ' + e['error'] if e.get('error') else ''}",
+                    "desconectado"
+                    + (" — " + _md_plano(e["error"])
+                       if e.get("error") else ""),
                     "el webhook sigue funcionando como respaldo")
     except Exception as e:
-        return _chk("LaserStream", WARN, f"no se pudo comprobar ({e})")
+        return _chk("LaserStream", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_errores():
@@ -668,14 +983,17 @@ def _c_errores():
         filas = resumen(24)
         peor = filas[0] if filas else {}
         if n >= 50:
-            return _chk("Errores", CRIT, f"{n} en 24 h · el más frecuente: "
-                        f"{peor.get('modulo')} ({peor.get('tipo')})",
+            return _chk("Errores", CRIT, f"{n} en 24 h · el más "
+                        f"frecuente: {_md_plano(peor.get('modulo'))} "
+                        f"({_md_plano(peor.get('tipo'))})",
                         "mira /errores para el detalle")
         return _chk("Errores", WARN, f"{n} en 24 h · más frecuente: "
-                    f"{peor.get('modulo')} ({peor.get('tipo')})",
+                    f"{_md_plano(peor.get('modulo'))} "
+                    f"({_md_plano(peor.get('tipo'))})",
                     "mira /errores para el detalle")
     except Exception as e:
-        return _chk("Errores", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Errores", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 def _c_backup(conn):
@@ -709,7 +1027,8 @@ def _c_backup(conn):
                         "revisa la carpeta backups/ junto a la base")
         return _chk("Backup", OK, f"hace {h:.0f} h" + extra)
     except Exception as e:
-        return _chk("Backup", WARN, f"no se pudo comprobar ({e})")
+        return _chk("Backup", WARN,
+                    f"no se pudo comprobar ({_md_plano(e)})")
 
 
 # ──────────────────────────── INFORME ────────────────────────────────
@@ -724,8 +1043,10 @@ def diagnostico() -> list[dict]:
                    _c_presupuesto(conn), _c_ia_local(conn), _c_helius(conn),
                    _c_base_datos(conn), _c_backup(conn)]
     except Exception as e:
-        checks.append(_chk("Base de datos", CRIT, f"no accesible: {e}",
-                           "revisa el volumen/DATABASE_URL en Railway"))
+        checks.append(_chk(
+            "Base de datos", CRIT, f"no accesible: {_md_plano(e)}",
+            "si es el archivo local, mira el disco y los permisos de su "
+            "carpeta; si va con Postgres, la base remota"))
     finally:
         if conn:
             try:
@@ -815,7 +1136,12 @@ def interpretar(checks) -> str | None:
         return None
     if not txt:
         return None
-    return txt[:1500]
+    # (Ola 18-Q) El texto de la IA es el ÚNICO que entraba crudo en el
+    # mensaje, y encima `revisar_y_avisar` lo pide SIEMPRE: un `_` impar
+    # en la respuesta del modelo (y las hay: "falta PUBLIC_URL",
+    # "el modulo wallet_analyzer") tumbaba el formato del /salud entero.
+    # Se sanea ANTES de recortar, para no partir nada a mitad.
+    return _md_plano(txt)[:1500]
 
 
 def revisar_y_avisar() -> str | None:
@@ -843,9 +1169,37 @@ def revisar_y_avisar() -> str | None:
     except Exception:
         pass
     texto = salud_text(checks, con_ia=True)
+    # (Ola 18-Q) Telegram corta en 4096 y `tg_send` NO recorta: pasado
+    # ese tope devuelve 400 y el reintento en texto plano falla igual,
+    # porque el problema es el tamaño, no el formato. Y como la firma ya
+    # se marcó arriba, el aviso se perdía y no se volvía a intentar en
+    # 12 h. Si no cabe, lo primero que se cae es la lectura de la IA,
+    # que es lo prescindible: los chequeos son el aviso.
+    _cab = "⚠️ *Autodiagnóstico*\n\n"
+
+    def _cabe(_t):
+        return len((_cab + _t).encode("utf-16-le")) // 2 <= 4000
+
+    if not _cabe(texto):
+        # Se cortan LÍNEAS ENTERAS por el final, no caracteres: cada
+        # línea lleva sus `*...*` cerrados, así que cortar a mitad
+        # devolvería otro 400. Como la lectura de la IA va al final, lo
+        # primero que se cae es lo prescindible; los chequeos, que son
+        # el aviso de verdad, se quedan.
+        _ls = texto.split("\n")
+        while _ls and not _cabe("\n".join(_ls) + "\n…(recortado)"):
+            _ls.pop()
+        texto = "\n".join(_ls) + "\n…(recortado)"
     try:
         from realtime import tg_send
-        tg_send("⚠️ *Autodiagnóstico*\n\n" + texto)
+        if not tg_send(_cab + texto):
+            # No quemar las 12 h de silencio por un aviso que no salió.
+            _c2 = get_conn()
+            try:
+                from db import set_setting as _ss
+                _ss(_c2, "salud_ultimo_aviso", "")
+            finally:
+                _c2.close()
     except Exception:
         pass
     return texto

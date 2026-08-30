@@ -5429,6 +5429,960 @@ def prueba_18p_radar():
         conn.close()
 
 
+# ---------------------------------------------------------------------
+# OLA 18-Q - /salud deja de dar rojo por el tamaño de la base.
+# ---------------------------------------------------------------------
+def prueba_18q_salud_base():
+    bloque("18-Q - el aviso de la base mira el DISCO, no los MB")
+    import os as _os
+    import shutil as _sh
+    import tempfile as _tf
+    import time as _t
+    import salud as sd
+    from db import get_conn
+
+    conn = get_conn()
+    _du_prev = _sh.disk_usage
+    _gs_prev = _os.path.getsize
+    _st_prev = _os.stat
+    _ts_prev = None
+    _tsm_prev = None
+    from db import set_setting as _sset
+    _cfg = __import__("config")
+    _ruta_prev = _cfg.DB_PATH
+    _d = _tf.mkdtemp(prefix="salud18q_")
+    try:
+        class _DU:
+            def __init__(self, free):
+                self.total, self.used, self.free = free * 3, free * 2, free
+
+        # Base FALSA de 400 MB. El tamaño se finge en `getsize` en vez de
+        # escribir 400 MB de verdad: en Windows —donde corre el bot del
+        # dueño— `truncate` rellena de ceros y la suite escribiría medio
+        # giga justo para probar la presión de disco.
+        _base = _os.path.join(_d, "wallets.db")
+        open(_base, "wb").close()
+        _MB400 = 400 * 10**6
+        _tam = {}                      # tamaños fingidos, por ruta
+
+        def _getsize(p):
+            _a = _os.path.abspath(p)
+            if _a in _tam:
+                return _tam[_a]
+            return _MB400 if _a == _os.path.abspath(_base) else _gs_prev(p)
+        _os.path.getsize = _getsize
+        _cfg.DB_PATH = _base
+
+        class _StDev:
+            """stat de verdad, con el volumen cambiado."""
+
+            def __init__(self, r, dev):
+                self._r, self.st_dev = r, dev
+
+            def __getattr__(self, n):
+                return getattr(self._r, n)
+
+        def _libres(base_gb, tmp_gb=None):
+            """Simula el disco: uno para la carpeta de la base y otro
+            (opcional) para el temporal. Cuando se pide un temporal
+            aparte se le da tambien OTRO volumen (`st_dev`), que es lo
+            que mira `_c_base_datos` para decidir si son dos sitios o
+            uno."""
+            _tmp = _tf.gettempdir()
+
+            def _du(p):
+                if tmp_gb is not None and _os.path.abspath(p) \
+                        == _os.path.abspath(_tmp):
+                    return _DU(int(tmp_gb * 10**9))
+                return _DU(int(base_gb * 10**9))
+            _sh.disk_usage = _du
+
+            def _stat(p, *a, **k):
+                r = _st_prev(p, *a, **k)
+                if tmp_gb is None:
+                    return r
+                _es_tmp = (_os.path.abspath(p) == _os.path.abspath(_tmp))
+                return _StDev(r, 2 if _es_tmp else 1)
+            _os.stat = _stat
+
+        _libres(500)
+        r = sd._c_base_datos(conn)
+        comprobar("una base de 400 MB con disco de sobra es VERDE",
+                  r["estado"] == sd.OK, str(r))
+        comprobar("y NUNCA manda 'pasa a Postgres' ni tocar "
+                  "MAX_TRADES_TOTAL: ninguno de los dos arreglaba nada",
+                  "MAX_TRADES_TOTAL" not in str(r)
+                  and "Postgres" not in str(r), str(r))
+        comprobar("dice cuanto disco queda donde vive la base",
+                  "GB libres donde vive la base" in r["detalle"],
+                  r["detalle"])
+
+        # El `-wal` ocupa disco igual: si no se suma, la cifra que ve el
+        # dueño y las varas de disco se quedan cortas.
+        _wal = _base + "-wal"
+        open(_wal, "wb").close()
+        _tam[_os.path.abspath(_wal)] = 50 * 10**6
+        r = sd._c_base_datos(conn)
+        comprobar("el tamaño incluye el -wal (400 + 50 = 450 MB)",
+                  "450 MB" in r["detalle"], r["detalle"])
+        comprobar("y se DICE que el WAL va dentro, para que la cifra "
+                  "cuadre con lo que ve el dueño en su carpeta (y se "
+                  "nombra tambien el -shm, que va en la misma suma)",
+                  "de WAL/SHM" in r["detalle"], r["detalle"])
+        _shm = _base + "-shm"
+        open(_shm, "wb").close()
+        _tam[_os.path.abspath(_shm)] = 20 * 10**6
+        comprobar("y el -shm tambien (400 + 50 + 20 = 470 MB)",
+                  "470 MB" in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        _os.remove(_shm)
+        _tam.pop(_os.path.abspath(_shm), None)
+        _os.remove(_wal)
+        _tam.pop(_os.path.abspath(_wal), None)
+        comprobar("sin WAL, la cifra va a secas",
+                  "de WAL" not in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        # Una base recien creada son 150 KB: decir "0 MB" del archivo que
+        # se esta midiendo no informa de nada.
+        _MB400 = 155648
+        comprobar("una base recien creada se dice en KB, no '0 MB'",
+                  "156 KB" in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        _MB400 = 400 * 10**6
+
+        # ROJO y AMARILLO salen del disco RELATIVO a la base.
+        _libres(0.6)                                   # < 400MB * 2
+        r = sd._c_base_datos(conn)
+        comprobar("con el disco por debajo del doble de la base, ROJO",
+                  r["estado"] == sd.CRIT, str(r))
+        comprobar("y el consejo dice DONDE falta sitio, no que cambies "
+                  "de motor",
+                  "carpeta de la base" in r["accion"]
+                  and "MAX_TRADES_TOTAL" not in r["accion"]
+                  and "Postgres" not in r["accion"], r["accion"])
+        _libres(1.5)                                   # entre 2x y 6x
+        r = sd._c_base_datos(conn)
+        comprobar("con el disco justo, AMARILLO",
+                  r["estado"] == sd.WARN, str(r))
+        comprobar("y ese amarillo tampoco manda cambiar de motor",
+                  "Postgres" not in r["accion"], r["accion"])
+
+        # EL FALLO QUE MOTIVO LA OLA, EN OTRO MONTAJE: un /tmp pequeño
+        # no puede dar rojo permanente. Sin copia previa que medir, al
+        # backup se le suponen 1,5x la base: 600 MB para una base de
+        # 400 MB. Con 1,2 GB va sobrado; con la vara de la otra carpeta
+        # (2x mas el margen del aviso, 2,4 GB) esto habria sido rojo o
+        # amarillo eterno, que es justo el fallo que se esta cerrando.
+        _libres(500, tmp_gb=1.2)
+        r = sd._c_base_datos(conn)
+        comprobar("un /tmp pequeño donde la copia CABE de sobra no es "
+                  "rojo ni amarillo",
+                  r["estado"] == sd.OK, str(r))
+        comprobar("y el detalle distingue los dos sitios",
+                  "en el temporal" in r["detalle"], r["detalle"])
+        _libres(500, tmp_gb=0.7)      # cabe, pero justo: aviso previo
+        r = sd._c_base_datos(conn)
+        comprobar("con el temporal justo, AMARILLO (el aviso previo "
+                  "tambien existe en el temporal)",
+                  r["estado"] == sd.WARN and "temporal" in r["accion"],
+                  str(r))
+        _libres(500, tmp_gb=0.3)      # 300 MB: no cabe la copia
+        r = sd._c_base_datos(conn)
+        comprobar("pero si en el temporal no cabe la copia, ROJO",
+                  r["estado"] == sd.CRIT, str(r))
+        comprobar("y el consejo apunta al TEMPORAL, no a `backups/`",
+                  "temporal" in r["accion"]
+                  and "backups/" not in r["accion"], r["accion"])
+
+        # Una base de 10 GB no puede dejar /salud en amarillo eterno,
+        # pero el amarillo TIENE que seguir estando por encima del rojo:
+        # con el techo suelto de antes (5 GB) el aviso previo caia POR
+        # DEBAJO de la linea roja (2x = 20 GB) y se pasaba de verde a
+        # rojo sin banda de aviso.
+        # Con el temporal en OTRO disco y de sobra, quien decide es la
+        # banda de la base y solo ella.
+        _MB400 = 10 * 10**9
+        _libres(20, tmp_gb=500)
+        r = sd._c_base_datos(conn)
+        comprobar("base de 10 GB con 20 GB libres: AMARILLO, no verde "
+                  "(el aviso va SIEMPRE por encima del rojo)",
+                  r["estado"] == sd.WARN
+                  and "donde vive la base" in r["accion"], str(r))
+        _libres(19, tmp_gb=500)                        # por debajo de 2x
+        comprobar("y con 19 GB (menos del doble) ya es ROJO",
+                  sd._c_base_datos(conn)["estado"] == sd.CRIT,
+                  str(sd._c_base_datos(conn)))
+        _libres(26, tmp_gb=500)                        # 20 GB + 5 de tope
+        comprobar("con 26 GB libres vuelve a VERDE: el margen del aviso "
+                  "lleva techo y no exige 60 GB",
+                  sd._c_base_datos(conn)["estado"] == sd.OK,
+                  str(sd._c_base_datos(conn)))
+        _MB400 = 400 * 10**6
+
+        # Cuando los DOS montajes van justos, el consejo nombra los dos:
+        # en ROJO y tambien en el aviso previo.
+        _libres(0.6, tmp_gb=0.3)
+        r = sd._c_base_datos(conn)
+        comprobar("si faltan sitio la carpeta de la base Y el temporal, "
+                  "el consejo nombra los dos",
+                  r["estado"] == sd.CRIT
+                  and "la carpeta de la base y el temporal"
+                  in r["accion"], r["accion"])
+        _libres(0.9, tmp_gb=0.65)     # los dos justos, ninguno en rojo
+        r = sd._c_base_datos(conn)
+        comprobar("y en AMARILLO tambien los nombra los dos",
+                  r["estado"] == sd.WARN
+                  and "donde vive la base" in r["accion"]
+                  and "temporal" in r["accion"], r["accion"])
+
+
+        # Y una base diminuta tiene banda amarilla antes del rojo.
+        _MB400 = 1000
+        _libres(3)
+        comprobar("base diminuta con 3 GB libres: VERDE",
+                  sd._c_base_datos(conn)["estado"] == sd.OK)
+        _libres(0.7)
+        comprobar("con 700 MB libres: AMARILLO (aviso antes del rojo)",
+                  sd._c_base_datos(conn)["estado"] == sd.WARN)
+        _libres(0.1)
+        comprobar("con 100 MB libres: ROJO",
+                  sd._c_base_datos(conn)["estado"] == sd.CRIT)
+        _MB400 = 400 * 10**6
+
+        # Si no se puede medir el disco, AMARILLO: ciego no es sano.
+        def _revienta(p):
+            raise PermissionError("sin permiso")
+        _sh.disk_usage = _revienta
+        r = sd._c_base_datos(conn)
+        comprobar("si no se puede medir el disco, AMARILLO y se dice",
+                  r["estado"] == sd.WARN
+                  and "no se pudo medir" in r["detalle"], str(r))
+
+        # Los huecos de las purgas: informacion, no alarma.
+        _libres(500)
+        _real_exec = conn.execute
+
+        class _ConnHuecos:
+            """Base falsa con N páginas libres de 4 KB."""
+
+            def __init__(self, paginas):
+                self.paginas = paginas
+
+            def execute(self, sql, params=()):
+                if "freelist_count" in sql:
+                    return _CursorFalso([(self.paginas,)])
+                if "page_size" in sql:
+                    return _CursorFalso([(4096,)])
+                return _real_exec(sql, params)
+
+            def commit(self):
+                return conn.commit()
+
+        r = sd._c_base_datos(_ConnHuecos(30000))      # ≈123 MB de 400
+        comprobar("cuando hay huecos gordos lo dice, y no como alarma",
+                  "huecos de purgas" in r["detalle"]
+                  and r["estado"] == sd.OK, str(r))
+        comprobar("y no manda compactar (no hay mando que lo haga)",
+                  "compactando" not in r["detalle"], r["detalle"])
+        # Los DOS lados del umbral, porque un hueco pequeño mencionado
+        # asusta sin motivo: hacen falta 20 MB Y un 15% del archivo.
+        r = sd._c_base_datos(_ConnHuecos(2500))       # ≈10 MB: poco bulto
+        comprobar("10 MB de huecos no se mencionan (por debajo de 20 MB)",
+                  "huecos de purgas" not in r["detalle"], r["detalle"])
+        r = sd._c_base_datos(_ConnHuecos(6100))       # ≈25 MB = 6% de 400
+        comprobar("25 MB de huecos en 400 MB tampoco (es solo el 6%)",
+                  "huecos de purgas" not in r["detalle"], r["detalle"])
+        # Y el suelo de 20 MB por separado: aqui el PORCENTAJE si pasa
+        # (12 de 60 MB = 20%), pero 12 MB no son bulto que explicar.
+        _MB400 = 60 * 10**6
+        r = sd._c_base_datos(_ConnHuecos(2930))       # ≈12 MB = 20% de 60
+        comprobar("12 MB de huecos no se mencionan aunque sean el 20% "
+                  "del archivo: no llegan al suelo de 20 MB",
+                  "huecos de purgas" not in r["detalle"], r["detalle"])
+        r = sd._c_base_datos(_ConnHuecos(7300))       # ≈30 MB = 50% de 60
+        comprobar("30 MB de huecos en 60 MB si se mencionan",
+                  "huecos de purgas" in r["detalle"], r["detalle"])
+        _MB400 = 400 * 10**6
+
+        # La copia diaria: tamaño REAL y EDAD, y solo si CABE en Telegram.
+        _os.makedirs(_os.path.join(_d, "backups"))
+        _cop = _os.path.join(_d, "backups", "wallets_backup_1.db.gz")
+        open(_cop, "wb").close()
+        _tam[_os.path.abspath(_cop)] = 60 * 10**6
+
+        # El job apunta la hora DESPUES de copiar; sin esa marca, el
+        # archivo que hay en `backups/` no es una copia terminada.
+        from db import get_setting as _gset
+        _ts_prev = _gset(conn, "last_backup_ts", None)
+        _tsm_prev = _gset(conn, "last_backup_manual_ts", None)
+
+        def _marcar(ts, clave="last_backup_ts"):
+            """Pone UNO de los dos relojes y borra el otro, para que la
+            prueba no dependa de lo que haya dejado nadie."""
+            for _k in ("last_backup_ts", "last_backup_manual_ts"):
+                if _k == clave:
+                    _sset(conn, _k, ts)
+                else:
+                    conn.execute("DELETE FROM settings WHERE key=?", (_k,))
+            conn.commit()
+        _marcar(_t.time())
+        r = sd._c_base_datos(conn)
+        comprobar("dice el tamaño real de la ultima copia y que no cabe "
+                  "en Telegram",
+                  "60 MB" in r["detalle"]
+                  and "no cabe en Telegram" in r["detalle"], r["detalle"])
+        comprobar("NO afirma que se enviara (eso no lo sabe: el POST "
+                  "puede haber muerto)",
+                  "enviada" not in r["detalle"], r["detalle"])
+        comprobar("y dice la EDAD, para no contradecir al aviso de backup",
+                  "hace 0 h" in r["detalle"], r["detalle"])
+        _tam[_os.path.abspath(_cop)] = 10 * 10**6
+        r = sd._c_base_datos(conn)
+        comprobar("una copia pequeña se anuncia como 'cabe en Telegram', "
+                  "no como 'enviada'",
+                  "cabe en Telegram" in r["detalle"]
+                  and "enviada" not in r["detalle"], r["detalle"])
+        _os.utime(_cop, (_t.time() - 40 * 86400,) * 2)
+        comprobar("una copia de hace 40 dias se anuncia como vieja",
+                  "hace 960 h" in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        # Si el reloj del equipo iba adelantado cuando se hizo la copia,
+        # el archivo y su marca quedan "en el futuro" y la resta salia
+        # negativa: "hace -2 h".
+        _os.utime(_cop, (_t.time() + 7200,) * 2)
+        _marcar(_t.time() + 7200)
+        comprobar("una copia con fecha futura no dice 'hace -2 h'",
+                  "hace 0 h" in sd._c_base_datos(conn)["detalle"]
+                  and "hace -" not in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        # Con varias copias se mira la MAS NUEVA, no la mas vieja: la
+        # rotacion guarda 5 y la vieja podria ser de hace una semana.
+        _vieja = _os.path.join(_d, "backups", "wallets_backup_0.db.gz")
+        open(_vieja, "wb").close()
+        _tam[_os.path.abspath(_vieja)] = 99 * 10**6
+        _os.utime(_vieja, (_t.time() - 30 * 86400,) * 2)
+        _os.utime(_cop, (_t.time() - 3600,) * 2)
+        _marcar(_t.time() - 3600)
+        r = sd._c_base_datos(conn)
+        comprobar("con dos copias se informa de la MAS NUEVA (10 MB hace "
+                  "1 h), no de la vieja de 99 MB",
+                  "10 MB hace 1 h" in r["detalle"]
+                  and "99 MB" not in r["detalle"], r["detalle"])
+        _os.remove(_vieja)
+
+        # EL CASO QUE MOTIVA EL CRUCE: el job copia con `copyfile` al
+        # nombre definitivo y apunta la hora DESPUES. Si el disco se
+        # llena a mitad queda un archivo truncado y flamante, y /salud
+        # lo anunciaba como "última copia 0 MB hace 0 h" justo encima de
+        # `_c_backup` gritando "SIN RESPALDO desde hace 90 h".
+        # (a) El archivo es MAS NUEVO que la marca del job: no se le
+        # llama copia, pero TAMPOCO se le acusa. Hay un camino honrado
+        # que deja el reloj sin marcar (el /backup manual guarda bien y
+        # revienta luego al enviar por Telegram).
+        _os.utime(_cop, (_t.time(),) * 2)
+        _marcar(_t.time() - 90 * 3600)
+        _tam[_os.path.abspath(_cop)] = 10 * 10**6
+        r = sd._c_base_datos(conn)
+        comprobar("un archivo mas nuevo que la marca del job NO se "
+                  "anuncia como copia terminada, pero SI se dice su edad",
+                  "última copia" not in r["detalle"]
+                  and "ningún backup lo ha registrado" in r["detalle"]
+                  and "hace 0 h" in r["detalle"], r["detalle"])
+        comprobar("y no se le acusa de estar a medias: puede ser una "
+                  "copia buena cuyo reloj no se llego a marcar",
+                  "a medias" not in r["detalle"], r["detalle"])
+        comprobar("de ese archivo tampoco se afirma que quepa en "
+                  "Telegram",
+                  "cabe en Telegram" not in r["detalle"], r["detalle"])
+        # (b) El archivo esta VACIO: eso no admite interpretacion.
+        _marcar(_t.time())
+        _tam[_os.path.abspath(_cop)] = 0
+        comprobar("un archivo de 0 bytes se dice VACIO, no 'ultima copia'",
+                  "VACÍO" in sd._c_base_datos(conn)["detalle"]
+                  and "última copia"
+                  not in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        _tam[_os.path.abspath(_cop)] = 10 * 10**6
+        comprobar("con la marca al dia vuelve a ser una copia normal",
+                  "última copia" in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        # Una copia PEQUEÑA no puede anunciarse como "0 MB": esa cifra la
+        # usa la linea de al lado para decir VACIO.
+        _tam[_os.path.abspath(_cop)] = 300 * 10**3
+        r = sd._c_base_datos(conn)
+        comprobar("una copia de 300 KB se dice en KB, no como '0 MB'",
+                  "300 KB" in r["detalle"]
+                  and "copia 0 MB" not in r["detalle"],
+                  r["detalle"])
+        comprobar("y VACIO sigue reservado para el archivo de 0 bytes",
+                  "VACÍO" not in r["detalle"], r["detalle"])
+        _tam[_os.path.abspath(_cop)] = 10 * 10**6
+        # (c) El /backup MANUAL usa SU PROPIO reloj: con solo ese puesto,
+        # la copia sigue siendo una copia.
+        _marcar(_t.time(), "last_backup_manual_ts")
+        comprobar("una copia registrada solo por el /backup manual "
+                  "tambien cuenta como copia",
+                  "última copia" in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        # (d) El margen es de UNA HORA, no de un dia: entre guardar y
+        # marcar solo hay dos viajes a Telegram.
+        _marcar(_t.time() - 3 * 3600)
+        comprobar("con la marca de hace 3 h y el archivo de ahora, ya no "
+                  "se le llama copia terminada",
+                  "última copia"
+                  not in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        _marcar(_t.time() - 600)
+        comprobar("pero 10 minutos de diferencia entran en el margen",
+                  "última copia" in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+        _marcar(_t.time())
+
+        # La vara del temporal se MIDE con la ultima copia, no se supone:
+        # el pico ahi es la copia sin comprimir MAS su .gz.
+        _tam[_os.path.abspath(_cop)] = 380 * 10**6     # casi no comprime
+        _libres(500, tmp_gb=0.7)
+        comprobar("si la copia casi no comprime, 700 MB de temporal no "
+                  "bastan para una base de 400 MB: ROJO",
+                  sd._c_base_datos(conn)["estado"] == sd.CRIT,
+                  str(sd._c_base_datos(conn)))
+        _tam[_os.path.abspath(_cop)] = 10 * 10**6      # comprime mucho
+        _libres(500, tmp_gb=0.55)
+        comprobar("y si comprime mucho, 550 MB bastan: no es ROJO",
+                  sd._c_base_datos(conn)["estado"] != sd.CRIT,
+                  str(sd._c_base_datos(conn)))
+        # El tope de 2x: una copia MAS GRANDE que la base no puede pedir
+        # 3x de temporal.
+        _tam[_os.path.abspath(_cop)] = 900 * 10**6
+        _libres(500, tmp_gb=0.9)
+        comprobar("aunque la copia sea mayor que la base, al temporal no "
+                  "se le piden mas de 2x (900 MB para 400 MB: no ROJO)",
+                  sd._c_base_datos(conn)["estado"] != sd.CRIT,
+                  str(sd._c_base_datos(conn)))
+        # Y el suelo de 1,3x: una copia diminuta tampoco baja la vara a
+        # ras de suelo, porque en el temporal esta ADEMAS el .db entero.
+        _tam[_os.path.abspath(_cop)] = 1 * 10**6
+        _libres(500, tmp_gb=0.45)
+        comprobar("y con una copia diminuta la vara no baja de 1,3x "
+                  "(450 MB para 400 MB: ROJO)",
+                  sd._c_base_datos(conn)["estado"] == sd.CRIT,
+                  str(sd._c_base_datos(conn)))
+
+        # EL /backup MANUAL guarda el .db SIN comprimir en `backups/`.
+        # Medir la compresion con ese archivo daria tasa ~1, la vara del
+        # temporal se iria al tope y /salud daria ROJO 24 h por haber
+        # pedido una copia a mano. Solo se aprende de un `.gz`.
+        _db_manual = _os.path.join(_d, "backups", "backup_20260830_1200.db")
+        open(_db_manual, "wb").close()
+        _tam[_os.path.abspath(_db_manual)] = 400 * 10**6
+        _os.utime(_db_manual, (_t.time(),) * 2)
+        _marcar(_t.time(), "last_backup_manual_ts")
+        _libres(500, tmp_gb=0.7)
+        r = sd._c_base_datos(conn)
+        comprobar("una copia manual SIN comprimir no dispara el rojo del "
+                  "temporal: la tasa solo se aprende de un .gz",
+                  r["estado"] != sd.CRIT, str(r))
+        comprobar("(pero si se informa de ella)",
+                  "400 MB hace 0 h" in r["detalle"], r["detalle"])
+        _os.remove(_db_manual)
+        _tam.pop(_os.path.abspath(_db_manual), None)
+        _marcar(_t.time())
+
+        # Mismo volumen = UN solo sitio. Se nota cuando la vara que
+        # aprieta es la del temporal (base grande + copia que casi no
+        # comprime): sin juntarlos, /salud mandaria a mirar TMPDIR de una
+        # carpeta que vive en el mismo disco que acaba de nombrar.
+        _MB400 = 10 * 10**9
+        _tam[_os.path.abspath(_cop)] = int(9.5 * 10**9)
+        _libres(27)
+        r = sd._c_base_datos(conn)
+        comprobar("con la base y el temporal en el mismo disco, el aviso "
+                  "habla de UN solo sitio",
+                  r["estado"] == sd.WARN
+                  and "donde vive la base" in r["accion"]
+                  and "temporal" not in r["accion"], str(r))
+        _MB400 = 400 * 10**6
+        _tam[_os.path.abspath(_cop)] = 10 * 10**6
+        # Y en ROJO tambien: con un disco unico no puede mandar a mirar
+        # TMPDIR de una carpeta que esta en el disco que acaba de nombrar
+        # (y el rojo es el que sale por Telegram cada 12 h).
+        _libres(0.4)
+        r = sd._c_base_datos(conn)
+        comprobar("con un solo disco, el ROJO tampoco nombra el temporal",
+                  r["estado"] == sd.CRIT
+                  and "carpeta de la base" in r["accion"]
+                  and "temporal" not in r["accion"], str(r))
+        _libres(500)
+        # Un subdirectorio con 'backup_' en el nombre no es una copia.
+        _os.remove(_cop)
+        _os.makedirs(_os.path.join(_d, "backups", "backup_carpeta"))
+        comprobar("un subdirectorio no se cuenta como copia",
+                  "última copia" not in sd._c_base_datos(conn)["detalle"],
+                  sd._c_base_datos(conn)["detalle"])
+
+        # En Postgres no hay archivo local que medir: nada de esto aplica
+        # y la comprobacion sale en verde sin tocar el disco.
+        _db = __import__("db")
+        _pg_prev = _db.USE_PG
+        try:
+            _db.USE_PG = True
+            _libres(0.001)          # disco lleno: da igual, no es nuestro
+            r = sd._c_base_datos(conn)
+            comprobar("con la base en Postgres, VERDE y sin mirar el "
+                      "disco local",
+                      r["estado"] == sd.OK and "Postgres" in r["detalle"]
+                      and "GB libres" not in r["detalle"], str(r))
+        finally:
+            _db.USE_PG = _pg_prev
+
+        # Si el sistema no sabe decir en que volumen esta cada carpeta,
+        # se cae al respaldo por ruta: con la base y el temporal en la
+        # MISMA carpeta, siguen siendo un solo sitio.
+        _libres(500)
+        _gt_prev0 = _tf.gettempdir
+        try:
+            _tf.gettempdir = lambda: _os.path.dirname(_base)
+
+            import stat as _stmod
+
+            def _stat_revienta(p, *a, **k):
+                # Solo revienta para CARPETAS: es lo unico que mira la
+                # comprobacion de volumen. Si reventara para todo,
+                # `getsize`/`getmtime` caerian tambien y la prueba
+                # pasaria por el camino equivocado.
+                r = _st_prev(p, *a, **k)
+                if _stmod.S_ISDIR(r.st_mode):
+                    raise OSError("st_dev no disponible")
+                return r
+            _os.stat = _stat_revienta
+            r = sd._c_base_datos(conn)
+            comprobar("si no se puede mirar el volumen, el respaldo por "
+                      "ruta sigue viendo un solo sitio",
+                      "en el temporal" not in r["detalle"], r["detalle"])
+        finally:
+            _os.stat = _st_prev
+            _tf.gettempdir = _gt_prev0
+
+        # Los consejos van en cursiva `_{accion}_`: un `_` suelto de una
+        # ruta o de una excepcion rompe el Markdown del mensaje ENTERO.
+        # Se juzga con el ORACULO de tdlib, no con "reglas razonables":
+        # lo que importa no es que no quede ningun `_`, sino que el
+        # mensaje que sale de `salud_text` lo acepte Telegram.
+        _sucio = sd._chk("Base de datos", sd.CRIT, "x",
+                         sd._md_plano(
+                             "[Errno 13] /var/tmp_x a*b`c 'trades_store'"))
+        comprobar("_md_plano deja un consejo que Telegram acepta",
+                  _valido(sd.salud_text([_sucio])) is None,
+                  str(_valido(sd.salud_text([_sucio]))))
+        _crudo = sd._chk("Base de datos", sd.CRIT, "x",
+                         "[Errno 13] /var/tmp_x a*b`c 'trades_store'")
+        comprobar("(y sin el helper, ese mismo consejo lo rechazaria: la "
+                  "prueba vale de algo)",
+                  _valido(sd.salud_text([_crudo])) is not None)
+        # Y en el DETALLE, que NO va en cursiva: ahi un `*` suelto si
+        # rompe (dentro de la cursiva el analizador se salta el interior,
+        # por eso el consejo solo no probaba el `*`).
+        # Cada simbolo de la tabla, UNO A UNO y en el DETALLE (que NO va
+        # en cursiva: dentro de la cursiva el analizador se salta el
+        # interior, asi que el consejo solo no probaba ni el `*` ni el
+        # backtick ni el `[`).
+        for _feo in ("grpc: rechazado en *auth",
+                     "grpc: rechazado en `auth",
+                     "grpc: rechazado en [401",
+                     "grpc: rechazado en /var/tmp_x"):
+            comprobar(f"saneado en el DETALLE: {_feo[-6:]}",
+                      _valido(sd.salud_text(
+                          [sd._chk("X", sd.CRIT,
+                                   sd._md_plano(_feo))])) is None
+                      and _valido(sd.salud_text(
+                          [sd._chk("X", sd.CRIT, _feo)])) is not None,
+                      str(_valido(sd.salud_text(
+                          [sd._chk("X", sd.CRIT, _feo)]))))
+        # NINGUN chequeo del modulo puede meter el texto de una
+        # excepcion crudo en el mensaje: `salud_text` envuelve el consejo
+        # en cursiva y un `_` impar tumba el formato de /salud ENTERO
+        # justo cuando hay un fallo que contar. Se comprueba sobre el
+        # codigo fuente, no chequeo a chequeo: asi cubre tambien los que
+        # no se pueden provocar desde aqui (la IA local, el arranque de
+        # `diagnostico`).
+        import ast as _ast
+        _src = open(sd.__file__, encoding="utf-8").read()
+        # Nombres cuyo contenido lo escribe ALGUIEN DE FUERA: el texto de
+        # una excepcion, la url y el modelo que teclea el dueño, el
+        # `error` que guarda LaserStream (que es `str(e)`), y el modulo y
+        # el tipo del error mas frecuente. Si mañana entra otro dato
+        # ajeno al mensaje, hay que añadirlo AQUI.
+        _FUERA = {"e", "_e", "url", "modelo", "peor", "ls_err", "error",
+                  "modulo", "tipo"}
+        # Un numero no puede llevar formato de Markdown, y `_md_plano` es
+        # justo el saneador: dentro de estas llamadas ya no se mira.
+        _SEGURAS = ("_md_plano", "int", "float", "len", "round")
+        _crudos = []
+
+        def _revisar(_n, _seguro):
+            if isinstance(_n, _ast.Call):
+                _f = (getattr(_n.func, "id", "")
+                      or getattr(_n.func, "attr", ""))
+                if _f in _SEGURAS:
+                    _seguro = True
+            if isinstance(_n, _ast.IfExp):
+                # La CONDICION no sale en el mensaje; solo las ramas.
+                _revisar(_n.body, _seguro)
+                _revisar(_n.orelse, _seguro)
+                return
+            if (isinstance(_n, _ast.Name) and _n.id in _FUERA
+                    and not _seguro):
+                _crudos.append(f"linea {_n.lineno}: {_n.id}")
+            for _h in _ast.iter_child_nodes(_n):
+                _revisar(_h, _seguro)
+
+        _railway = []
+        for _n in _ast.walk(_ast.parse(_src)):
+            if not (isinstance(_n, _ast.Call)
+                    and getattr(_n.func, "id", "") == "_chk"):
+                continue
+            for _arg in list(_n.args) + [_k.value for _k in _n.keywords]:
+                _revisar(_arg, False)
+                for _c in _ast.walk(_arg):
+                    if (isinstance(_c, _ast.Constant)
+                            and isinstance(_c.value, str)
+                            and "Railway" in _c.value):
+                        _railway.append(f"linea {_c.lineno}")
+        comprobar("ningun chequeo mete texto de fuera en el mensaje sin "
+                  "pasarlo por _md_plano",
+                  not _crudos, _crudos[:4])
+        comprobar("y ningun consejo manda al dueño a Railway, que dejo "
+                  "de ser produccion el 26/8",
+                  not _railway, _railway[:4])
+
+        # El guardian de arriba mira el texto AJENO. Este mira el
+        # NUESTRO: `salud_text` envuelve el consejo en cursiva `_{...}_`,
+        # asi que un `_` impar en una frase nuestra (`PUBLIC_URL`,
+        # `bot_local.env`) tumba el formato del /salud ENTERO — y en un
+        # chequeo CRIT eso sale ademas por `revisar_y_avisar` cada 12 h.
+        # Los backticks NO protegen dentro de la cursiva; en el detalle,
+        # que no va en cursiva, si. Se juzga con el oraculo de tdlib.
+        def _asignaciones(_fn):
+            """name -> lista de expresiones que se le asignan."""
+            _m = {}
+            for _x in _ast.walk(_fn):
+                if isinstance(_x, _ast.Assign):
+                    for _tg in _x.targets:
+                        if isinstance(_tg, _ast.Name):
+                            _m.setdefault(_tg.id, []).append(_x.value)
+                elif (isinstance(_x, _ast.AugAssign)
+                      and isinstance(_x.target, _ast.Name)):
+                    _m.setdefault(_x.target.id, []).append(_x.value)
+            return _m
+
+        def _lits(_a, _m, _p=0):
+            """Variantes de texto LITERAL de una expresion. Resuelve las
+            variables locales (los mensajes de `_c_base_datos` se arman
+            en `det`, `_donde`, `_como`, `_aviso`, `_extra`…, y sin esto
+            el guardian veia una cadena vacia) y separa las dos ramas de
+            un `x if c else y`. Lo interpolado que no sea una variable
+            local se ignora: eso ya lo cubre `_md_plano`."""
+            if _p > 4:
+                return [""]
+            if isinstance(_a, _ast.Constant):
+                return [_a.value] if isinstance(_a.value, str) else [""]
+            if isinstance(_a, _ast.JoinedStr):
+                _out = [""]
+                for _v in _a.values:
+                    if isinstance(_v, _ast.Constant):
+                        _out = [_o + str(_v.value) for _o in _out]
+                    elif (isinstance(_v, _ast.FormattedValue)
+                          and isinstance(_v.value, _ast.Name)):
+                        _sub = _lits(_v.value, _m, _p + 1)[:3]
+                        _out = [_o + _s for _o in _out for _s in _sub]
+                return _out[:6]
+            if isinstance(_a, _ast.BinOp) and isinstance(_a.op, _ast.Add):
+                _i = _lits(_a.left, _m, _p + 1)[:3]
+                _d2 = _lits(_a.right, _m, _p + 1)[:3]
+                return [_x + _y for _x in _i for _y in _d2][:6]
+            if isinstance(_a, _ast.IfExp):
+                return (_lits(_a.body, _m, _p + 1)
+                        + _lits(_a.orelse, _m, _p + 1))[:6]
+            if isinstance(_a, _ast.Name):
+                _out = []
+                for _v in _m.get(_a.id, [])[:4]:
+                    _out += _lits(_v, _m, _p + 1)
+                return _out[:6] or [""]
+            return [""]
+
+        _rotos = []
+        _arbol = _ast.parse(_src)
+        for _fn in _ast.walk(_arbol):
+            if not isinstance(_fn, (_ast.FunctionDef,)):
+                continue
+            _m = _asignaciones(_fn)
+            for _n in _ast.walk(_fn):
+                if not (isinstance(_n, _ast.Call)
+                        and getattr(_n.func, "id", "") == "_chk"):
+                    continue
+                _a = list(_n.args) + [_k.value for _k in _n.keywords]
+                if len(_a) < 3:
+                    continue
+                for _det in _lits(_a[2], _m)[:4]:
+                    for _acc in (_lits(_a[3], _m)[:4] if len(_a) > 3
+                                 else [""]):
+                        _falso = sd._chk("X", sd.CRIT, _det, _acc)
+                        _mal = _valido(sd.salud_text([_falso]))
+                        if _mal:
+                            _rotos.append(f"linea {_n.lineno}: {_mal} | "
+                                          f"{(_det + ' ↳ ' + _acc)[:70]}")
+        comprobar("y ningun texto NUESTRO deja un `_` suelto que rompa "
+                  "el Markdown del mensaje",
+                  not _rotos, _rotos[:4])
+
+        # Y ni siquiera un `_` PAR: dos nombres de variable de entorno en
+        # la misma frase se emparejan, Telegram no protesta y el dueño ve
+        # media frase en cursiva. En nuestro texto, un `_` va SIEMPRE
+        # dentro de backticks.
+        import re as _re
+        _sueltos = []
+        for _fn in _ast.walk(_arbol):
+            if not isinstance(_fn, _ast.FunctionDef):
+                continue
+            _m = _asignaciones(_fn)
+            for _n in _ast.walk(_fn):
+                if not (isinstance(_n, _ast.Call)
+                        and getattr(_n.func, "id", "") == "_chk"):
+                    continue
+                _a = list(_n.args) + [_k.value for _k in _n.keywords]
+                # Igual que `_rotos`: resolviendo variables, porque casi
+                # todo el texto de `_c_base_datos` se arma en `det`,
+                # `_donde`, `_como`, `_aviso` y `_extra`.
+                for _txt in [_x for _ar in _a[2:] for _x in _lits(_ar, _m)]:
+                    if "_" in _re.sub(r"`[^`]*`", "", _txt):
+                        _sueltos.append(f"linea {_n.lineno}: {_txt[:50]}")
+        comprobar("y ningun `_` de nuestro texto viaja fuera de "
+                  "backticks",
+                  not _sueltos, _sueltos[:4])
+
+        # El aviso automatico tiene que CABER en Telegram (4096) y, si no
+        # sale, no puede quemar las 12 h de silencio: la firma se marca
+        # ANTES de mandar.
+        import sys as _sys
+        _rt_prev = _sys.modules.get("realtime")
+        _enviados = []
+
+        class _RtFalso:
+            @staticmethod
+            def tg_send(txt, buttons=None):
+                _enviados.append(txt)
+                return len(txt.encode("utf-16-le")) // 2 <= 4096
+
+        _muchos = [sd._chk(f"C{_i}", sd.CRIT, "d" * 300, "a" * 300)
+                   for _i in range(12)]
+        _diag_prev = sd.diagnostico
+        _int_prev = sd.interpretar
+        try:
+            _sys.modules["realtime"] = _RtFalso
+            sd.diagnostico = lambda: _muchos
+            sd.interpretar = lambda _c: "L" * 1500
+            conn.execute("DELETE FROM settings WHERE key LIKE 'salud_ultimo%'")
+            conn.commit()
+            sd.revisar_y_avisar()
+            comprobar("el aviso automatico se recorta para caber en "
+                      "Telegram (se cae la lectura de la IA, no el aviso)",
+                      _enviados
+                      and len(_enviados[0].encode("utf-16-le")) // 2 <= 4096
+                      and "Lectura de la IA" not in _enviados[0]
+                      and "recortado" in _enviados[0]
+                      # y lo que queda son los chequeos, no un muñon
+                      and _enviados[0].count("🔴") >= 4,
+                      str(len(_enviados[0]) if _enviados else 0))
+            comprobar("y lo recortado sigue siendo Markdown valido",
+                      _valido(_enviados[0]) is None,
+                      str(_valido(_enviados[0])))
+            # Se cortan LINEAS ENTERAS: ninguna linea del mensaje puede
+            # ser un trozo de otra (cortar por caracteres partiria un
+            # `*Nombre*` y devolveria otro 400).
+            _todas = set(sd.salud_text(_muchos, con_ia=True).split("\n"))
+            comprobar("y ninguna linea sale partida por la mitad",
+                      all(_l in _todas
+                          for _l in _enviados[0].split("\n")[2:-1]),
+                      [_l[:40] for _l in _enviados[0].split("\n")[2:-1]
+                       if _l not in _todas][:2])
+            # Y si aun asi Telegram lo rechaza, no se marca el silencio.
+            _enviados.clear()
+            conn.execute("DELETE FROM settings WHERE key LIKE 'salud_ultimo%'")
+            conn.commit()
+            _RtFalso.tg_send = staticmethod(
+                lambda txt, buttons=None: _enviados.append(txt) or False)
+            sd.revisar_y_avisar()
+            comprobar("si el aviso NO sale, no se queman las 12 h de "
+                      "silencio",
+                      not (_gset(conn, "salud_ultimo_aviso", "") or ""),
+                      repr(_gset(conn, "salud_ultimo_aviso", "")))
+        finally:
+            sd.diagnostico = _diag_prev
+            sd.interpretar = _int_prev
+            if _rt_prev is None:
+                _sys.modules.pop("realtime", None)
+            else:
+                _sys.modules["realtime"] = _rt_prev
+            conn.execute("DELETE FROM settings WHERE key LIKE 'salud_ultimo%'")
+            conn.commit()
+
+        # El guardian estatico no puede ver una lista por comprension:
+        # el mensaje que dice QUE VARIABLE falta se comprueba a mano.
+        _env_prev = {_k: _os.environ.pop(_k, None)
+                     for _k in ("HELIUS_API_KEY", "TELEGRAM_BOT_TOKEN")}
+        try:
+            _r = sd._c_apis()
+            comprobar("el aviso de claves enseña el nombre entero, entre "
+                      "backticks, para que se pueda copiar",
+                      "`HELIUS_API_KEY`" in _r["detalle"]
+                      and "`TELEGRAM_BOT_TOKEN`" in _r["detalle"]
+                      and _valido(sd.salud_text([_r])) is None, str(_r))
+        finally:
+            for _k, _v in _env_prev.items():
+                if _v is not None:
+                    _os.environ[_k] = _v
+
+        # El texto de la IA es de FUERA: `revisar_y_avisar` lo pide
+        # siempre, y un `_` impar del modelo tumbaba el /salud entero.
+        _ia_prev = _sys.modules.get("ia_puente")
+        _ab_prev = _sys.modules.get("ai_budget")
+        _dia_prev = _gset(conn, "salud_ia_dia", None)
+
+        class _IaFalsa:
+            @staticmethod
+            def hay_ia():
+                return True
+
+            @staticmethod
+            def completar(prompt, max_tokens=0, timeout=0):
+                # UN solo `_`: con dos se emparejan y Telegram lo
+                # acepta, asi que la prueba no probaria nada.
+                return "Falta PUBLIC_URL: sin ella el webhook no recibe."
+
+        class _AbFalso:
+            @staticmethod
+            def can_call(_c):
+                return True
+        try:
+            _sys.modules["ia_puente"] = _IaFalsa
+            _sys.modules["ai_budget"] = _AbFalso
+            conn.execute("DELETE FROM settings WHERE key=?",
+                         ("salud_ia_dia",))
+            conn.commit()
+            _malo = sd._chk("Ingesta", sd.CRIT, "x", "y")
+            _txt_ia = sd.interpretar([_malo])
+            comprobar("la lectura de la IA se sanea antes de entrar en "
+                      "el mensaje",
+                      _txt_ia is not None
+                      and _valido(sd.salud_text([_malo])
+                                  + "\n\n" + _txt_ia) is None,
+                      str(_txt_ia))
+        finally:
+            for _k, _v in (("ia_puente", _ia_prev), ("ai_budget", _ab_prev)):
+                if _v is None:
+                    _sys.modules.pop(_k, None)
+                else:
+                    _sys.modules[_k] = _v
+            if _dia_prev is not None:
+                _sset(conn, "salud_ia_dia", _dia_prev)
+
+        # El guardian de arriba solo ve lo que entra DIRECTO en `_chk`.
+        # El error de LaserStream (`str(e)` recortado, laserstream.py) se
+        # arma antes en una variable, asi que ademas se comprueba el
+        # comportamiento: un error con `_` no puede tumbar el /salud.
+        # Un numero IMPAR de `_` es lo que de verdad tumba el mensaje;
+        # con dos se emparejan y Telegram lo acepta aunque salga feo.
+        _err_feo = "grpc handshake_failed [401] en *auth*"
+        _ls_prev = _sys.modules.get("laserstream")
+
+        class _LsFalso:
+            @staticmethod
+            def activo():
+                return True
+
+            @staticmethod
+            def estado():
+                return {"conectado": False, "recibidas": 0,
+                        "error": _err_feo, "descartadas": 0,
+                        "arranque": _t.time() - 7200}
+        try:
+            _sys.modules["laserstream"] = _LsFalso
+            _rl = __import__("realtime")
+            _ta_prev = _rl.tracked_addresses
+            _pu_prev = _rl.PUBLIC_URL
+            try:
+                _rl.tracked_addresses = lambda: {"W1"}
+                _rl.PUBLIC_URL = ""
+                for _nombre, _f in (("/salud LaserStream", sd._c_laserstream),
+                                    ("/salud Ingesta", sd._c_webhook)):
+                    _r = _f()
+                    _solo = sd._chk(_r["nombre"], _r["estado"],
+                                    _r["detalle"], _r["accion"])
+                    comprobar(f"{_nombre}: un error de LaserStream con "
+                              f"`_` y `[` no rompe el mensaje",
+                              _valido(sd.salud_text([_solo])) is None,
+                              str(_valido(sd.salud_text([_solo])))
+                              + " | " + str(_r))
+            finally:
+                _rl.tracked_addresses = _ta_prev
+                _rl.PUBLIC_URL = _pu_prev
+        finally:
+            if _ls_prev is None:
+                _sys.modules.pop("laserstream", None)
+            else:
+                _sys.modules["laserstream"] = _ls_prev
+        _imp = ImportError("No module named 'trades_store'")
+        comprobar("un ImportError de este modulo tampoco rompe el aviso "
+                  "(y crudo si lo rompia)",
+                  _valido(sd.salud_text([sd._chk(
+                      "Errores", sd.WARN,
+                      f"no se pudo comprobar "
+                      f"({sd._md_plano(_imp)})")])) is None
+                  and _valido(sd.salud_text([sd._chk(
+                      "Errores", sd.WARN,
+                      f"no se pudo comprobar ({_imp})")])) is not None)
+        # "tmpraro" a proposito: el unico `_` de la ruta es el del
+        # prefijo `salud18q_`, o sea IMPAR. Con dos se emparejan y
+        # Telegram lo acepta, y la prueba no probaria nada.
+        _tmp_raro = _os.path.join(_d, "tmpraro")
+        _os.makedirs(_tmp_raro, exist_ok=True)
+        _gt_prev = _tf.gettempdir
+        try:
+            _tf.gettempdir = lambda: _tmp_raro
+            _libres(500, tmp_gb=0.3)          # solo el temporal va justo
+            r = sd._c_base_datos(conn)
+            comprobar("con una ruta de temporal con `_`, el consejo no "
+                      "rompe el Markdown NI enseña una ruta adulterada",
+                      r["estado"] == sd.CRIT
+                      and "temporal" in r["accion"]
+                      and "TMPDIR / %TEMP%" in r["accion"]
+                      and _d not in r["accion"]
+                      and _valido(sd.salud_text([r])) is None,
+                      str(_valido(sd.salud_text([r]))) + " | " + r["accion"])
+        finally:
+            _tf.gettempdir = _gt_prev
+    finally:
+        _sh.disk_usage = _du_prev
+        _os.path.getsize = _gs_prev
+        _os.stat = _st_prev
+        _cfg.DB_PATH = _ruta_prev
+        # Los dos relojes se devuelven a como estaban (o se borran si no
+        # existian): esta prueba escribe en la base de pruebas y el que
+        # venga detras no tiene por que heredarlo.
+        for _k, _v in (("last_backup_ts", _ts_prev),
+                       ("last_backup_manual_ts", _tsm_prev)):
+            try:
+                if _v is None:
+                    conn.execute("DELETE FROM settings WHERE key=?", (_k,))
+                    conn.commit()
+                else:
+                    _sset(conn, _k, _v)
+            except Exception:
+                pass
+        _sh.rmtree(_d, ignore_errors=True)
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -5458,6 +6412,7 @@ def main():
     prueba_18o_quorum()
     prueba_18o_medidas()
     prueba_18p_radar()
+    prueba_18q_salud_base()
 
     print("\n" + "─" * 60)
     if _FALLOS:
