@@ -2101,6 +2101,74 @@ async def cmd_reembudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @solo_admin
+async def cmd_promover(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Da estrella a las que pasan el embudo y no la tienen.
+
+    /promover      → ensayo: quiénes subirían, con sus números.
+    /promover si   → lo ejecuta de verdad.
+
+    (19-J) La mitad que faltaba. `/reembudo` solo QUITA estrellas
+    (recorre `is_tracked = 1`), y a una billetera ya evaluada sin
+    estrella no vuelve a mirarla nadie. Medido el 30/8 en la base del
+    dueño: 28 pasaban las puertas 1-2 y solo 7 tenían estrella.
+
+    Entran EN PRUEBA: la puerta 3 se gana midiendo en vivo.
+    """
+    from filtro_calidad import promocion
+    ejecutar = bool(ctx.args and ctx.args[0].strip().lower() in
+                    ("si", "sí", "yes"))
+
+    def _trabajo() -> str:
+        conn = get_conn()
+        try:
+            # El interruptor maestro se mira ANTES de tocar nada, con el
+            # mismo ensayo que no escribe (misma lección que /reembudo
+            # en la 19-F: un mensaje que dice lo contrario de lo que
+            # pasó es peor que un error).
+            _prueba = promocion(conn, ejecutar=False)
+            if _prueba.get("error"):
+                return f"⚠️ {_prueba['error']}"
+            if not _prueba["candidatas"]:
+                return ("⬆️ *Nadie que promover.*\nNinguna billetera sin "
+                        "estrella pasa hoy las puertas 1-2 del embudo.\n"
+                        f"⭐ actuales: {_prueba['estrellas_ahora']}")
+            if not ejecutar:
+                from paper_trading import _md as _md_pt
+                _l = []
+                for w, al, cerr, wr, tok, hold, neto in _prueba["detalle"]:
+                    _n = _md_pt(al) if al else f"`{w[:8]}…`"
+                    _l.append(f"  · {_n} — {cerr} cerradas, "
+                              f"{(wr or 0):.0f}% acierto, {tok} tokens, "
+                              f"retiene {(hold or 0):.0f} min, "
+                              f"neto {neto:+.1f} SOL")
+                _mas = _prueba["candidatas"] - len(_prueba["detalle"])
+                _txt = "\n".join(_l)
+                if _mas > 0:
+                    _txt += f"\n  · … y {_mas} más"
+                return (f"🧪 *Ensayo de promoción*\n\n"
+                        f"⭐ actuales: {_prueba['estrellas_ahora']}\n"
+                        f"⬆️ subirían: *{_prueba['candidatas']}*\n\n"
+                        f"{_txt}\n\n"
+                        "Ejecutar de verdad: `/promover si`\n"
+                        "_Entran EN PRUEBA: se miden en vivo antes de "
+                        "confirmarse. Con el modo provisional encendido, "
+                        "el bot ya alerta y copia mientras las mide._")
+            res = promocion(conn, ejecutar=True)
+            if res.get("error"):
+                return f"⚠️ {res['error']}"
+            return (f"⬆️ *Promoción EJECUTADA*\n\n"
+                    f"Promovidas: *{res['candidatas']}*\n"
+                    f"⭐ que quedan: *{res.get('quedan', '?')}*  ·  "
+                    f"confirmadas: *{res.get('confirmadas', '?')}*\n"
+                    f"El detalle de cada una, en /filtro y en su ficha.")
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
 async def cmd_filtro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Estado del filtro de tres puertas: umbrales y quién los pasa hoy."""
     from filtro_calidad import resumen
@@ -2421,6 +2489,7 @@ async def _post_init(app: Application):
             BotCommand("reentrada", "Horas antes de repetir un token"),
             BotCommand("filtro", "Las tres puertas de la estrella"),
             BotCommand("reembudo", "Re-evaluar TODAS con el embudo"),
+            BotCommand("promover", "Dar ⭐ a las que pasan el embudo"),
             BotCommand("saldos", "Saldo SOL de las vigiladas"),
             BotCommand("hermanas", "Billeteras del mismo dueño"),
             BotCommand("ficha", "Ficha completa de una billetera"),
@@ -3145,6 +3214,7 @@ def main():
     app.add_handler(CommandHandler("reentrada", cmd_reentrada))
     app.add_handler(CommandHandler("filtro", cmd_filtro))
     app.add_handler(CommandHandler("reembudo", cmd_reembudo))
+    app.add_handler(CommandHandler("promover", cmd_promover))
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CallbackQueryHandler(on_callback))

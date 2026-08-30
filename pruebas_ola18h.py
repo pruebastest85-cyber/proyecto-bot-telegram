@@ -7976,6 +7976,311 @@ def prueba_19h():
 
 
 
+def prueba_19j():
+    bloque("19-J - el embudo también sabe PONER estrellas, no solo quitarlas")
+    import asyncio as _aio
+    import contextlib
+    import io
+    import time as _t
+    import types as _ty
+    import config as cfg
+    import filtro_calidad as fc
+    import telegram_bot as tb
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    act_previo = cfg.FILTRO_TRES_PUERTAS
+    prov_previo = cfg.FILTRO_PROVISIONAL
+    cfg.FILTRO_TRES_PUERTAS = 1
+    cfg.FILTRO_PROVISIONAL = 1
+    dichos = []
+
+    class _Chat:
+        async def send_message(self, txt, **k):
+            dichos.append(txt)
+
+    class _Msg:
+        chat = _Chat()
+
+        async def reply_text(self, txt, **k):
+            dichos.append(txt)
+
+    upd = _ty.SimpleNamespace(message=_Msg(),
+                              effective_user=_ty.SimpleNamespace(id=1))
+
+    def correr(*args):
+        dichos.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            _aio.run(tb.cmd_promover(upd, _ty.SimpleNamespace(
+                args=list(args))))
+        return dichos[-1] if dichos else ""
+
+    try:
+        from trades_store import _ensure
+        _ensure(conn)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+
+        def op(w, m, side, sol, ts, tokens=100):
+            conn.execute(
+                "INSERT INTO trades (wallet, signature, mint, side, sol, "
+                "tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                (w, f"{w}{m}{side}{ts}{sol}", m, side, sol, tokens, ts))
+
+        def posicion(w, m, gana, hold_min=60, hace_dias=10):
+            t0 = ahora - hace_dias * 86400
+            op(w, m, "compra", 1.0, t0)
+            op(w, m, "venta", 1.5 if gana else 0.5,
+               t0 + int(hold_min * 60))
+
+        def wallet(w, tracked=0, bot=0, grade="Seguimiento"):
+            conn.execute(
+                "INSERT INTO wallets (address, is_tracked, is_bot, "
+                "confirmada, grade) VALUES (?,?,?,0,?)",
+                (w, tracked, bot, grade))
+
+        # BUENA_1 / BUENA_2: sin estrella, historial que pasa 1-2.
+        # Son el caso real medido el 30/8: nota puesta, sin estrella, y
+        # nadie volvia a mirarlas nunca.
+        for w, n in (("BUENA_1", 14), ("BUENA_2", 12)):
+            wallet(w)
+            for i in range(n):
+                posicion(w, f"{w}M{i}", gana=(i < n - 3), hace_dias=10 + i)
+        # MALA_WR: sin estrella y no pasa -> no debe subir.
+        wallet("MALA_WR")
+        for i in range(12):
+            posicion("MALA_WR", f"MWM{i}", gana=(i < 4), hace_dias=10 + i)
+        # BOT_BUENO: historial impecable pero marcada como bot. Jamas.
+        wallet("BOT_BUENO", bot=1)
+        for i in range(14):
+            posicion("BOT_BUENO", f"BBM{i}", gana=(i < 11), hace_dias=10 + i)
+        # YA_ESTRELLA: ya la tiene; no debe contarse como candidata.
+        wallet("YA_ESTRELLA", tracked=1)
+        for i in range(14):
+            posicion("YA_ESTRELLA", f"YEM{i}", gana=(i < 11),
+                     hace_dias=10 + i)
+        conn.commit()
+
+        # ── 1) historial(todas=True) ve mas alla de las ⭐ ────────────
+        _solo = fc.historial(conn)
+        _todas = fc.historial(conn, todas=True)
+        comprobar("historial() por defecto solo ve a las ⭐",
+                  set(_solo) == {"YA_ESTRELLA"}, sorted(_solo))
+        comprobar("con todas=True ve tambien a las que no tienen ⭐",
+                  {"BUENA_1", "BUENA_2", "MALA_WR"} <= set(_todas),
+                  sorted(_todas))
+        comprobar("y NUNCA incluye a una marcada como bot",
+                  "BOT_BUENO" not in _todas, sorted(_todas))
+
+        # ── 2) ensayo: cuenta, lista y NO toca nada ──────────────────
+        res = fc.promocion(conn, ejecutar=False)
+        comprobar("el ensayo encuentra a las 2 que pasan y no mas",
+                  res["candidatas"] == 2, str(res)[:160])
+        comprobar("el ensayo no marca ejecutado", not res["ejecutado"])
+        _n = conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
+                          "is_tracked=1").fetchone()["c"]
+        comprobar("el ensayo no da NI UNA estrella", _n == 1, f"hay {_n}")
+        _dn = {d[0] for d in res["detalle"]}
+        comprobar("lista a las dos buenas por su nombre",
+                  _dn == {"BUENA_1", "BUENA_2"}, sorted(_dn))
+        comprobar("la que ya es ⭐ no aparece como candidata",
+                  "YA_ESTRELLA" not in _dn)
+        comprobar("la que falla el winrate tampoco",
+                  "MALA_WR" not in _dn)
+        comprobar("el bot con historial de oro tampoco",
+                  "BOT_BUENO" not in _dn)
+
+        # ── 3) ejecutar: sube, y entra EN PRUEBA ─────────────────────
+        res2 = fc.promocion(conn, ejecutar=True)
+        comprobar("ejecutar lo marca como ejecutado", res2["ejecutado"])
+        f = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, confirmada, prueba_desde, "
+            "ai_reason FROM wallets").fetchall()}
+        comprobar("BUENA_1 y BUENA_2 ya tienen estrella",
+                  f["BUENA_1"]["is_tracked"] == 1
+                  and f["BUENA_2"]["is_tracked"] == 1,
+                  {k: v["is_tracked"] for k, v in f.items()})
+        comprobar("la que no pasa sigue sin estrella",
+                  f["MALA_WR"]["is_tracked"] == 0)
+        comprobar("el bot sigue sin estrella",
+                  f["BOT_BUENO"]["is_tracked"] == 0)
+        comprobar("entran con su reloj de prueba en marcha",
+                  (f["BUENA_1"]["prueba_desde"] or 0) > 0,
+                  f["BUENA_1"]["prueba_desde"])
+        comprobar("y el motivo queda escrito en la ficha",
+                  "promovida por el embudo" in (f["BUENA_1"]["ai_reason"]
+                                                or ""),
+                  f["BUENA_1"]["ai_reason"])
+
+        # ── 3b) ENTRA sin confirmar, y eso se mira ANTES de que
+        #      `clasificar` pueda maquillarlo.
+        #
+        # Con el modo provisional encendido `clasificar` confirma a la
+        # recien promovida un instante despues, asi que el estado FINAL
+        # no distingue `confirmada = 0` de `confirmada = 1` en el UPDATE
+        # de la promocion — la primera version de esta prueba se comia
+        # esa mutacion entera. Y la diferencia importa: `promocion` hace
+        # COMMIT antes de llamar a `clasificar`, y realtime corre en
+        # otros hilos leyendo las ⭐ confirmadas para alertar y copiar.
+        # Una señal que caiga en esa ventana copiaria a una billetera
+        # que no ha pasado la puerta 3 en su vida — justo lo que este
+        # filtro existe para no repetir (188 de 199 ⭐ sin una sola
+        # señal medida). Se anula `clasificar` para ver lo que quedo
+        # COMMITEADO en el instante intermedio.
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=0, "
+                     "prueba_desde=NULL WHERE address IN "
+                     "('BUENA_1','BUENA_2')")
+        conn.commit()
+        _clas_real = fc.clasificar
+        try:
+            fc.clasificar = lambda c: {"anulado": True}
+            fc.promocion(conn, ejecutar=True)
+        finally:
+            fc.clasificar = _clas_real
+        _c = {r["address"]: r["confirmada"] for r in conn.execute(
+            "SELECT address, confirmada FROM wallets WHERE is_tracked=1"
+        ).fetchall()}
+        comprobar("la promocion COMMITEA la ⭐ nueva SIN confirmar",
+                  _c.get("BUENA_1") in (0, None)
+                  and _c.get("BUENA_2") in (0, None), _c)
+
+        # ── 3c) Y en modo ESTRICTO (sin provisional) sigue sin
+        #      confirmarse: la puerta 3 se gana midiendo, no por tener
+        #      buen pasado.
+        cfg.FILTRO_PROVISIONAL = 0
+        fc.clasificar(conn)
+        _c = {r["address"]: r["confirmada"] for r in conn.execute(
+            "SELECT address, confirmada FROM wallets WHERE is_tracked=1"
+        ).fetchall()}
+        comprobar("en modo estricto la recien promovida NO alerta ni "
+                  "copia hasta tener medidas",
+                  _c.get("BUENA_1") in (0, None), _c)
+        cfg.FILTRO_PROVISIONAL = 1
+
+        # ── 3d) CARRERA: la ⭐ llega sola entre el calculo y el UPDATE.
+        #
+        # `promocion` lee la lista de las que YA son ⭐ y despues calcula
+        # el historial; entre ese calculo y el UPDATE puede pasar mucho
+        # (la consulta de `trades` recorrio 58.401 grupos en la base del
+        # dueño). Si el ciclo automatico le da la estrella en ese hueco,
+        # un UPDATE sin verja le pisaria `prueba_desde` y le reiniciaria
+        # los 14 dias de prueba desde cero — perderia dos semanas de
+        # medidas sin que nadie se entere. Se reproduce el hueco de
+        # verdad: se escribe la estrella DENTRO de `historial`, que corre
+        # justo despues de leer la lista y justo antes del bucle.
+        conn.execute("UPDATE wallets SET is_tracked=0, confirmada=0, "
+                     "prueba_desde=NULL WHERE address IN "
+                     "('BUENA_1','BUENA_2')")
+        conn.commit()
+        _VIEJO = ahora - 9 * 86400      # ya lleva 9 dias de prueba
+        _hist_real = fc.historial
+        _clas_real2 = fc.clasificar
+
+        def _hist_con_carrera(c, wallet=None, todas=False):
+            r = _hist_real(c, wallet, todas) if todas or wallet \
+                else _hist_real(c)
+            if todas:
+                c.execute("UPDATE wallets SET is_tracked=1, "
+                          "prueba_desde=? WHERE address='BUENA_1'",
+                          (_VIEJO,))
+                c.commit()
+            return r
+        try:
+            fc.historial = _hist_con_carrera
+            fc.clasificar = lambda c: {"anulado": True}
+            fc.promocion(conn, ejecutar=True)
+        finally:
+            fc.historial = _hist_real
+            fc.clasificar = _clas_real2
+        _pd = conn.execute("SELECT prueba_desde FROM wallets WHERE "
+                           "address='BUENA_1'").fetchone()["prueba_desde"]
+        comprobar("si la ⭐ llega sola a mitad, la promocion NO le "
+                  "reinicia el reloj de prueba",
+                  _pd == _VIEJO,
+                  f"prueba_desde={_pd} (deberia seguir en {_VIEJO}; "
+                  f"ahora={ahora})")
+
+        # ── 4) idempotente: una segunda pasada no encuentra a nadie ──
+        res3 = fc.promocion(conn, ejecutar=False)
+        comprobar("una segunda pasada ya no ve candidatas",
+                  res3["candidatas"] == 0, str(res3)[:120])
+
+        # ── 5) el interruptor maestro manda ──────────────────────────
+        conn.execute("UPDATE wallets SET is_tracked=0, prueba_desde=NULL "
+                     "WHERE address IN ('BUENA_1','BUENA_2')")
+        conn.commit()
+        cfg.FILTRO_TRES_PUERTAS = 0
+        res4 = fc.promocion(conn, ejecutar=True)
+        comprobar("con el filtro APAGADO devuelve error", res4.get("error"),
+                  str(res4)[:120])
+        _n = conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
+                          "is_tracked=1").fetchone()["c"]
+        comprobar("...y con el filtro apagado NO promueve a nadie",
+                  _n == 1, f"hay {_n}")
+        cfg.FILTRO_TRES_PUERTAS = 1
+
+        # ── 6) el mando de Telegram: ensayo por defecto ──────────────
+        _txt = correr()
+        comprobar("/promover sin argumento es un ENSAYO",
+                  "Ensayo" in _txt, _txt[:120])
+        _n = conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
+                          "is_tracked=1").fetchone()["c"]
+        comprobar("...y el ensayo del mando tampoco da estrellas",
+                  _n == 1, f"hay {_n}")
+        comprobar("el ensayo enseña los numeros de cada una",
+                  "cerradas" in _txt and "acierto" in _txt
+                  and "neto" in _txt, _txt[:200])
+        _txt = correr("si")
+        comprobar("/promover si lo ejecuta de verdad",
+                  "EJECUTADA" in _txt, _txt[:120])
+        _n = conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
+                          "is_tracked=1").fetchone()["c"]
+        comprobar("y ahora si hay 3 estrellas", _n == 3, f"hay {_n}")
+
+        # ── 7) sin candidatas lo dice, no manda una lista vacia ──────
+        _txt = correr()
+        comprobar("sin candidatas responde 'nadie que promover'",
+                  "Nadie que promover" in _txt, _txt[:120])
+
+        # ── 8) la consulta nueva es LITERAL: auditoria.py solo sabe
+        #      leer cadenas constantes, y una armada con .format se la
+        #      salta en silencio (comprobado: 749 consultas con las dos
+        #      literales, 747 con el .format).
+        import ast as _ast
+        import io as _io
+        _src = _io.open(fc.__file__, encoding="utf-8").read()
+        _fn = next(n for n in _ast.walk(_ast.parse(_src))
+                   if isinstance(n, _ast.FunctionDef)
+                   and n.name == "historial")
+        _no_lit = [n for n in _ast.walk(_fn)
+                   if isinstance(n, _ast.Call)
+                   and isinstance(n.func, _ast.Attribute)
+                   and n.func.attr == "execute"
+                   and n.args
+                   and not isinstance(n.args[0], _ast.Constant)]
+        comprobar("las consultas de historial() son cadenas literales "
+                  "(si no, auditoria.py deja de auditarlas)",
+                  not _no_lit,
+                  f"{len(_no_lit)} consulta(s) armadas en tiempo de "
+                  f"ejecucion")
+
+        # ── 9) el mando esta registrado de verdad ────────────────────
+        comprobar("/promover esta dado de alta en el bot",
+                  "CommandHandler(\"promover\"" in _io.open(
+                      tb.__file__, encoding="utf-8").read())
+    finally:
+        cfg.FILTRO_TRES_PUERTAS = act_previo
+        cfg.FILTRO_PROVISIONAL = prov_previo
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM trades")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -8014,6 +8319,7 @@ def main():
     prueba_19f()
     prueba_19g()
     prueba_19h()
+    prueba_19j()
 
     print("\n" + "─" * 60)
     if _FALLOS:

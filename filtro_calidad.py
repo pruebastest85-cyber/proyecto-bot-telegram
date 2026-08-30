@@ -88,7 +88,8 @@ def _mediana(vals):
     return v[m] if n % 2 else (v[m - 1] + v[m]) / 2.0
 
 
-def historial(conn, wallet: str | None = None) -> dict:
+def historial(conn, wallet: str | None = None,
+              todas: bool = False) -> dict:
     """{billetera: {"cerradas", "wr", "tokens", "hold_min"}} desde `trades`.
 
     Posición CERRADA = un mint con compras Y ventas donde se vendió al
@@ -106,6 +107,24 @@ def historial(conn, wallet: str | None = None) -> dict:
 
     Sin `wallet` calcula TODAS las ⭐ en una pasada (para la depuración:
     la versión de una en una haría cientos de consultas).
+
+    Con `todas=True` mira a TODA la base, no solo a las ⭐ — es lo que
+    necesita `promocion()`. (19-J) Sin este parámetro el embudo era de
+    UNA SOLA DIRECCIÓN: `reevaluacion` recorre `WHERE is_tracked = 1` y
+    esta consulta hace `JOIN … WHERE w.is_tracked = 1`, así que las dos
+    solo podían MIRAR a quien ya tenía estrella. Una billetera que
+    perdía la estrella no volvía a ser examinada por nadie
+    (`evaluate_tracked` solo mira las que no tienen evaluación o la
+    tienen caducada, y estas ya tienen nota), en contra de lo que
+    promete el comentario de `reevaluacion`: "las descartadas quedan
+    como candidatas… nada es irreversible". Sí lo era. Medido en la base
+    del dueño el 30/8: 28 billeteras pasaban las puertas 1-2 y solo 7
+    tenían estrella; entre las 21 excluidas para siempre había una con
+    +663 SOL netos, 57% de acierto en 23 cerradas y 45 min de retención.
+
+    Los bots quedan fuera de la pasada `todas` en la propia consulta: no
+    tiene sentido calcularles el historial para luego descartarlos, y
+    así ninguna ruta de promoción puede colarlos por descuido.
     """
     cfg = _cfg()
     desde = int(time.time()) - int(cfg["ventana_dias"]) * 86400
@@ -134,6 +153,32 @@ def historial(conn, wallet: str | None = None) -> dict:
                FROM trades
                WHERE ts >= ? AND wallet = ?
                GROUP BY wallet, mint""", (desde, wallet)).fetchall()
+    elif todas:
+        # (19-J) La consulta va ENTERA y literal, sin `.format` ni f-string
+        # para cambiar solo el WHERE: `auditoria.py` (clase 1) solo sabe
+        # leer consultas que son una cadena constante, así que una armada
+        # con `.format` se la salta EN SILENCIO y deja de estar auditada.
+        # Repetir el SELECT es más feo y mucho más seguro que perder la
+        # red de seguridad justo en la consulta que decide a quién copia
+        # el bot.
+        rows = conn.execute(
+            """SELECT t.wallet AS wallet, t.mint AS mint,
+                      SUM(CASE WHEN t.side = 'compra' THEN t.sol ELSE 0 END)
+                          AS sol_in,
+                      SUM(CASE WHEN t.side = 'venta' THEN t.sol ELSE 0 END)
+                          AS sol_out,
+                      SUM(CASE WHEN t.side = 'compra' THEN t.tokens
+                          ELSE 0 END) AS tok_in,
+                      SUM(CASE WHEN t.side = 'venta' THEN t.tokens
+                          ELSE 0 END) AS tok_out,
+                      MAX(CASE WHEN t.side = 'compra' THEN t.ts END)
+                          AS t_compra,
+                      MAX(CASE WHEN t.side = 'venta' THEN t.ts END)
+                          AS t_venta
+               FROM trades t
+               JOIN wallets w ON w.address = t.wallet
+               WHERE t.ts >= ? AND COALESCE(w.is_bot, 0) = 0
+               GROUP BY t.wallet, t.mint""", (desde,)).fetchall()
     else:
         rows = conn.execute(
             """SELECT t.wallet AS wallet, t.mint AS mint,
@@ -578,6 +623,106 @@ def reevaluacion(conn, ejecutar: bool = False) -> dict:
     # una superviviente del corte puede caer un instante despues por la
     # regla de inactividad (14 dias en prueba sin operar), y el mensaje
     # de "sobreviven N" mentiria. Se informa lo que de verdad quedo.
+    res["quedan"] = conn.execute(
+        """SELECT COUNT(*) AS c FROM wallets
+           WHERE is_tracked = 1""").fetchone()["c"]
+    res["confirmadas"] = conn.execute(
+        """SELECT COUNT(*) AS c FROM wallets
+           WHERE is_tracked = 1 AND confirmada = 1""").fetchone()["c"]
+    return res
+
+
+def promocion(conn, ejecutar: bool = False) -> dict:
+    """La mitad que faltaba del embudo: PONE estrellas, no solo las quita.
+
+    (19-J) `reevaluacion` y `depurar_estrellas` solo recorren
+    `is_tracked = 1`, y `evaluate_tracked` solo mira billeteras sin
+    evaluar o con la evaluación caducada. Resultado: una billetera que
+    ya tiene nota y no tiene estrella NO la vuelve a examinar nadie,
+    aunque su historial pase el embudo de sobra. El embudo solo sabía
+    restar. Medido en la base del dueño el 30/8: 28 pasaban las puertas
+    1-2 y solo 7 tenían estrella.
+
+    Aquí se aplican las MISMAS puertas 1-2 que en el resto del embudo
+    (`puertas_historial`, una sola fuente de verdad) sobre TODA la base.
+    Lo que entra lo hace EN PRUEBA (`confirmada = 0`): la puerta 3 se
+    gana midiendo señales en vivo y no se regala por tener buen pasado
+    — que es justo el error que este filtro existe para no repetir. El
+    `clasificar` final decide si el modo provisional la confirma.
+
+    Los bots quedan fuera desde la consulta (`historial(todas=True)`).
+
+    `ejecutar=False` (por defecto) es un ENSAYO: cuenta y lista sin
+    tocar nada. Mismo trato que `/reembudo`: el dueño ve los números
+    antes de que su bot empiece a copiar a nadie nuevo.
+
+    Con el interruptor maestro apagado devuelve un error en vez de
+    actuar, por el mismo motivo que `reevaluacion`: promover con un
+    embudo que el dueño apagó sería contradecirle.
+    """
+    cfg = _cfg()
+    if not cfg["activo"]:
+        return {"error": "el filtro de tres puertas está APAGADO "
+                         "(FILTRO_TRES_PUERTAS=0); enciéndelo antes de "
+                         "promover con él"}
+    ahora = int(time.time())
+    ya = {r["address"] for r in conn.execute(
+        "SELECT address FROM wallets WHERE is_tracked = 1").fetchall()}
+    hist = historial(conn, todas=True)
+    suben = []
+    for w, h in hist.items():
+        if w in ya:
+            continue
+        pasa, _motivo = puertas_historial(h)
+        if pasa:
+            suben.append((w, h))
+    # Mejores primero: si el dueño corta la lista por donde sea, se
+    # queda con las de más recorrido, no con las que salieron antes del
+    # diccionario.
+    suben.sort(key=lambda x: (-(x[1].get("neto") or 0.0),
+                              -(x[1].get("wr") or 0.0)))
+    alias = {r["address"]: r["alias"] for r in conn.execute(
+        "SELECT address, alias FROM wallets").fetchall()}
+    res = {"candidatas": len(suben), "estrellas_ahora": len(ya),
+           "detalle": [(w, alias.get(w), h["cerradas"], h["wr"],
+                        h["tokens"], h["hold_min"], h.get("neto", 0.0))
+                       for w, h in suben[:60]],
+           "ejecutado": False}
+    if not ejecutar:
+        return res
+    for w, h in suben:
+        try:
+            motivo = (f"⬆️ promovida por el embudo ({ahora}): "
+                      f"{h['cerradas']} cerradas, "
+                      f"{(h['wr'] or 0):.0f}% de acierto, "
+                      f"{h['tokens']} tokens, "
+                      f"neto {h.get('neto', 0.0):+.1f} SOL · ")
+            # `AND is_tracked = 0`: entre el cálculo y este UPDATE el
+            # ciclo automático pudo darle la estrella por su cuenta.
+            # Sin esta verja le pisaríamos `prueba_desde` y volvería a
+            # empezar los 14 días de prueba desde cero.
+            conn.execute(
+                """UPDATE wallets
+                   SET is_tracked = 1, ai_follow = 1, confirmada = 0,
+                       prueba_desde = ?, turno_desde = NULL,
+                       ai_reason = SUBSTR(? || COALESCE(ai_reason,''),
+                                          1, 500)
+                   WHERE address = ? AND is_tracked = 0""",
+                (ahora, motivo, w))
+        except Exception as _e:
+            print(f"· promoción: {w[:8]}… omitida ({_e})")
+    conn.commit()
+    clasificar(conn)
+    try:
+        from db import invalidar_copiables
+        invalidar_copiables()
+    except Exception:
+        pass
+    res["ejecutado"] = True
+    # Igual que en `reevaluacion`: se informa lo que QUEDÓ en la base,
+    # no lo prometido. `clasificar` puede retirar a una recién promovida
+    # (por ejemplo por la regla de inactividad) y decir "subieron 21"
+    # cuando quedaron 19 sería mentir.
     res["quedan"] = conn.execute(
         """SELECT COUNT(*) AS c FROM wallets
            WHERE is_tracked = 1""").fetchone()["c"]
