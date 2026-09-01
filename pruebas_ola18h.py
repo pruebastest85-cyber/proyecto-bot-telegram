@@ -8871,6 +8871,99 @@ def prueba_19n():
         conn.close()
 
 
+def prueba_19p():
+    bloque("19-P - /salud cuenta la MISMA cola que recorre el bot")
+    import ast as _ast
+    import io as _io
+    import config as cfg
+    import salud
+    from db import get_conn
+
+    conn = get_conn()
+    _prev = {k: getattr(cfg, k, None) for k in
+             ("MIN_WINNING_TOKENS", "MIN_BUY_SOL", "MIN_ENTRY_MULTIPLE")}
+    try:
+        # ── 1) Ni un umbral del embudo escrito a mano en esa consulta ──
+        # Estaban a pelo y se separaron de sus mandos: el bot usaba
+        # MIN_WINNING_TOKENS=1 y la consulta decia 2, con MIN_BUY_SOL=0.5
+        # y la consulta 1. /salud enseñaba "85 en cola" con 11.786 de
+        # cola real (medido el 1/9 en la base del dueño). Un panel que
+        # miente es peor que no tenerlo.
+        _src = _io.open(salud.__file__, encoding="utf-8").read()
+        _fn = next(n for n in _ast.walk(_ast.parse(_src))
+                   if isinstance(n, _ast.FunctionDef)
+                   and "en_cola" in _io.StringIO(
+                       _ast.unparse(n)).getvalue())
+        _sql = [n.args[0].value for n in _ast.walk(_fn)
+                if isinstance(n, _ast.Call)
+                and isinstance(n.func, _ast.Attribute)
+                and n.func.attr == "execute" and n.args
+                and isinstance(n.args[0], _ast.Constant)
+                and "winning_tokens_count" in str(n.args[0].value)]
+        comprobar("la consulta de la cola sigue estando en /salud",
+                  len(_sql) == 1, f"{len(_sql)} consultas encontradas")
+        _q = _sql[0]
+        for _lit, _mando in (("winning_tokens_count >= 2",
+                              "MIN_WINNING_TOKENS"),
+                             ("buy_sol, 0) >= 1", "MIN_BUY_SOL"),
+                             ("entry_multiple >= 3", "MIN_ENTRY_MULTIPLE")):
+            comprobar(f"el umbral de {_mando} NO va escrito a mano",
+                      _lit not in _q,
+                      f"encontrado '{_lit}' en la consulta de /salud")
+
+        # ── 2) El mismo numero que la cola de verdad ─────────────────
+        # No basta con que no haya literales: tienen que dar LO MISMO.
+        # Se comparan las dos cuentas sobre la base de pruebas, con unos
+        # umbrales a los que la version vieja habria respondido distinto.
+        cfg.MIN_WINNING_TOKENS = 1
+        cfg.MIN_BUY_SOL = 0.5
+        cfg.MIN_ENTRY_MULTIPLE = 3.0
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM appearances")
+        # UNA ganadora y 0,6 SOL: la version vieja (>=2 y >=1) la habria
+        # dejado fuera de la cuenta; la nueva la incluye, igual que el bot.
+        conn.execute("INSERT INTO wallets (address, winning_tokens_count, "
+                     "is_bot, is_tracked, ai_class) "
+                     "VALUES ('COLA_1',1,0,0,NULL)")
+        conn.execute("INSERT INTO appearances (wallet, mint, reason, "
+                     "buy_sol, entry_multiple) "
+                     "VALUES ('COLA_1','M1','x',0.6,10.0)")
+        # `_c_embudo` sale antes por sus ramas de "ninguna evaluada" y
+        # "0 ⭐": hace falta una evaluada y una ⭐ para que llegue a
+        # contar la cola, que es lo que esta prueba mide.
+        conn.execute("INSERT INTO wallets (address, winning_tokens_count, "
+                     "is_bot, is_tracked, ai_class, pnl_updated) "
+                     "VALUES ('YA_MIRADA',5,0,1,'trader','2026-01-01T00:00:00')")
+        conn.commit()
+
+        def _cuenta_salud():
+            import contextlib
+            import io as _io2
+            with contextlib.redirect_stdout(_io2.StringIO()):
+                r = salud._c_embudo(conn)
+            return str(r)
+
+        _txt = _cuenta_salud()
+        comprobar("/salud cuenta la billetera de 1 ganador y 0,6 SOL "
+                  "(el bot la perfilaria)",
+                  "1 en cola de examen" in _txt, _txt[:160])
+
+        # Y con los umbrales subidos deja de contarla: prueba de que
+        # de verdad LEE la configuracion y no devuelve un numero fijo.
+        cfg.MIN_WINNING_TOKENS = 2
+        _txt2 = _cuenta_salud()
+        comprobar("y si subes MIN_WINNING_TOKENS deja de contarla",
+                  "0 en cola de examen" in _txt2, _txt2[:160])
+    finally:
+        for k, v in _prev.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM appearances")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -8912,6 +9005,7 @@ def main():
     prueba_19j()
     prueba_19k()
     prueba_19n()
+    prueba_19p()
 
     print("\n" + "─" * 60)
     if _FALLOS:

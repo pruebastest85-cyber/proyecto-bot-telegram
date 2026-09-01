@@ -510,22 +510,53 @@ def _c_embudo(conn):
         # verdad (los mismos filtros de la evaluación) y el enfriamiento.
         try:
             from datetime import datetime, timedelta, timezone
-            _c3 = (datetime.now(timezone.utc) - timedelta(days=3)
+            # (19-P) Los umbrales salen de la MISMA configuracion que usa
+            # `evaluate_tracked`, no escritos a mano.
+            #
+            # Estaban a pelo (`winning_tokens_count >= 2`, `buy_sol >= 1`,
+            # `entry_multiple >= 3`) y se habian separado de sus mandos:
+            # el bot usa MIN_WINNING_TOKENS=1 y el dueño tiene
+            # MIN_BUY_SOL=0.5. Resultado medido en su base el 1/9:
+            # /salud decia "85 en cola de examen" cuando la cola real que
+            # recorre el bot era de 11.786 — un factor de 138. El dueño
+            # (y yo) tomamos decisiones sobre el gasto de Helius con ese
+            # numero. Un panel de salud que miente es peor que no tenerlo.
+            #
+            # Mismo patron que la 19-L (AUTO_CYCLE_HOURS) y la 19-O
+            # (FILTRO_PF_MIN): un valor duplicado a mano que se separa de
+            # su fuente sin que nada avise.
+            import os as _os
+            try:
+                import config as _cfg_e
+                _min_gan = int(getattr(_cfg_e, "MIN_WINNING_TOKENS", 1))
+                _min_sol = float(getattr(_cfg_e, "MIN_BUY_SOL", 1.0))
+                _min_mul = float(getattr(_cfg_e, "MIN_ENTRY_MULTIPLE", 3.0))
+            except Exception:
+                _min_gan, _min_sol, _min_mul = 1, 1.0, 3.0
+            try:
+                from ai_analyst import REEVAL_DAYS as _rd
+            except Exception:
+                _rd = 3
+            try:
+                _rech = int(float(_os.getenv("REEVAL_RECHAZADAS_DIAS", "14")))
+            except (TypeError, ValueError):
+                _rech = 14
+            _c3 = (datetime.now(timezone.utc) - timedelta(days=_rd)
                    ).isoformat(timespec="seconds")
-            _c14 = (datetime.now(timezone.utc) - timedelta(days=14)
+            _c14 = (datetime.now(timezone.utc) - timedelta(days=_rech)
                     ).isoformat(timespec="seconds")
             en_cola = conn.execute(
                 """SELECT COUNT(*) c FROM wallets w
-                   WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= 2
+                   WHERE COALESCE(is_bot,0)=0 AND winning_tokens_count >= ?
                      AND (ai_class IS NULL OR pnl_updated IS NULL
                           OR (is_tracked=1 AND pnl_updated < ?)
                           OR (is_tracked=0 AND pnl_updated < ?))
                      AND EXISTS (SELECT 1 FROM appearances a
                                  WHERE a.wallet = w.address
-                                   AND COALESCE(a.buy_sol, 0) >= 1
+                                   AND COALESCE(a.buy_sol, 0) >= ?
                                    AND (a.entry_multiple IS NULL
-                                        OR a.entry_multiple >= 3))""",
-                (_c3, _c14)).fetchone()["c"]
+                                        OR a.entry_multiple >= ?))""",
+                (_min_gan, _c3, _c14, _min_sol, _min_mul)).fetchone()["c"]
             enfriando = conn.execute(
                 """SELECT COUNT(*) c FROM wallets
                    WHERE COALESCE(is_bot,0)=0 AND is_tracked=0
