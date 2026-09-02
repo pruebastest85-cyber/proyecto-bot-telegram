@@ -574,8 +574,65 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         # el marcador mentia (229/300 con la nube sin credito) y, al
         # "agotarse" el contador falso, las evaluaciones corrian SIN IA
         # el resto del dia (clasificacion por grading a ciegas).
-        verdict = ai_verdict(profile, [e["reason"] for e in ev],
-                             track, avoid_aliases=avoid)
+        # ¿Tenia ya la estrella ANTES de esta evaluacion? Lo necesitan
+        # tres cosas: el atajo de aqui abajo, la guarda de las puertas
+        # (que no le quita la ⭐ a nadie) y el reloj del turno (que solo
+        # se estrena al DARLA).
+        try:
+            _fila_prev = conn.execute(
+                "SELECT is_tracked FROM wallets WHERE address = ?",
+                (addr,)).fetchone()
+            _era_estrella = bool(_fila_prev and _fila_prev["is_tracked"])
+        except Exception:
+            _era_estrella = False
+
+        # ── (19-Q) LAS PUERTAS 1-2 SE MIRAN *ANTES* DE GASTAR LA IA ──
+        #
+        # Son gratis, deterministas y de milisegundos; el veredicto de la
+        # IA local cuesta hasta 90 s porque el modelo del dueño razona
+        # antes de responder. Y mas abajo hay una verja que le quita la
+        # estrella a quien no pasa estas puertas — asi que preguntarle a
+        # la IA por alguien que ya las fallo NO PUEDE cambiar el
+        # resultado: solo retrasa la cola.
+        #
+        # Medido en la base del dueño el 2/9, sobre 48 h: de 2.226
+        # billeteras que llegaron a la IA, 2.153 (96,7%) habian fallado
+        # ya las puertas. A ~60 s cada una son **36 horas de reloj** en
+        # 48, con la IA local ocupada en preguntas cuya respuesta no
+        # importaba mientras el chat y las decisiones de salida esperaban
+        # turno.
+        #
+        # El resultado NO cambia: quien falla las puertas acaba con
+        # `seguir = 0` igual, y el respaldo por `grading` —el mismo que
+        # se usa cuando la IA esta caida— rellena nota y clasificacion.
+        # La nota (`grade`) se calcula aparte, asi que `/promover` y la
+        # depuracion siguen viendo lo mismo.
+        #
+        # El calculo se hace UNA vez y se reutiliza en la verja de abajo:
+        # dos copias del mismo criterio es justo como se separan las
+        # cosas sin que nadie se entere (19-L, 19-O, 19-P).
+        _ok12, _m12, _puerta_on = True, "", False
+        try:
+            import config as _cfg_p12
+            _puerta_on = bool(int(getattr(
+                _cfg_p12, "FILTRO_PUERTA_PROMOCION", 1))) and not _era_estrella
+            if _puerta_on:
+                from filtro_calidad import (historial as _hist12,
+                                            puertas_historial as _pue12)
+                _ok12, _m12 = _pue12(_hist12(conn, addr).get(addr))
+        except Exception as e:
+            print(f"· puertas 1-2 previas omitidas: {e}")
+            _ok12, _m12, _puerta_on = True, "", False
+
+        if _puerta_on and not _ok12:
+            # La ⭐ ya es imposible: no se gasta IA. Se deja `verdict` en
+            # None a proposito para caer en el respaldo por grading de
+            # aqui abajo, que es la ruta ya probada para "sin IA".
+            verdict = None
+            print(f"  ⏭️  {addr[:8]}… sin IA (no pasa las puertas): {_m12}")
+        else:
+            verdict = ai_verdict(profile, [e["reason"] for e in ev],
+                                 track, avoid_aliases=avoid)
         if not verdict:
             # Sin IA (sin ANTHROPIC_API_KEY o sin créditos): RESPALDO por
             # grading — la rentabilidad decide, sin gastar IA. El bot sigue
@@ -599,6 +656,22 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
             except Exception as _e:
                 print(f"  · Respaldo grading falló: {_e}")
                 continue
+
+        # (19-Q) Si nos saltamos la IA por las puertas, el motivo de LA
+        # PUERTA se graba aqui.
+        #
+        # La verja de mas abajo vive dentro de `if seguir:` y el respaldo
+        # por grading suele dejar `seguir = 0`, asi que esa verja no
+        # llegaba a correr y la ficha se quedaba con "historial
+        # insuficiente" del grading en vez de decir QUE puerta fallo. El
+        # dueño lee ese campo para entender por que una billetera no
+        # tiene estrella: cambiarle el motivo por otro mas vago es perder
+        # informacion, no ahorrarla. Lo cazaron dos pruebas que ya
+        # existian ("la ficha dice en que puerta se quedo").
+        if _puerta_on and not _ok12 and verdict:
+            verdict["seguir"] = False
+            verdict["razon"] = (
+                f"{verdict.get('razon', '')} · ⛔ sin ⭐: {_m12}")[:500]
 
         try:
             from wallet_score import compute_score
@@ -658,16 +731,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
             print(f"· Señales de fondeo omitidas: {e}")
 
         seguir = 1 if verdict["seguir"] else 0
-        # ¿Tenia ya la estrella ANTES de esta evaluacion? Lo necesitan
-        # dos cosas: la guarda de las puertas (que no le quita la ⭐ a
-        # nadie) y el reloj del turno (que solo se estrena al DARLA).
-        try:
-            _fila_prev = conn.execute(
-                "SELECT is_tracked FROM wallets WHERE address = ?",
-                (addr,)).fetchone()
-            _era_estrella = bool(_fila_prev and _fila_prev["is_tracked"])
-        except Exception:
-            _era_estrella = False
+        # (19-Q) `_era_estrella` ya se calculo ANTES de la IA: lo necesita
+        # el atajo que se salta el veredicto. Aqui se reutiliza.
         # Guarda de rendimiento MEDIDO: si sus señales ya emitidas perdieron
         # dinero de forma consistente, la IA NO puede devolverle la ⭐ (antes
         # la re-evaluación de 3 días revertía en silencio la degradación).
@@ -713,7 +778,12 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         # guardar. Se apaga con FILTRO_PUERTA_PROMOCION=0.
         if seguir:
             try:
-                import config as _cfg_pp
+                # (19-Q) NO se vuelve a calcular: `_ok12`/`_m12`/`_puerta_on`
+                # salen del mismo bloque que decidio si valia la pena
+                # gastar la IA, unos cientos de lineas mas arriba. Tenerlo
+                # dos veces es como se separan los criterios sin que nadie
+                # avise — pasó con AUTO_CYCLE_HOURS (19-L), con
+                # FILTRO_PF_MIN (19-O) y con los umbrales de /salud (19-P).
                 # Solo se aplica a QUIEN NO TIENE la estrella todavia:
                 # esta guarda impide DARLA, no quitarla. Dos motivos:
                 #   · /rastrear del dueño tiene que valer. Si esta guarda
@@ -728,18 +798,12 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
                 # descarga de Helius viene truncada, `_fetch_txs` devuelve
                 # la lista VACIA, `tx_sampled` es 0 y el bucle ya se salto
                 # esta billetera mucho antes de llegar aqui.)
-                if int(getattr(_cfg_pp, "FILTRO_PUERTA_PROMOCION", 1)) \
-                        and not _era_estrella:
-                    from filtro_calidad import (historial as _historial,
-                                                puertas_historial)
-                    _ok12, _m12 = puertas_historial(
-                        _historial(conn, addr).get(addr))
-                    if not _ok12:
-                        seguir = 0
-                        verdict["razon"] = (
-                            f"{verdict.get('razon', '')} · ⛔ sin ⭐: "
-                            f"{_m12}")[:500]
-                        print(f"  ⛔ {addr[:8]}… no recibe ⭐: {_m12}")
+                if _puerta_on and not _ok12:
+                    seguir = 0
+                    verdict["razon"] = (
+                        f"{verdict.get('razon', '')} · ⛔ sin ⭐: "
+                        f"{_m12}")[:500]
+                    print(f"  ⛔ {addr[:8]}… no recibe ⭐: {_m12}")
             except Exception as e:
                 print(f"· guarda de puertas 1-2 omitida: {e}")
 

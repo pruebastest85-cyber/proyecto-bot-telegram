@@ -8964,6 +8964,184 @@ def prueba_19p():
         conn.close()
 
 
+def prueba_19q():
+    bloque("19-Q - la IA solo se gasta donde puede cambiar algo")
+    import contextlib
+    import io
+    import time as _t
+    import config as cfg
+    import ai_analyst as aa
+    from db import get_conn
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    _prev = {k: getattr(cfg, k, None) for k in
+             ("FILTRO_PUERTA_PROMOCION", "FILTRO_TRES_PUERTAS",
+              "FILTRO_WR_MIN", "FILTRO_PF_MIN", "FILTRO_MIN_CERRADAS",
+              "FILTRO_MIN_TOKENS", "FILTRO_HOLD_MIN_MIN", "FILTRO_NETO_MIN",
+              "MIN_WINNING_TOKENS", "MIN_BUY_SOL", "MIN_ENTRY_MULTIPLE",
+              "MAX_EVAL_PER_CYCLE", "EVAL_ADAPTATIVO")}
+    _reales = {"perfil": aa.profile_wallet, "ia": aa.ai_verdict}
+    llamadas_ia = []
+    # `grading` lee sus minimos al IMPORTAR el modulo, asi que no basta
+    # con tocar `config`. Se bajan aqui para que el unico criterio que
+    # decida en esta prueba sean las puertas 1-2, que es lo que mide.
+    import grading as _gr
+    _gr_prev = (_gr.MIN_TRADES, _gr.MIN_POSICIONES, _gr.MIN_TOKENS)
+    _gr.MIN_TRADES, _gr.MIN_POSICIONES, _gr.MIN_TOKENS = 1, 1, 1
+
+    try:
+        cfg.FILTRO_PUERTA_PROMOCION = 1
+        cfg.FILTRO_TRES_PUERTAS = 1
+        cfg.FILTRO_WR_MIN = 0
+        cfg.FILTRO_PF_MIN = 2.0
+        cfg.FILTRO_MIN_CERRADAS = 8
+        cfg.FILTRO_MIN_TOKENS = 8
+        cfg.FILTRO_HOLD_MIN_MIN = 30
+        cfg.FILTRO_NETO_MIN = 0
+        cfg.MIN_WINNING_TOKENS = 1
+        cfg.MIN_BUY_SOL = 0.5
+        cfg.MIN_ENTRY_MULTIPLE = 3.0
+        cfg.EVAL_ADAPTATIVO = 0
+        cfg.MAX_EVAL_PER_CYCLE = 10
+
+        from trades_store import _ensure
+        _ensure(conn)
+        for t in ("wallets", "appearances", "trades", "signals"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+
+        def op(w, m, side, sol, ts, tokens=100):
+            conn.execute(
+                "INSERT INTO trades (wallet, signature, mint, side, sol, "
+                "tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                (w, f"{w}{m}{side}{ts}{sol}", m, side, sol, tokens, ts))
+
+        def pos(w, m, entra, sale, hace_dias=10, hold_min=60):
+            t0 = ahora - hace_dias * 86400
+            op(w, m, "compra", entra, t0)
+            op(w, m, "venta", sale, t0 + int(hold_min * 60))
+
+        def alta(w):
+            conn.execute(
+                "INSERT INTO wallets (address, winning_tokens_count, is_bot, "
+                "is_tracked) VALUES (?,3,0,0)", (w,))
+            conn.execute(
+                "INSERT INTO appearances (wallet, mint, reason, buy_sol, "
+                "entry_multiple) VALUES (?,?,'x',5.0,10.0)", (w, f"AP{w}"))
+
+        # BUENA: pasa las puertas -> la IA SI debe opinar.
+        alta("BUENA")
+        for i in range(12):
+            pos("BUENA", f"B{i}", 1.0, 10.0 if i < 5 else 0.5,
+                hace_dias=10 + i)
+        # MALA: historial corto -> la ⭐ es imposible, la IA sobra.
+        alta("MALA")
+        for i in range(3):
+            pos("MALA", f"M{i}", 1.0, 5.0, hace_dias=10 + i)
+        conn.commit()
+
+        def _perfil_falso(addr):
+            # Con `tokens` vacio el grading la tumba por "0 tokens" antes
+            # de llegar a lo que esta prueba mide. Se le dan 10 tokens
+            # ganadores para que el unico criterio que decida sean las
+            # puertas.
+            _tok = {f"MINT{i}": {"pnl_sol": 2.0, "buys": 2, "sells": 2}
+                    for i in range(10)}
+            return {"tx_sampled": 200, "tokens": _tok, "pnl_total_sol": 5.0,
+                    "net_pnl_sol": 5.0, "unrealized_sol": 0.0,
+                    "pnl_30d_sol": 5.0, "last_tx_ts": ahora - 3600,
+                    "tx_7d": 10, "possible_bot": False,
+                    "flips_1min_pct": 0, "active_hours_24": 5,
+                    "uniform_buys_pct": 0, "mm_tokens": 0,
+                    "held_tokens": 0, "closed_positions": 12,
+                    "win_rate_pct": 50, "hold_median_min": 60}
+
+        def _ia_falsa(profile, ev, track=None, avoid_aliases=None):
+            llamadas_ia.append(1)
+            return {"clasificacion": "trader", "seguir": True,
+                    "confianza": 90, "alias": None,
+                    "razon": "la IA dice que si", "modelo": "falsa"}
+
+        aa.profile_wallet = _perfil_falso
+        aa.ai_verdict = _ia_falsa
+        with contextlib.redirect_stdout(io.StringIO()):
+            aa.evaluate_tracked(conn, limite=10)
+
+        f = {r["address"]: r for r in conn.execute(
+            "SELECT address, is_tracked, ai_reason FROM wallets").fetchall()}
+        comprobar("la IA se llama SOLO una vez, para la que podia ganar "
+                  "la estrella",
+                  len(llamadas_ia) == 1, f"{len(llamadas_ia)} llamadas")
+        comprobar("la que pasa las puertas SI recibe estrella",
+                  f["BUENA"]["is_tracked"] == 1,
+                  str(f["BUENA"]["ai_reason"])[:120])
+        comprobar("y su ficha lleva el veredicto de la IA",
+                  "la IA dice que si" in (f["BUENA"]["ai_reason"] or ""),
+                  str(f["BUENA"]["ai_reason"])[:120])
+        comprobar("la que NO pasa se queda sin estrella igual",
+                  f["MALA"]["is_tracked"] == 0)
+        # Lo que se salta es la IA, NO la explicacion: el dueño lee este
+        # campo para saber por que una billetera no tiene estrella.
+        comprobar("y su ficha dice EN QUE puerta se quedo",
+                  "historial corto" in (f["MALA"]["ai_reason"] or ""),
+                  str(f["MALA"]["ai_reason"])[:160])
+
+        # ── Con la puerta APAGADA la IA vuelve a opinar de todas ──────
+        # Si `FILTRO_PUERTA_PROMOCION=0`, fallar las puertas ya NO impide
+        # la estrella, asi que saltarse la IA cambiaria el resultado.
+        llamadas_ia.clear()
+        cfg.FILTRO_PUERTA_PROMOCION = 0
+        conn.execute("UPDATE wallets SET ai_class=NULL, pnl_updated=NULL, "
+                     "is_tracked=0, ai_reason=NULL")
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            aa.evaluate_tracked(conn, limite=10)
+        comprobar("con la puerta apagada la IA opina de LAS DOS",
+                  len(llamadas_ia) == 2, f"{len(llamadas_ia)} llamadas")
+        cfg.FILTRO_PUERTA_PROMOCION = 1
+
+        # ── A una que YA es ⭐ no se le aplica la puerta ───────────────
+        # La verja existe para no DAR la estrella, no para quitarla: si
+        # aqui se saltara la IA, una ⭐ viva se re-evaluaria a ciegas.
+        llamadas_ia.clear()
+        conn.execute("UPDATE wallets SET ai_class=NULL, pnl_updated=NULL, "
+                     "ai_reason=NULL")
+        conn.execute("UPDATE wallets SET is_tracked=1 WHERE address='MALA'")
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            aa.evaluate_tracked(conn, limite=10)
+        comprobar("a una que YA es ⭐ se le pregunta a la IA aunque no "
+                  "pase las puertas",
+                  len(llamadas_ia) == 2, f"{len(llamadas_ia)} llamadas")
+
+        # ── El criterio se calcula UNA vez ───────────────────────────
+        import ast as _ast
+        import io as _io
+        _src = _io.open(aa.__file__, encoding="utf-8").read()
+        _fn = next(n for n in _ast.walk(_ast.parse(_src))
+                   if isinstance(n, _ast.FunctionDef)
+                   and n.name == "evaluate_tracked")
+        _n = sum(1 for x in _ast.walk(_fn)
+                 if isinstance(x, _ast.Call)
+                 and isinstance(x.func, _ast.Name)
+                 and x.func.id in ("_pue12", "puertas_historial"))
+        comprobar("las puertas se calculan UNA sola vez por billetera "
+                  "(dos copias es como se separan los criterios)",
+                  _n == 1, f"{_n} llamadas a puertas_historial")
+    finally:
+        aa.profile_wallet = _reales["perfil"]
+        aa.ai_verdict = _reales["ia"]
+        (_gr.MIN_TRADES, _gr.MIN_POSICIONES, _gr.MIN_TOKENS) = _gr_prev
+        for k, v in _prev.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        for t in ("wallets", "appearances", "trades", "signals"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -9006,6 +9184,7 @@ def main():
     prueba_19k()
     prueba_19n()
     prueba_19p()
+    prueba_19q()
 
     print("\n" + "─" * 60)
     if _FALLOS:
