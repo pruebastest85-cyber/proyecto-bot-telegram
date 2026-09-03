@@ -2437,9 +2437,45 @@ async def cmd_paper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _send_md(update.message.chat,
                            f"🧪 Tope por señal: *{v:g} SOL*")
             return
+        if args[0] == "desde":
+            # (19-T) Pone la raya a partir de la cual cuenta el paper. NO
+            # borra: el que quiera borrar de verdad tiene /paper reset,
+            # que avisa de lo que se pierde. Esto se deshace con
+            # `/paper desde todo` y el histórico sigue entero debajo.
+            from paper_trading import parse_desde
+            if len(args) < 2:
+                await _send_md(
+                    update.message.chat,
+                    "🧪 *Desde cuándo contar el paper*\n\n"
+                    "`/paper desde ayer` · `/paper desde antier`\n"
+                    "`/paper desde hoy` · `/paper desde 2026-09-01`\n"
+                    "`/paper desde todo` — vuelve a contarlo todo\n\n"
+                    "_No borra nada: las operaciones viejas siguen "
+                    "guardadas, solo dejan de contar en los números._")
+                return
+            ts = parse_desde(args[1])
+            if ts is None:
+                await update.message.reply_text(
+                    "No entendí esa fecha. Usa: ayer, antier, hoy, "
+                    "todo, o una fecha tipo 2026-09-01 (que no sea "
+                    "futura).")
+                return
+            await asyncio.to_thread(_fijar, "paper_desde", f"{ts:.0f}")
+            if not ts:
+                await _send_md(update.message.chat,
+                               "🧪 Vuelvo a contar *todo el histórico*.")
+                return
+            from paper_trading import _fecha
+            await _send_md(
+                update.message.chat,
+                f"🧪 A partir de ahora el paper cuenta *desde el "
+                f"{_fecha(ts)} UTC*.\n"
+                f"Lo anterior NO se ha borrado: sigue en la base y "
+                f"vuelve con `/paper desde todo`.")
+            return
         await update.message.reply_text(
             "Uso: /paper · /paper on · /paper off · /paper max <SOL> "
-            "· /paper reset")
+            "· /paper desde <cuándo> · /paper reset")
         return
     txt = await asyncio.to_thread(resumen_text)
     # (Ola 18-H) Por `_send_md`, no por `reply_text` a pelo: asi el

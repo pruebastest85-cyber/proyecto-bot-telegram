@@ -9503,6 +9503,188 @@ def prueba_19s():
         conn.close()
 
 
+def prueba_19t():
+    bloque("19-T - contar desde la fecha que diga el dueño, SIN borrar")
+    import time as _tt
+    import paper_trading as pt
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM paper_trades")
+        set_setting(conn, "paper_desde", "0")
+        ahora = _tt.time()
+        dia = 86400
+        filas = [
+            # (symbol, exit_ts, pnl_usd, neto, stake, motivo)
+            ("NUEVA1", ahora - 2 * 3600, 50.0, 40.0, 200.0, "venta de la ⭐"),
+            ("NUEVA2", ahora - 30 * 3600, 20.0, 15.0, 200.0, "venta de la ⭐"),
+            ("VIEJA1", ahora - 30 * dia, 4000.0, 3900.0, 900.0, "take-profit"),
+            ("VIEJA2", ahora - 35 * dia, -900.0, -950.0, 900.0, "stop-loss"),
+        ]
+        for i, (sym, ts, usd, neto, stake, motivo) in enumerate(filas):
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (signature, wallet, mint, symbol, stake_sol, entry_price,
+                    entry_ts, exit_price, exit_ts, exit_reason, pnl_pct,
+                    pnl_sol, status, stake_usd, pnl_usd, pnl_usd_neto,
+                    demora_s, gestion, ia_entrada)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'cerrada',?,?,?,?,?,?)""",
+                (f"s{i}", f"w{i}", f"m{i}", sym, 1.0, 1.0, ts - 3600, 1.1,
+                 ts, motivo, 10.0, 0.1, stake, usd, neto, 5.0, "ia",
+                 "copiar"))
+        conn.commit()
+
+        # ── Sin fecha puesta: se cuenta TODO, como siempre ────────────
+        comprobar("por defecto no hay fecha de inicio",
+                  pt.desde_ts(conn) == 0.0, pt.desde_ts(conn))
+        todo = pt.resumen_text()
+        comprobar("sin fecha, el resumen cuenta las 4",
+                  "Cerradas:* 4" in todo or "*4*" in todo, todo[:400])
+        comprobar("y enseña 'Histórico completo'",
+                  "Histórico completo" in todo, todo[:300])
+
+        # ── Con fecha de ayer: solo las de ayer para acá ──────────────
+        ayer = pt.parse_desde("ayer")
+        set_setting(conn, "paper_desde", f"{ayer:.0f}")
+        conn.commit()
+        r = pt.resumen_text()
+        comprobar("con fecha de inicio, las viejas dejan de contar",
+                  "take-profit" not in r and "stop-loss" not in r, r[:600])
+        comprobar("y las nuevas sí cuentan",
+                  "venta de la ⭐" in r, r[:600])
+        comprobar("el resumen dice que hay una fecha de inicio",
+                  "Contando desde el" in r, r[:600])
+        # LO IMPORTANTE: que quede claro que NO se borró nada. Un resumen
+        # que pasa de 4 a 2 sin explicarlo se lee como datos perdidos.
+        comprobar("y avisa de que lo anterior NO se ha borrado",
+                  "sigue guardado" in r, r[:800])
+        comprobar("diciendo cómo deshacerlo",
+                  "desde todo" in r, r[:800])
+
+        # Y no se borró de verdad: las 4 filas siguen en la base.
+        n = conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        comprobar("las operaciones viejas SIGUEN en la base (es una raya, "
+                  "no un borrado)", n == 4, f"{n} filas")
+
+        # ── La ventana de 24 h no puede saltarse la fecha ─────────────
+        hoy = pt.parse_desde("hoy")
+        set_setting(conn, "paper_desde", f"{hoy:.0f}")
+        conn.commit()
+        v = "\n".join(pt.bloque_ventana(conn, 24.0))
+        _hs = (ahora - hoy) / 3600.0
+        if _hs < 23:
+            # Solo tiene sentido comprobarlo si "hoy" empezó hace menos
+            # de 24 h; si no, la fecha no recorta nada y no habria nada
+            # que comprobar (pasaria por casualidad, no por el codigo).
+            comprobar("el titulo dice las horas que DE VERDAD cuenta, no "
+                      "las 24 que se pidieron",
+                      f"Últimas {_hs:.0f} h" in v, v[:200])
+            comprobar("y la ventana no arrastra lo de antes de la fecha "
+                      "(la cerrada de hace 30 h queda fuera)",
+                      "+$20.00" not in v, v[:300])
+        else:
+            # A esta hora del dia "hoy" no recorta las 24 h. Se comprueba
+            # con una fecha que SI recorta, para que la prueba mida
+            # siempre lo mismo caiga a la hora que caiga.
+            set_setting(conn, "paper_desde", f"{ahora - 6 * 3600:.0f}")
+            conn.commit()
+            v6 = "\n".join(pt.bloque_ventana(conn, 24.0))
+            comprobar("el titulo dice las horas que DE VERDAD cuenta, no "
+                      "las 24 que se pidieron",
+                      "Últimas 6 h" in v6, v6[:200])
+            comprobar("y la ventana no arrastra lo de antes de la fecha "
+                      "(la cerrada de hace 30 h queda fuera)",
+                      "+$20.00" not in v6, v6[:300])
+
+        # ── Volver a 'todo' lo devuelve entero ───────────────────────
+        set_setting(conn, "paper_desde", "0")
+        conn.commit()
+        vuelta = pt.resumen_text()
+        comprobar("'desde todo' devuelve el histórico entero",
+                  "take-profit" in vuelta and "stop-loss" in vuelta,
+                  vuelta[:600])
+        comprobar("y quita el aviso de fecha de inicio",
+                  "Contando desde el" not in vuelta, vuelta[:600])
+
+        # ── El intérprete de fechas ──────────────────────────────────
+        comprobar("'todo' es cero (contar desde siempre)",
+                  pt.parse_desde("todo") == 0.0)
+        comprobar("'ayer' cae un dia antes que 'hoy'",
+                  abs((pt.parse_desde("hoy") - pt.parse_desde("ayer"))
+                      - 86400) < 1)
+        comprobar("'antier' cae dos dias antes que 'hoy'",
+                  abs((pt.parse_desde("hoy") - pt.parse_desde("antier"))
+                      - 2 * 86400) < 1)
+        comprobar("acepta una fecha escrita",
+                  pt.parse_desde("2026-09-01") is not None)
+        comprobar("una fecha FUTURA se rechaza (dejaria el resumen vacio "
+                  "para siempre sin que se entienda por que)",
+                  pt.parse_desde("2099-01-01") is None)
+        comprobar("y una fecha ilegible tambien",
+                  pt.parse_desde("el martes pasado") is None)
+        # Un ajuste corrupto no puede tumbar /paper.
+        set_setting(conn, "paper_desde", "manzana")
+        conn.commit()
+        try:
+            _d = pt.desde_ts(conn)
+        except Exception as _e:
+            _d = f"REVENTO: {_e}"
+        comprobar("un ajuste ilegible cae a 'contar desde siempre', "
+                  "no revienta", _d == 0.0, _d)
+        set_setting(conn, "paper_desde", "0")
+        conn.commit()
+
+        # ── El mando esta dado de alta ───────────────────────────────
+        # El mando: por AST y comprobando que la rama sea ALCANZABLE.
+        # Mirar si el texto esta en el archivo no vale — un
+        # `if False and args[0] == "desde"` lo deja intacto y muerto.
+        # Es la tercera vez que esta trampa aparece (19-R, 19-S, 19-T).
+        import ast as _a19t
+        import io as _io3
+        import telegram_bot as tb
+        _src = _io3.open(tb.__file__, encoding="utf-8").read()
+        _arb = _a19t.parse(_src)
+        _cp = next((n for n in _a19t.walk(_arb)
+                    if isinstance(n, (_a19t.FunctionDef,
+                                      _a19t.AsyncFunctionDef))
+                    and n.name == "cmd_paper"), None)
+
+        def _rama_desde(nodo):
+            """El `if` cuya condicion compara args[0] con 'desde'."""
+            for x in _a19t.walk(nodo):
+                if not isinstance(x, _a19t.If):
+                    continue
+                for c in _a19t.walk(x.test):
+                    if (isinstance(c, _a19t.Constant)
+                            and c.value == "desde"):
+                        return x
+            return None
+
+        _if = _rama_desde(_cp) if _cp is not None else None
+        comprobar("/paper desde existe en el mando",
+                  _if is not None, f"cmd_paper={_cp is not None}")
+        _apagada = bool(_if) and any(
+            isinstance(v, _a19t.Constant) and not v.value
+            for b in _a19t.walk(_if.test)
+            if isinstance(b, _a19t.BoolOp) for v in b.values)
+        comprobar("y esa rama es ALCANZABLE (no apagada por una "
+                  "constante)", bool(_if) and not _apagada)
+        comprobar("y aparece en la ayuda del mando",
+                  "/paper desde <cuándo>" in _src)
+        comprobar("y NO se toco /paper reset (el borrado de verdad sigue "
+                  "pidiendo confirmacion)",
+                  "No se puede deshacer" in _src)
+    finally:
+        try:
+            set_setting(conn, "paper_desde", "0")
+            conn.execute("DELETE FROM paper_trades")
+            conn.commit()
+        except Exception as e:
+            print(f"  · limpieza: {e}")
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -9548,6 +9730,7 @@ def main():
     prueba_19q()
     prueba_19r()
     prueba_19s()
+    prueba_19t()
 
     print("\n" + "─" * 60)
     if _FALLOS:

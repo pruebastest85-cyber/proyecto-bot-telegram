@@ -1846,6 +1846,63 @@ def _fecha(ts) -> str:
         "%d/%m %H:%M")
 
 
+def desde_ts(conn) -> float:
+    """(19-T) Desde qué momento cuenta el paper. 0 = desde siempre.
+
+    POR QUÉ ES UNA LÍNEA Y NO UN BORRADO
+    ------------------------------------
+    El dueño pidió el 3/9 "que empiece a contar desde el día que le diga
+    y borre el histórico". Lo primero es lo que quiere ver; lo segundo
+    es la forma cara de conseguirlo. Las 350 cerradas son la única
+    prueba que existe de cómo se comportó el copytrading desde julio:
+    con ellas se midió que el filtro de winrate estaba INVERTIDO (las
+    que pasaban perdían 4,2 USD por copia, las excluidas ganaban 14,9) y
+    que el profit factor sí separaba a las buenas. Eso no se recupera.
+
+    Así que esto es una LÍNEA: los números se calculan desde esa fecha y
+    lo anterior sigue en la base, intacto. `/paper desde todo` lo
+    devuelve al principio. Quien quiera borrar de verdad ya tiene
+    `/paper reset`, que enseña lo que se pierde y pide confirmación.
+    """
+    try:
+        v = get_setting(conn, "paper_desde", "0")
+        return max(0.0, float(v or 0))
+    except (TypeError, ValueError) as e:
+        print(f"· paper_desde ilegible ({e}); se cuenta desde siempre")
+        return 0.0
+
+
+def parse_desde(texto: str):
+    """'ayer' | 'antier' | 'hoy' | 'AAAA-MM-DD' | 'todo' → epoch o None.
+
+    Devuelve 0.0 para 'todo' (contar desde siempre) y None si no se
+    entiende. Las fechas son medianoche UTC, que es la hora con la que
+    trabaja el resto del bot: cortar en otra zona daria un limite que no
+    cuadra con las horas que se ven en las operaciones.
+    """
+    from datetime import datetime, timedelta, timezone
+    t = (texto or "").strip().lower()
+    if t in ("todo", "siempre", "0", "quitar"):
+        return 0.0
+    ahora = datetime.now(timezone.utc)
+    hoy = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
+    if t == "hoy":
+        return hoy.timestamp()
+    if t == "ayer":
+        return (hoy - timedelta(days=1)).timestamp()
+    if t in ("antier", "anteayer"):
+        return (hoy - timedelta(days=2)).timestamp()
+    try:
+        d = datetime.strptime(t, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    # Una fecha futura dejaria el resumen vacio para siempre sin que se
+    # entienda por que. Se rechaza en vez de aceptarla en silencio.
+    if d.timestamp() > ahora.timestamp():
+        return None
+    return d.timestamp()
+
+
 def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
     """(19-S) Las cerradas de las ÚLTIMAS `horas`, con su fecha escrita.
 
@@ -1870,6 +1927,13 @@ def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
     """
     import time as _t
     corte = _t.time() - float(horas) * HOUR
+    # (19-T) La ventana corta NO puede saltarse la fecha de inicio. Si el
+    # dueño dice "cuenta desde hoy", un bloque de 24 h que siguiera
+    # arrastrando lo de ayer contradiria en el mismo mensaje a la linea
+    # que hay justo debajo.
+    _desde = desde_ts(conn)
+    if _desde > corte:
+        corte = _desde
     r = conn.execute(
         "SELECT COUNT(*) n, SUM(pnl_usd) pnl, SUM(pnl_usd_neto) neto, "
         "SUM(stake_usd) inv, "
@@ -1878,7 +1942,12 @@ def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
         "SUM(CASE WHEN COALESCE(pnl_usd, pnl_sol) > 0 THEN 1 ELSE 0 END) "
         "wins FROM paper_trades "
         "WHERE status='cerrada' AND exit_ts >= ?", (corte,)).fetchone()
-    cab = (f"📅 *Últimas {horas:g} h*  ·  "
+    # (19-T) El titulo dice las horas QUE DE VERDAD se estan contando, no
+    # las que se pidieron. Si la fecha de inicio recorto la ventana, un
+    # "Últimas 24 h" encima de un rango de 6 h vuelve a ser el fallo de
+    # la 19-S: una etiqueta que no cuadra con sus propios numeros.
+    _reales = max(0.0, (_t.time() - corte) / HOUR)
+    cab = (f"📅 *Últimas {_reales:.0f} h*  ·  "
            f"{_fecha(corte)} → {_fecha(_t.time())} UTC")
     n = r["n"] or 0
     if not n:
@@ -1918,6 +1987,13 @@ def resumen_text() -> str:
     max_sol = _f(conn, "paper_max_sol", 1.0)
     estado = "🟢 activo" if _enabled(conn) else "🔴 apagado"
 
+    # (19-T) La fecha de inicio que puso el dueño. TODAS las consultas de
+    # cerradas de aqui abajo la llevan como parametro. Con 0 (el valor
+    # por defecto) `COALESCE(exit_ts, 0) >= 0` es cierto para todas las
+    # filas: el comportamiento de siempre, sin ramas ni consultas
+    # duplicadas — que es lo que mantiene a auditoria.py auditandolas.
+    desde = desde_ts(conn)
+
     # (19-S) La ventana corta y la fecha del primer cierre, ANTES del
     # conn.close() (la lección del bloque "origen", que quedó detrás del
     # close y murió en un except mudo).
@@ -1929,7 +2005,8 @@ def resumen_text() -> str:
     try:
         primero = conn.execute(
             "SELECT MIN(exit_ts) t FROM paper_trades "
-            "WHERE status='cerrada'").fetchone()["t"]
+            "WHERE status='cerrada' AND COALESCE(exit_ts, 0) >= ?",
+            (desde,)).fetchone()["t"]
     except Exception as e:
         print(f"· Resumen primer cierre falló: {e}")
         primero = None
@@ -1948,7 +2025,8 @@ def resumen_text() -> str:
         "THEN 1 ELSE 0 END) sin_pnl, "
         "SUM(CASE WHEN pnl_usd IS NULL THEN 1 ELSE 0 END) sin_usd_pnl, "
         "SUM(CASE WHEN COALESCE(pnl_usd, pnl_sol) > 0 THEN 1 ELSE 0 END) "
-        "wins FROM paper_trades WHERE status='cerrada'").fetchone()
+        "wins FROM paper_trades WHERE status='cerrada' "
+        "AND COALESCE(exit_ts, 0) >= ?", (desde,)).fetchone()
     # Comparacion optimista vs REAL, solo sobre las cerradas que tienen
     # ambas cifras: la brecha entre las dos es el costo verdadero de
     # ejecutar (slippage + fees) y decide si el copy trading real da.
@@ -1956,7 +2034,8 @@ def resumen_text() -> str:
         "SELECT COUNT(*) n, SUM(pnl_usd) opt, SUM(pnl_usd_neto) neto, "
         "AVG(slippage_entrada_pct) slip "
         "FROM paper_trades WHERE status='cerrada' "
-        "AND pnl_usd_neto IS NOT NULL AND pnl_usd IS NOT NULL").fetchone()
+        "AND pnl_usd_neto IS NOT NULL AND pnl_usd IS NOT NULL "
+        "AND COALESCE(exit_ts, 0) >= ?", (desde,)).fetchone()
     # (Ola 17-J) Cuantas cerradas se quedan FUERA de esa comparacion.
     # La consulta de arriba ya era correcta (exige las dos cifras), pero
     # no decia sobre cuantas de las cerradas se calcula: con 241 cerradas
@@ -1966,23 +2045,29 @@ def resumen_text() -> str:
     # pesimista respecto al total; conviene decirlo.
     fuera = conn.execute(
         "SELECT COUNT(*) n FROM paper_trades WHERE status='cerrada' "
-        "AND (pnl_usd_neto IS NULL OR pnl_usd IS NULL)").fetchone()["n"]
+        "AND (pnl_usd_neto IS NULL OR pnl_usd IS NULL) "
+        "AND COALESCE(exit_ts, 0) >= ?", (desde,)).fetchone()["n"]
     demora = conn.execute(
         "SELECT AVG(demora_s) d, COUNT(demora_s) n FROM paper_trades "
-        "WHERE demora_s IS NOT NULL").fetchone()
+        "WHERE demora_s IS NOT NULL "
+        "AND COALESCE(entry_ts, 0) >= ?", (desde,)).fetchone()
     ab = conn.execute(
         "SELECT gestion, COUNT(*) n, SUM(pnl_usd) pnl "
         "FROM paper_trades WHERE status<>'abierta' AND gestion IS NOT NULL "
-        "GROUP BY gestion").fetchall()
+        "AND COALESCE(exit_ts, 0) >= ? "
+        "GROUP BY gestion", (desde,)).fetchall()
     filtro = conn.execute(
         "SELECT ia_entrada, COUNT(*) n, SUM(pnl_usd) pnl "
         "FROM paper_trades WHERE status<>'abierta' "
-        "AND ia_entrada IS NOT NULL GROUP BY ia_entrada").fetchall()
+        "AND ia_entrada IS NOT NULL "
+        "AND COALESCE(exit_ts, 0) >= ? "
+        "GROUP BY ia_entrada", (desde,)).fetchall()
     por_motivo = conn.execute(
         "SELECT exit_reason r, COUNT(*) n, SUM(pnl_sol) pnl, "
         "SUM(pnl_usd) pnl_usd "
         "FROM paper_trades WHERE status='cerrada' "
-        "GROUP BY exit_reason ORDER BY n DESC").fetchall()
+        "AND COALESCE(exit_ts, 0) >= ? "
+        "GROUP BY exit_reason ORDER BY n DESC", (desde,)).fetchall()
     # Top vs consenso: consultado ANTES del close (la v1 de este bloque
     # quedo despues del conn.close() y el except se comio el error en
     # silencio — leccion repetida: los except anchos imprimen SIEMPRE).
@@ -1993,7 +2078,8 @@ def resumen_text() -> str:
             "SUM(CASE WHEN pnl_usd IS NOT NULL THEN 1 ELSE 0 END) n_dato, "
             "SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END) wins "
             "FROM paper_trades WHERE status<>'abierta' "
-            "GROUP BY COALESCE(origen,'top')").fetchall()
+            "AND COALESCE(exit_ts, 0) >= ? "
+            "GROUP BY COALESCE(origen,'top')", (desde,)).fetchall()
     except Exception as e:
         print(f"· Resumen origen falló: {e}")
         org = []
@@ -2015,8 +2101,17 @@ def resumen_text() -> str:
         # de operaciones se leen como si fueran de ayer — que es
         # exactamente lo que pasó el 3/9.
         _dias = ((time.time() - primero) / 86400.0) if primero else 0.0
-        out.append(f"📚 *Histórico completo*  ·  desde {_fecha(primero)}"
+        # (19-T) Si hay fecha de inicio, se dice — y se dice tambien que
+        # lo de antes NO se ha borrado. Un resumen que de pronto enseña
+        # 15 operaciones donde ayer habia 350, sin explicar por que, se
+        # lee como que se perdieron los datos.
+        _cab_h = ("📚 *Acumulado*" if desde else "📚 *Histórico completo*")
+        out.append(f"{_cab_h}  ·  desde {_fecha(primero)}"
                    + (f" ({_dias:.0f} días)" if _dias >= 1 else ""))
+        if desde:
+            out.append(f"   _Contando desde el {_fecha(desde)} porque tú lo "
+                       f"pediste. Lo anterior sigue guardado: `/paper desde "
+                       f"todo` lo vuelve a enseñar._")
         pnl_t = cer["pnl"] or 0.0
         pnl_usd_t = cer["pnl_usd"]
         invertido = cer["invertido"]
