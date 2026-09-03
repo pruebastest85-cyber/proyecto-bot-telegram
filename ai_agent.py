@@ -91,13 +91,28 @@ TOOLS = [
          "address": {"type": "string"}}, "required": ["address"]}},
     {"name": "estado_sistema",
      "description": ("Estado en vivo por sección: 'paper' (simulación y "
-                     "PnL), 'posiciones' (paper abiertas), 'rendimiento' "
-                     "(win rate de señales), 'salud' (chequeos del "
-                     "sistema), 'helius' (créditos del ciclo)."),
+                     "PnL, TODO el histórico desde el primer día), "
+                     "'paper_ventana' (SOLO las cerradas de las últimas "
+                     "N horas; usa 'horas'), 'posiciones' (paper "
+                     "abiertas), 'rendimiento' (win rate de señales), "
+                     "'salud' (chequeos del sistema), 'helius' "
+                     "(créditos del ciclo). Si te preguntan por un "
+                     "periodo —hoy, ayer, las últimas 24 h, esta "
+                     "semana— usa 'paper_ventana' con las horas que "
+                     "correspondan. NUNCA presentes el resultado de "
+                     "'paper' como si fuera de un periodo: es el "
+                     "acumulado de meses. Cada respuesta trae escrito "
+                     "su propio periodo con fechas: cópialo tal cual y "
+                     "no lo cambies."),
      "input_schema": {"type": "object", "properties": {
          "seccion": {"type": "string",
-                     "description": ("una de: paper, posiciones, "
-                                     "rendimiento, salud, helius")}},
+                     "description": ("una de: paper, paper_ventana, "
+                                     "posiciones, rendimiento, salud, "
+                                     "helius")},
+         "horas": {"type": "number",
+                   "description": ("solo para paper_ventana: cuántas "
+                                   "horas hacia atrás (24 = último día, "
+                                   "168 = última semana)")}},
          "required": ["seccion"]}},
     {"name": "ver_ajustes",
      "description": ("Los AJUSTES ACTUALES del bot leídos de la base en "
@@ -413,6 +428,24 @@ def _exec_read(name: str, args: dict) -> str:
             if seccion == "paper":
                 from paper_trading import resumen_text
                 return resumen_text()[:4000]
+            if seccion == "paper_ventana":
+                # (19-S) Solo las cerradas de las ultimas N horas. Existe
+                # porque el 3/9 el dueño pidio "las ultimas 24 horas" y
+                # esta herramienta solo sabia dar el acumulado de 43
+                # dias: el modelo se lo devolvio con la etiqueta que el
+                # dueño habia usado. El texto trae SU periodo escrito con
+                # fechas, para que no se pueda reetiquetar.
+                from paper_trading import bloque_ventana
+                try:
+                    _h = float(args.get("horas") or 24)
+                except (TypeError, ValueError):
+                    _h = 24.0
+                _h = min(max(_h, 1.0), 8760.0)
+                conn = get_conn()
+                try:
+                    return "\n".join(bloque_ventana(conn, _h))[:4000]
+                finally:
+                    conn.close()
             if seccion == "posiciones":
                 import time as _t
                 conn = get_conn()
@@ -445,8 +478,8 @@ def _exec_read(name: str, args: dict) -> str:
                     return estado_line(conn)
                 finally:
                     conn.close()
-            return ("Sección desconocida. Usa: paper, posiciones, "
-                    "rendimiento, salud o helius.")
+            return ("Sección desconocida. Usa: paper, paper_ventana, "
+                    "posiciones, rendimiento, salud o helius.")
     except Exception as e:
         return f"Error ejecutando {name}: {e}"
     return "Herramienta desconocida."

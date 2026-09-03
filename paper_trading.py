@@ -1834,6 +1834,82 @@ def update_open_trades() -> int:
 
 # ───────────────────────── Resumen (/paper) ───────────────────────────────
 
+VENTANA_H = 24.0        # (19-S) ventana corta que encabeza /paper
+
+
+def _fecha(ts) -> str:
+    """Epoch → '03/09 11:44'. Vacío si no hay fecha."""
+    if not ts:
+        return "?"
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(ts), timezone.utc).strftime(
+        "%d/%m %H:%M")
+
+
+def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
+    """(19-S) Las cerradas de las ÚLTIMAS `horas`, con su fecha escrita.
+
+    POR QUÉ EXISTE
+    --------------
+    `/paper` enseñaba SIEMPRE el acumulado desde el primer día y sin
+    decir desde cuándo. El 3/9 el dueño pidió por chat "las últimas 24
+    horas" y el agente le devolvió el acumulado de **43 días** (350
+    operaciones) como si fuera de un día: 15 lo eran. Peor aún, ese
+    acumulado incluía +4.252 USD de take-profit y -2.355 de stop-loss
+    de una configuración APAGADA desde el 23-24/08 (`paper_tp_pct` y
+    `paper_sl_pct` están en 999999), presentados como actividad
+    reciente.
+
+    Por eso cada bloque escribe SU PROPIO periodo con fechas de verdad.
+    No es decoración: el fallo no fue de cálculo sino de etiqueta, y una
+    etiqueta que viaja pegada a los números es lo único que impide que
+    alguien —persona o IA— los vuelva a contar como de otro periodo.
+
+    `exit_ts` es epoch (segundos), no texto ISO. Compararlo con una
+    fecha en texto devuelve CERO filas sin error ninguno.
+    """
+    import time as _t
+    corte = _t.time() - float(horas) * HOUR
+    r = conn.execute(
+        "SELECT COUNT(*) n, SUM(pnl_usd) pnl, SUM(pnl_usd_neto) neto, "
+        "SUM(stake_usd) inv, "
+        "SUM(CASE WHEN pnl_usd IS NULL AND pnl_sol IS NULL "
+        "THEN 1 ELSE 0 END) sin_pnl, "
+        "SUM(CASE WHEN COALESCE(pnl_usd, pnl_sol) > 0 THEN 1 ELSE 0 END) "
+        "wins FROM paper_trades "
+        "WHERE status='cerrada' AND exit_ts >= ?", (corte,)).fetchone()
+    cab = (f"📅 *Últimas {horas:g} h*  ·  "
+           f"{_fecha(corte)} → {_fecha(_t.time())} UTC")
+    n = r["n"] or 0
+    if not n:
+        return [cab, "   Sin operaciones cerradas en esta ventana.", ""]
+    sin_pnl = r["sin_pnl"] or 0
+    con_dato = n - sin_pnl
+    wr = 100.0 * (r["wins"] or 0) / con_dato if con_dato else 0.0
+    wr_txt = (f"win rate {wr:.0f}% (de {con_dato} con dato)"
+              if sin_pnl else f"win rate {wr:.0f}%")
+    pnl = r["pnl"]
+    res = "🟢" if (pnl or 0) >= 0 else "🔴"
+    out = [cab,
+           f"{res} Cerradas: *{n}* · {wr_txt} · PnL papel "
+           f"*{_usd_firmado(pnl) if pnl is not None else 's/d'}*"]
+    if r["inv"]:
+        out.append(f"   Invertido {_usd(r['inv'])} → "
+                   f"ROI *{100.0 * (pnl or 0) / r['inv']:+.1f}%*")
+    if r["neto"] is not None:
+        out.append(f"   Con costos reales: *{_usd_firmado(r['neto'])}*")
+    for m in conn.execute(
+            "SELECT exit_reason r, COUNT(*) n, SUM(pnl_usd) pnl_usd, "
+            "SUM(pnl_sol) pnl FROM paper_trades "
+            "WHERE status='cerrada' AND exit_ts >= ? "
+            "GROUP BY exit_reason ORDER BY n DESC", (corte,)).fetchall():
+        cifra = (_usd_firmado(m["pnl_usd"]) if m["pnl_usd"] is not None
+                 else f"{(m['pnl'] or 0):+.2f} SOL")
+        out.append(f"   · {m['r']}: {m['n']}  ({cifra})")
+    out.append("")
+    return out
+
+
 def resumen_text() -> str:
     conn = get_conn()
     tp = _f(conn, "paper_tp_pct", 100.0)
@@ -1841,6 +1917,22 @@ def resumen_text() -> str:
     timeout = _f(conn, "paper_timeout_h", 48.0)
     max_sol = _f(conn, "paper_max_sol", 1.0)
     estado = "🟢 activo" if _enabled(conn) else "🔴 apagado"
+
+    # (19-S) La ventana corta y la fecha del primer cierre, ANTES del
+    # conn.close() (la lección del bloque "origen", que quedó detrás del
+    # close y murió en un except mudo).
+    try:
+        ventana = bloque_ventana(conn, VENTANA_H)
+    except Exception as e:
+        print(f"· Resumen ventana falló: {e}")
+        ventana = []
+    try:
+        primero = conn.execute(
+            "SELECT MIN(exit_ts) t FROM paper_trades "
+            "WHERE status='cerrada'").fetchone()["t"]
+    except Exception as e:
+        print(f"· Resumen primer cierre falló: {e}")
+        primero = None
 
     abiertas = conn.execute(
         "SELECT * FROM paper_trades WHERE status='abierta' "
@@ -1907,12 +1999,24 @@ def resumen_text() -> str:
         org = []
     conn.close()
 
+    # (19-S) Un TP o SL en 999999 no es un tope: está APAGADO. Escribirlo
+    # como "TP +999999%" invita a leer que existe, y el histórico de
+    # abajo enseña cierres por take-profit de cuando SÍ existía.
+    _tp_txt = "TP apagado" if tp >= 100_000 else f"TP +{tp:.0f}%"
+    _sl_txt = "SL apagado" if sl >= 100_000 else f"SL -{sl:.0f}%"
     out = [f"🧪 *Paper trading*  ·  {estado}",
-           f"Config: tope {max_sol:g} SOL/señal · TP +{tp:.0f}% · "
-           f"SL -{sl:.0f}% · máx {timeout:g}h",
+           f"Config: tope {max_sol:g} SOL/señal · {_tp_txt} · "
+           f"{_sl_txt} · máx {timeout:g}h",
            ""]
+    out += ventana
     n_c = cer["n"] or 0
     if n_c:
+        # (19-S) El acumulado dice DESDE CUÁNDO. Sin esta línea, 43 días
+        # de operaciones se leen como si fueran de ayer — que es
+        # exactamente lo que pasó el 3/9.
+        _dias = ((time.time() - primero) / 86400.0) if primero else 0.0
+        out.append(f"📚 *Histórico completo*  ·  desde {_fecha(primero)}"
+                   + (f" ({_dias:.0f} días)" if _dias >= 1 else ""))
         pnl_t = cer["pnl"] or 0.0
         pnl_usd_t = cer["pnl_usd"]
         invertido = cer["invertido"]

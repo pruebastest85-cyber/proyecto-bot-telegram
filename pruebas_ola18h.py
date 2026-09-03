@@ -9345,6 +9345,164 @@ def prueba_19r():
         conn.close()
 
 
+def prueba_19s():
+    bloque("19-S - /paper dice DE QUE PERIODO habla")
+    import time as _tt
+    import paper_trading as pt
+    from db import get_conn
+
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM paper_trades")
+        ahora = _tt.time()
+        # Tres cierres dentro de las 24 h y dos MUY viejos (43 dias),
+        # que es justo la forma que tenia su base el 3/9: un puñado de
+        # ayer enterrado bajo mes y medio de historia.
+        filas = [
+            # (mint, symbol, exit_ts, pnl_usd, pnl_usd_neto, stake, motivo)
+            ("m1", "HOY1", ahora - 2 * 3600, 100.0, 60.0, 500.0,
+             "venta de la ⭐"),
+            ("m2", "HOY2", ahora - 5 * 3600, -40.0, -70.0, 500.0,
+             "venta de la ⭐"),
+            ("m3", "HOY3", ahora - 20 * 3600, 30.0, 10.0, 300.0,
+             "sin liquidez"),
+            # Justo FUERA de la ventana (30 h). Es la fila que distingue
+            # "24 horas" de cualquier ventana mas ancha: sin ella, un
+            # corte en dias en vez de horas daria el mismo resultado.
+            ("m6", "AYER30H", ahora - 30 * 3600, 777.0, 777.0, 100.0,
+             "venta de la ⭐"),
+            ("m4", "VIEJO1", ahora - 43 * 86400, 4000.0, 3000.0, 900.0,
+             "take-profit"),
+            ("m5", "VIEJO2", ahora - 40 * 86400, -2000.0, -2200.0, 900.0,
+             "stop-loss"),
+        ]
+        for i, (mint, sym, ts, usd, neto, stake, motivo) in enumerate(filas):
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (signature, wallet, mint, symbol, stake_sol, entry_price,
+                    entry_ts, exit_price, exit_ts, exit_reason, pnl_pct,
+                    pnl_sol, status, stake_usd, pnl_usd, pnl_usd_neto)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'cerrada',?,?,?)""",
+                (f"sig{i}", f"w{i}", mint, sym, 1.0, 1.0, ts - 3600,
+                 1.1, ts, motivo, 10.0, 0.1, stake, usd, neto))
+        conn.commit()
+
+        v = pt.bloque_ventana(conn, 24.0)
+        txt = "\n".join(v)
+        comprobar("la ventana de 24 h cuenta SOLO las de 24 h",
+                  "Cerradas: *3*" in txt, txt[:200])
+        comprobar("y no arrastra el take-profit de hace 43 dias",
+                  "take-profit" not in txt and "stop-loss" not in txt,
+                  txt[:300])
+        comprobar("una cerrada de hace 30 h queda FUERA de las 24 h "
+                  "(la frontera es en horas, no en dias)",
+                  "777" not in txt, txt[:300])
+        comprobar("suma el dinero de la ventana, no el de siempre",
+                  "+$90.00" in txt, txt[:200])
+        comprobar("y tambien el neto con costos reales de la ventana",
+                  "Con costos reales" in txt and "+$0.00" in txt,
+                  txt[:300])
+        # LO IMPORTANTE: el periodo va ESCRITO dentro del texto. El fallo
+        # del 3/9 no fue de calculo sino de etiqueta — el agente le puso
+        # "ultimas 24 h" a 43 dias de datos. Un periodo pegado a los
+        # numeros es lo unico que impide repetirlo.
+        comprobar("el bloque dice que son 24 h",
+                  "Últimas 24 h" in txt, txt[:120])
+        comprobar("y con fechas de verdad, no solo el nombre",
+                  "→" in txt and "UTC" in txt, txt[:120])
+
+        v7 = "\n".join(pt.bloque_ventana(conn, 168.0))
+        comprobar("con 168 h el periodo escrito cambia solo",
+                  "Últimas 168 h" in v7, v7[:120])
+
+        # Una ventana sin cierres lo dice, no enseña ceros ni el total.
+        conn.execute("UPDATE paper_trades SET exit_ts = ?",
+                     (ahora - 43 * 86400,))
+        conn.commit()
+        vac = "\n".join(pt.bloque_ventana(conn, 24.0))
+        comprobar("sin cierres en la ventana lo dice claramente",
+                  "Sin operaciones cerradas" in vac, vac[:200])
+        comprobar("y NO cuela el acumulado en su lugar",
+                  "Cerradas:" not in vac, vac[:200])
+
+        # exit_ts es epoch. Compararlo con texto ISO da CERO filas y
+        # ningun error: es el fallo que se comio mi primera medicion.
+        n = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE status='cerrada' "
+            "AND exit_ts >= ?", ("2020-01-01T00:00:00+00:00",)).fetchone()[0]
+        comprobar("exit_ts es epoch: filtrar por texto ISO da 0 en "
+                  "silencio (por eso la ventana usa numeros)",
+                  n == 0, f"{n} filas")
+
+        # El resumen entero: las dos mitades, cada una con su periodo.
+        conn.execute("UPDATE paper_trades SET exit_ts = ? WHERE symbol LIKE 'HOY%'",
+                     (ahora - 3600,))
+        conn.commit()
+        full = pt.resumen_text()
+        comprobar("/paper trae la ventana corta",
+                  "Últimas 24 h" in full, full[:300])
+        comprobar("...y el acumulado, dicho DESDE CUANDO",
+                  "Histórico completo" in full and "desde" in full,
+                  full[:400])
+        comprobar("y el acumulado sí incluye lo viejo (no es un filtro)",
+                  "take-profit" in full, full[:600])
+
+        # TP/SL apagados: 999999 no es un tope, y escribirlo como
+        # "+999999%" invita a leer que existe.
+        from db import set_setting
+        set_setting(conn, "paper_tp_pct", "999999")
+        set_setting(conn, "paper_sl_pct", "999999")
+        conn.commit()
+        cfg = pt.resumen_text()
+        comprobar("un TP/SL en 999999 se dice APAGADO, no '+999999%'",
+                  "TP apagado" in cfg and "SL apagado" in cfg,
+                  cfg[:200])
+        set_setting(conn, "paper_tp_pct", "100")
+        set_setting(conn, "paper_sl_pct", "50")
+        conn.commit()
+        cfg2 = pt.resumen_text()
+        comprobar("y un TP/SL de verdad se sigue enseñando con su cifra",
+                  "TP +100%" in cfg2 and "SL -50%" in cfg2, cfg2[:200])
+
+        # El agente: la seccion nueva existe, esta anunciada, y su
+        # descripcion prohibe explicitamente lo que hizo el 3/9.
+        import ai_agent as ag
+        _t = next(t for t in ag.TOOLS if t["name"] == "estado_sistema")
+        d = _t["description"]
+        comprobar("el agente tiene una seccion por ventana",
+                  "paper_ventana" in d, d[:150])
+        comprobar("con un argumento de horas",
+                  "horas" in _t["input_schema"]["properties"], _t)
+        comprobar("y se le dice que NO etiquete el acumulado como un "
+                  "periodo",
+                  "NUNCA" in d and "acumulado" in d, d[:400])
+        # Se EJECUTA la herramienta de verdad. Mirar si el nombre
+        # aparece en el archivo no vale: un `if False and seccion == ...`
+        # deja el texto intacto y la seccion muerta.
+        r24 = ag._exec_read("estado_sistema",
+                            {"seccion": "paper_ventana", "horas": 24})
+        comprobar("la seccion nueva RESPONDE de verdad (no solo existe "
+                  "el nombre en el archivo)",
+                  "Últimas 24 h" in r24, r24[:200])
+        comprobar("y respeta las horas que le pidan",
+                  "Últimas 168 h" in ag._exec_read(
+                      "estado_sistema",
+                      {"seccion": "paper_ventana", "horas": 168}))
+        comprobar("sin horas asume 24, no el acumulado",
+                  "Últimas 24 h" in ag._exec_read(
+                      "estado_sistema", {"seccion": "paper_ventana"}))
+        _mal = ag._exec_read("estado_sistema", {"seccion": "inventada"})
+        comprobar("y aparece en el mensaje de seccion desconocida",
+                  "paper_ventana" in _mal, _mal[:150])
+    finally:
+        try:
+            conn.execute("DELETE FROM paper_trades")
+            conn.commit()
+        except Exception as e:
+            print(f"  · limpieza: {e}")
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -9389,6 +9547,7 @@ def main():
     prueba_19p()
     prueba_19q()
     prueba_19r()
+    prueba_19s()
 
     print("\n" + "─" * 60)
     if _FALLOS:
