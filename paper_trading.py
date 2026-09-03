@@ -543,8 +543,37 @@ def _releer(conn, trade_id):
         return None
 
 
+def quien(conn, address):
+    """(19-U) Nombre legible de una billetera y su puesto en el top.
+
+    Devuelve (nombre, puesto|None); el nombre cae a los 8 primeros
+    caracteres de la direccion si no hay alias. Es como ya lo hacian el
+    aviso de compra y el de venta parcial, cada uno con su copia: esta
+    funcion existe para que sean UNA. La cuarta copia —la del cierre—
+    nunca se llego a escribir, y por eso el aviso de cierre era el unico
+    que no decia quien habia vendido.
+    """
+    if not address:
+        return ("la ⭐", None)
+    nombre = str(address)[:8] + "…"
+    try:
+        r = conn.execute("SELECT alias FROM wallets WHERE address=?",
+                         (address,)).fetchone()
+        if r and r["alias"]:
+            nombre = r["alias"]
+    except Exception as e:
+        print(f"· quien(): sin alias para {str(address)[:8]} ({e})")
+    pos = None
+    try:
+        from wallet_ident import posicion
+        pos = posicion(conn, address, 30)
+    except Exception as e:
+        print(f"· quien(): sin puesto para {str(address)[:8]} ({e})")
+    return (nombre, pos)
+
+
 def _close(conn, row, price: float, reason: str, icon: str, firma=None,
-           liq_salida=None, nota="", _reintento=False):
+           liq_salida=None, nota="", vendedor=None, _reintento=False):
     # ── (19-C) RELECTURA ANTES DE CALCULAR ───────────────────────────
     # El guardia `AND status='abierta'` de mas abajo impide el cierre
     # DOBLE, pero no impide cerrar con DATOS VIEJOS, que es una perdida
@@ -734,7 +763,8 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
         print(f"· Paper: {row['symbol']} recibió un parcial mientras "
               f"cerraba; recalculo con la fila fresca")
         return _close(conn, _ahora, price, reason, icon, firma=firma,
-                      liq_salida=liq_salida, nota=nota, _reintento=True)
+                      liq_salida=liq_salida, nota=nota, vendedor=vendedor,
+                      _reintento=True)
     _fill_resultado(conn, row["id"], firma, "total", reason,
                     round(frac, 4), price, _usd_fill, _fee_fill)
 
@@ -883,7 +913,49 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
                        if _rel and _rel >= 1 else "")
                     + ". El PnL de papel usa el precio medio; el "
                       "**neto** es la cifra realista._")
-    _tg(f"{icon} *Paper cerrada* ({reason}): *{_md(row['symbol'])}*\n"
+    # ── (19-U) QUIÉN vendió, QUÉ se vendió y CUÁNTO ──────────────────
+    # El aviso decia el simbolo, el precio y el PnL, y nada mas. El dueño
+    # el 3/9: "no se sabe qué se vendió". Tenia razon y ademas era
+    # incoherente: el aviso de venta PARCIAL si dice quien vendio, y el
+    # de compra tambien. El de cierre era el unico mudo.
+    #
+    # El simbolo solo no identifica el token: en memecoins hay decenas de
+    # "Paal". Sin el contrato no se puede ni mirar en DexScreener.
+    ficha = ""
+    try:
+        # El vendedor NO tiene por que ser el dueño de la fila: en las
+        # copias por consenso la posicion esta a nombre de la LIDER y
+        # puede cerrarla el quorum de la manada. Decir siempre el dueño
+        # seria mentir justo en el caso en el que mas importa saberlo.
+        _vend = vendedor or row["wallet"]
+        _nom, _pos = quien(conn, _vend)
+        if reason.startswith("venta"):
+            ficha += (f"\n⭐ Vendió: *{_md(_nom)}*"
+                      + (f" (#{_pos} del top)" if _pos else ""))
+            if vendedor and row["wallet"] and vendedor != row["wallet"]:
+                _duen, _ = quien(conn, row["wallet"])
+                ficha += (f"\n🤝 _La posición era de {_md(_duen)}: la "
+                          f"cerró otra ⭐ de la misma manada._")
+        _mint = row["mint"] or ""
+        if _mint:
+            ficha += f"\n🪙 `{_mint}`"
+        _ent = _campo(row, "entry_ts")
+        if _ent:
+            _hs = max(0.0, (time.time() - float(_ent)) / HOUR)
+            ficha += ("  ·  ⏱ " + (f"{_hs * 60:.0f} min" if _hs < 1
+                                   else f"{_hs:.1f} h" if _hs < 48
+                                   else f"{_hs / 24:.1f} días"))
+        # Cuanto quedaba vivo. Con parciales previos, "se cerro" no es
+        # toda la posicion: el resto ya se habia ido vendiendo antes.
+        if frac < 1:
+            ficha += (f"\n📤 Se cerró el *{frac * 100:.0f}%* que quedaba "
+                      f"vivo (el resto ya se vendió en parciales)")
+        elif stake_usd:
+            ficha += f"\n📤 Se cerró la posición *entera* ({_usd(stake_usd)})"
+    except Exception as e:
+        print(f"· Paper: ficha del cierre no disponible ({e})")
+        ficha = ""
+    _tg(f"{icon} *Paper cerrada* ({reason}): *{_md(row['symbol'])}*{ficha}\n"
         f"💵 Precio: ${_precio(row['entry_price'])} → "
         f"*${_precio(price)}*  ({pct:+.0f}%){nota_precio}{nota_parciales}\n"
         f"{linea_pnl}{linea_neto}{nota_liq}{nota}\n"
@@ -950,7 +1022,7 @@ def _resto_es_polvo(conn, row, nueva_frac: float, price: float) -> bool:
 
 
 def _venta_parcial(conn, row, price: float, pct: float, firma=None,
-                   _reintento=False):
+                   vendedor=None, _reintento=False):
     """La ⭐ vendio el pct% de SU posicion: el paper vende el mismo pct%
     de la SUYA. La fila sigue abierta con la fraccion restante; el PnL del
     trozo vendido se acumula en pnl_realizado_usd y se suma al cierre.
@@ -1074,7 +1146,7 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None,
         print(f"· Paper: otro parcial de {row['symbol']} entró antes; "
               f"recalculo el espejo con la fracción fresca")
         return _venta_parcial(conn, _ahora, price, pct, firma=firma,
-                              _reintento=True)
+                              vendedor=vendedor, _reintento=True)
     _fill_resultado(conn, row["id"], firma, "parcial",
                     f"espejo {pct:.0f}% de la ⭐", round(vendida, 4),
                     price, _usd_fill, _fee_fill)
@@ -1083,13 +1155,10 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None,
                if pnl_trozo is not None
                else f" · el trozo rindió {rinde_frac*100:+.1f}% del importe "
                     f"(sin precio de SOL para ponerlo en dólares)")
-    try:
-        _rw = conn.execute("SELECT alias FROM wallets WHERE address=?",
-                           (row["wallet"],)).fetchone()
-        _nom = (_rw["alias"] if _rw and _rw["alias"]
-                else (row["wallet"] or "")[:8] + "…")
-    except Exception:
-        _nom = "la ⭐"
+    # (19-U) El vendedor REAL. Antes se nombraba siempre al dueño de la
+    # fila: en una copia por consenso el que vende puede ser otro de la
+    # manada, y el aviso ponia el nombre equivocado.
+    _nom, _ = quien(conn, vendedor or row["wallet"])
     _tg(f"✂️ *Venta parcial copiada* en *{_md(row['symbol'])}*: "
         f"*{_md(_nom)}* vendió "
         f"el {pct:.0f}% y el paper vende su {pct:.0f}%"
@@ -1284,13 +1353,14 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
                 print(f"🧹 Paper: lo que quedaba de {row['symbol']} ya no "
                       f"llega a un céntimo; se cierra entera con esta venta")
                 _close(conn, row, price, "venta de la ⭐", _icono,
-                       firma=_firma,
+                       firma=_firma, vendedor=trade.get("wallet"),
                        nota="\n_Se cierra ENTERA: lo que quedaba vivo ya no "
                             "llegaba a un céntimo. Dejarla abierta solo "
                             "generaba avisos de $0,00 y bloqueaba volver a "
                             "copiar este token._")
                 return
-            _venta_parcial(conn, row, price, pct_v, firma=_firma)
+            _venta_parcial(conn, row, price, pct_v, firma=_firma,
+                           vendedor=trade.get("wallet"))
             return
 
     # ── Salida inteligente (solo reglas, sin IA) ──────────────────────
@@ -1363,7 +1433,8 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
                 _close(conn, row, price,
                        "venta de la ⭐ (decisión IA)"
                        if d.get("decidido_por") == "ia_local"
-                       else "venta de la ⭐", "🚪", firma=_firma)
+                       else "venta de la ⭐", "🚪", firma=_firma,
+                       vendedor=trade.get("wallet"))
                 return
             except Exception as e:
                 print(f"· Decisión IA falló ({e}); reglas de siempre")
@@ -1406,7 +1477,8 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
 
     motivo = ("venta de la ⭐" if sigue_estrella
               else "venta (la billetera ya no es ⭐)")
-    _close(conn, row, price, motivo, "🚪", firma=_firma)
+    _close(conn, row, price, motivo, "🚪", firma=_firma,
+           vendedor=trade.get("wallet"))
 
 
 # (Ola 18-E) A partir de cuantas horas SIN precio utilizable una posicion

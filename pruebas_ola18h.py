@@ -9685,6 +9685,156 @@ def prueba_19t():
         conn.close()
 
 
+def prueba_19u():
+    bloque("19-U - el aviso de cierre dice QUIEN vendio y QUE se vendio")
+    import time as _tt
+    import paper_trading as pt
+    from db import get_conn
+
+    conn = get_conn()
+    _tg_real = pt._tg
+    avisos = []
+    try:
+        conn.execute("DELETE FROM paper_trades")
+        conn.execute("DELETE FROM wallets")
+        pt._tg = avisos.append
+        LIDER = "Lid" + "1" * 41
+        OTRA = "Otr" + "2" * 41
+        MINT = "9nRw" + "z" * 40
+        for addr, alias in ((LIDER, "Jaguar Dorado"), (OTRA, "Lobo Gris")):
+            conn.execute(
+                "INSERT INTO wallets (address, alias, is_tracked) "
+                "VALUES (?,?,1)", (addr, alias))
+
+        def _abrir(sig, frac=1.0, horas=3.0):
+            conn.execute("DELETE FROM paper_trades")
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (signature, wallet, mint, symbol, stake_sol, entry_price,
+                    entry_ts, status, stake_usd, fraccion_restante)
+                   VALUES (?,?,?,?,?,?,?, 'abierta', ?, ?)""",
+                (sig, LIDER, MINT, "Paal", 1.0, 0.000002881,
+                 _tt.time() - horas * 3600, 100.12, frac))
+            conn.commit()
+            return conn.execute(
+                "SELECT * FROM paper_trades WHERE signature=?",
+                (sig,)).fetchone()
+
+        # ── 1) Cierre por venta de la MISMA ⭐ que abrio ──────────────
+        row = _abrir("a1")
+        avisos.clear()
+        pt._close(conn, row, 0.000003315, "venta de la ⭐", "🚪",
+                  vendedor=LIDER)
+        m = "\n".join(avisos)
+        comprobar("el aviso dice QUIEN vendio",
+                  "Jaguar Dorado" in m, m[:400])
+        comprobar("y su puesto en el top",
+                  "del top" in m, m[:400])
+        comprobar("dice QUE token, con su contrato (el simbolo solo no "
+                  "identifica nada: hay decenas de 'Paal')",
+                  MINT in m, m[:400])
+        comprobar("y cuanto tiempo estuvo la posicion abierta",
+                  "⏱" in m and "3.0 h" in m, m[:400])
+        comprobar("y que se cerro la posicion ENTERA",
+                  "entera" in m, m[:400])
+        comprobar("sin perder nada de lo que ya decia (precio y PnL)",
+                  "Precio:" in m and "PnL" in m, m[:400])
+
+        # ── 2) Consenso: vende OTRA ⭐ de la manada ───────────────────
+        row = _abrir("a2")
+        avisos.clear()
+        pt._close(conn, row, 0.000003315, "venta de la ⭐", "🚪",
+                  vendedor=OTRA)
+        m2 = "\n".join(avisos)
+        # LO IMPORTANTE: en una copia por consenso la fila esta a nombre
+        # de la LIDER pero puede cerrarla otra de la manada. Nombrar
+        # siempre al dueño mentiria justo cuando mas importa saberlo.
+        comprobar("si vende OTRA ⭐, se nombra a LA QUE VENDIO",
+                  "Lobo Gris" in m2, m2[:400])
+        comprobar("y se avisa de que la posicion era de otra",
+                  "era de" in m2 and "Jaguar Dorado" in m2, m2[:400])
+
+        # ── 3) Con parciales previos, se dice cuanto quedaba ─────────
+        row = _abrir("a3", frac=0.35)
+        avisos.clear()
+        pt._close(conn, row, 0.000003315, "venta de la ⭐", "🚪",
+                  vendedor=LIDER)
+        m3 = "\n".join(avisos)
+        comprobar("con parciales previos dice que solo se cerro el resto",
+                  "35%" in m3 and "quedaba" in m3, m3[:400])
+        comprobar("y no dice 'entera' (seria falso)",
+                  "entera" not in m3, m3[:400])
+
+        # ── 4) Un cierre que NO viene de una venta ───────────────────
+        row = _abrir("a4")
+        avisos.clear()
+        pt._close(conn, row, 0.000001, "stop-loss", "🛑")
+        m4 = "\n".join(avisos)
+        comprobar("un stop-loss no inventa un vendedor",
+                  "Vendió:" not in m4, m4[:400])
+        comprobar("pero si dice el token y el tiempo",
+                  MINT in m4 and "⏱" in m4, m4[:400])
+
+        # ── 5) Sin alias, no se queda mudo ──────────────────────────
+        conn.execute("UPDATE wallets SET alias=NULL WHERE address=?",
+                     (LIDER,))
+        conn.commit()
+        row = _abrir("a5")
+        avisos.clear()
+        pt._close(conn, row, 0.000003315, "venta de la ⭐", "🚪",
+                  vendedor=LIDER)
+        m5 = "\n".join(avisos)
+        comprobar("sin alias cae a los primeros caracteres, no a vacio",
+                  LIDER[:8] in m5, m5[:400])
+
+        # ── 6) quien() es UNA copia, no cuatro ──────────────────────
+        n, pos = pt.quien(conn, OTRA)
+        comprobar("quien() devuelve nombre y puesto", n == "Lobo Gris",
+                  f"{n} / {pos}")
+        comprobar("quien() con direccion vacia no revienta",
+                  pt.quien(conn, None)[0] == "la ⭐")
+        comprobar("quien() con una direccion desconocida tampoco",
+                  pt.quien(conn, "Zzz" + "9" * 41)[0].startswith("Zzz"))
+
+        # ── 7) El vendedor llega hasta el aviso de venta PARCIAL ────
+        import ast as _a19u
+        import io as _io4
+        _src = _io4.open(pt.__file__, encoding="utf-8").read()
+        _fn = next(f for f in _a19u.walk(_a19u.parse(_src))
+                   if isinstance(f, _a19u.FunctionDef)
+                   and f.name == "_venta_parcial")
+        _args = [a.arg for a in _fn.args.args] + [
+            a.arg for a in _fn.args.kwonlyargs]
+        comprobar("la venta parcial tambien recibe el vendedor real",
+                  "vendedor" in _args, _args)
+        # Y lo USA: que el parametro exista en la firma no prueba nada.
+        # Con el alias de la lider borrado (paso 5), si el aviso parcial
+        # siguiera nombrando al dueño de la fila saldria la direccion en
+        # crudo en vez de "Lobo Gris".
+        row = _abrir("a6")
+        avisos.clear()
+        pt._venta_parcial(conn, row, 0.000003315, 40.0, vendedor=OTRA)
+        m6 = "\n".join(avisos)
+        comprobar("y el aviso parcial nombra A QUIEN VENDIO, no al dueño "
+                  "de la fila",
+                  "Lobo Gris" in m6, m6[:400])
+        # Los reintentos internos tienen que REENVIARLO: si no, un cierre
+        # que se recalcula por una carrera pierde el nombre.
+        _n_reenvia = _src.count("vendedor=vendedor")
+        comprobar("y los reintentos internos lo reenvian (si no, una "
+                  "carrera dejaria el aviso sin nombre)",
+                  _n_reenvia >= 2, f"{_n_reenvia} reenvios")
+    finally:
+        pt._tg = _tg_real
+        try:
+            conn.execute("DELETE FROM paper_trades")
+            conn.execute("DELETE FROM wallets")
+            conn.commit()
+        except Exception as e:
+            print(f"  · limpieza: {e}")
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -9731,6 +9881,7 @@ def main():
     prueba_19r()
     prueba_19s()
     prueba_19t()
+    prueba_19u()
 
     print("\n" + "─" * 60)
     if _FALLOS:
