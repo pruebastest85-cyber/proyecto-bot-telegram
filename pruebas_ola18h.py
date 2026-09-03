@@ -9142,6 +9142,209 @@ def prueba_19q():
         conn.close()
 
 
+def prueba_19r():
+    bloque("19-R - el vaciado sobrevive a un despliegue")
+    import time as _tt
+    import helius_budget as hb
+    import vaciar_cola as vc
+    from db import get_conn, get_setting, set_setting
+
+    conn = get_conn()
+    _trozo_real = vc._un_trozo
+    _puede_real = hb.puede_llamar
+    _usados_real = hb.creditos_usados
+    try:
+        for k in ("vaciarcola_activo", "vaciarcola_techo",
+                  "vaciarcola_cred_inicio", "vaciarcola_hechas"):
+            set_setting(conn, k, "0")
+        conn.commit()
+        hb.puede_llamar = lambda conn=None: True
+
+        # ── 1) Al arrancar sin nada guardado, no reanuda nada ─────────
+        comprobar("sin marca guardada, el arranque no reanuda nada",
+                  vc.reanudar_si_procede(avisar=None) is False)
+
+        # ── 2) Un vaciado en curso deja la marca ENCENDIDA ────────────
+        # Se simula el corte: el hilo hace unos trozos y lo matamos como
+        # lo mata un despliegue — sin pasar por el final ordenado.
+        trozos = []
+        hb.creditos_usados = lambda c: 1000
+        vc._un_trozo = lambda lim: (trozos.append(lim), 5)[1]
+        vc.arrancar(techo_creditos=50_000, avisar=None)
+        for _ in range(60):
+            if len(trozos) >= 2:
+                break
+            _tt.sleep(0.05)
+        comprobar("mientras corre, la marca queda encendida en la base",
+                  (get_setting(conn, "vaciarcola_activo", "0") or "") == "1",
+                  get_setting(conn, "vaciarcola_activo", "0"))
+        comprobar("y va guardando cuantas lleva",
+                  int(float(get_setting(conn, "vaciarcola_hechas", "0"))) > 0,
+                  get_setting(conn, "vaciarcola_hechas", "0"))
+        comprobar("y desde que credito se mide el techo",
+                  int(float(get_setting(
+                      conn, "vaciarcola_cred_inicio", "0"))) == 1000,
+                  get_setting(conn, "vaciarcola_cred_inicio", "0"))
+        _hechas_antes = int(float(get_setting(conn, "vaciarcola_hechas", "0")))
+
+        # Muerte por despliegue: el estado en memoria se pierde, la marca
+        # de la base NO. Se simula vaciando el estado a mano.
+        vc.parar()
+        for _ in range(60):
+            if not vc.corriendo():
+                break
+            _tt.sleep(0.05)
+        # `parar()` apaga la marca (es un final ordenado); se vuelve a
+        # encender a mano para simular la muerte SIN final ordenado.
+        set_setting(conn, "vaciarcola_activo", "1")
+        set_setting(conn, "vaciarcola_hechas", str(_hechas_antes))
+        set_setting(conn, "vaciarcola_cred_inicio", "1000")
+        set_setting(conn, "vaciarcola_techo", "50000")
+        conn.commit()
+
+        # ── 3) El arranque siguiente lo REANUDA ──────────────────────
+        # El contador de Helius sube a 777.000: el bot lleva horas caido
+        # y se ha gastado mucho mas desde que arranco el vaciado. Es LA
+        # diferencia que hace visible el fallo — si al reanudar se
+        # recalculara el contador de partida en vez de conservar el
+        # guardado, `creditos_inicio` valdria 777.000 y el techo volveria
+        # a medirse desde cero. Con el mismo numero en las dos fases el
+        # fallo seria invisible.
+        hb.creditos_usados = lambda c: 777_000
+        trozos.clear()
+        avisos = []
+        comprobar("con la marca encendida, el arranque lo reanuda",
+                  vc.reanudar_si_procede(avisar=avisos.append) is True)
+        comprobar("y avisa por Telegram de que lo ha reanudado",
+                  any("reanudado" in a.lower() for a in avisos), avisos)
+        e = vc.estado()
+        comprobar("conserva cuantas llevaba (no empieza de cero)",
+                  e["hechas"] == _hechas_antes,
+                  f"{e['hechas']} vs {_hechas_antes}")
+        # ── LO CRITICO: el techo se mide desde el PRINCIPIO ───────────
+        # Si `creditos_inicio` se reiniciara en cada reanudacion, un bot
+        # que se reinicie cinco veces gastaria cinco veces el techo que
+        # puso el dueño — justo el fallo que el techo existe para evitar.
+        comprobar("el techo se sigue midiendo desde el credito INICIAL, "
+                  "no desde la reanudacion",
+                  e["creditos_inicio"] == 1000,
+                  f"creditos_inicio={e['creditos_inicio']} (deberia ser 1000)")
+        comprobar("y conserva el techo que puso el dueño",
+                  e["techo"] == 50_000, e["techo"])
+        vc.parar()
+        for _ in range(60):
+            if not vc.corriendo():
+                break
+            _tt.sleep(0.05)
+
+        # ── 4) Un final ORDENADO apaga la marca: no resucita ─────────
+        vc._un_trozo = lambda lim: 0          # cola vacia
+        vc.arrancar(techo_creditos=0, avisar=None)
+        for _ in range(60):
+            if not vc.corriendo():
+                break
+            _tt.sleep(0.05)
+        comprobar("al vaciarse la cola, la marca se apaga",
+                  (get_setting(conn, "vaciarcola_activo", "1") or "") == "0",
+                  get_setting(conn, "vaciarcola_activo", "1"))
+        comprobar("y el arranque siguiente ya NO lo reanuda",
+                  vc.reanudar_si_procede(avisar=None) is False)
+
+        # ── 5) El freno tambien es final ordenado ────────────────────
+        hb.puede_llamar = lambda conn=None: False
+        vc._un_trozo = lambda lim: 5
+        vc.arrancar(techo_creditos=0, avisar=None)
+        for _ in range(60):
+            if not vc.corriendo():
+                break
+            _tt.sleep(0.05)
+        comprobar("si para por el freno, tampoco resucita",
+                  (get_setting(conn, "vaciarcola_activo", "1") or "") == "0",
+                  get_setting(conn, "vaciarcola_activo", "1"))
+
+        # ── 6) Si no se puede leer el presupuesto, NO se hereda ──────
+        # Un vaciado nuevo no puede quedarse con el contador de partida
+        # del anterior: el techo se mediria desde un numero de hace
+        # horas. Se fuerza el fallo de lectura y se comprueba que el
+        # contador arranca limpio (0), no con el 1.000 del vaciado de
+        # antes que sigue en memoria.
+        def _revienta(_c):
+            raise RuntimeError("Helius no responde")
+        hb.creditos_usados = _revienta
+        hb.puede_llamar = lambda conn=None: True
+        vc._un_trozo = lambda lim: 0
+        vc.arrancar(techo_creditos=9_999, avisar=None)
+        _ci = vc.estado()["creditos_inicio"]
+        for _ in range(60):
+            if not vc.corriendo():
+                break
+            _tt.sleep(0.05)
+        comprobar("sin lectura de presupuesto, el contador de partida "
+                  "no se hereda del vaciado anterior",
+                  _ci == 0, f"creditos_inicio={_ci} (deberia ser 0)")
+        hb.creditos_usados = _usados_real
+
+        # ── 7) El arranque del bot lo llama DE VERDAD ────────────────
+        # No vale con que el nombre aparezca en el archivo: la llamada
+        # tiene que ser alcanzable. Un `if False and reanudar(...)` deja
+        # el texto intacto y el vaciado muerto, y una comprobacion por
+        # texto lo daria por bueno.
+        import ast as _a19
+        import io as _io
+        import telegram_bot as tb
+        _src = _io.open(tb.__file__, encoding="utf-8").read()
+        _arb = _a19.parse(_src)
+        _pi = next((n for n in _a19.walk(_arb)
+                    if isinstance(n, (_a19.FunctionDef, _a19.AsyncFunctionDef))
+                    and n.name == "_post_init"), None)
+        _padre = {}
+        if _pi is not None:
+            for _n in _a19.walk(_pi):
+                for _h in _a19.iter_child_nodes(_n):
+                    _padre[_h] = _n
+
+        def _muerta(_nodo):
+            """¿La llamada esta apagada por una constante falsa?"""
+            _x = _nodo
+            while _x is not None:
+                _p = _padre.get(_x)
+                if isinstance(_p, _a19.BoolOp):
+                    for _v in _p.values:
+                        if (isinstance(_v, _a19.Constant)
+                                and not _v.value):
+                            return True
+                if (isinstance(_p, _a19.If) and _p.test is _x
+                        and isinstance(_p.test, _a19.Constant)
+                        and not _p.test.value):
+                    return True
+                if isinstance(_p, _a19.If) and _x in _p.body:
+                    if (isinstance(_p.test, _a19.Constant)
+                            and not _p.test.value):
+                        return True
+                _x = _p
+            return False
+
+        _llamadas = [n for n in _a19.walk(_pi or _arb)
+                     if isinstance(n, _a19.Call)
+                     and getattr(n.func, "attr", getattr(n.func, "id", ""))
+                     == "reanudar_si_procede"]
+        comprobar("_post_init llama a la reanudacion al arrancar el bot",
+                  _pi is not None and len(_llamadas) >= 1,
+                  f"_post_init={_pi is not None}, {len(_llamadas)} llamadas")
+        comprobar("y esa llamada es alcanzable (no apagada por una "
+                  "constante)",
+                  bool(_llamadas) and not any(_muerta(c) for c in _llamadas))
+    finally:
+        vc._un_trozo = _trozo_real
+        hb.puede_llamar = _puede_real
+        hb.creditos_usados = _usados_real
+        for k in ("vaciarcola_activo", "vaciarcola_techo",
+                  "vaciarcola_cred_inicio", "vaciarcola_hechas"):
+            set_setting(conn, k, "0")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -9185,6 +9388,7 @@ def main():
     prueba_19n()
     prueba_19p()
     prueba_19q()
+    prueba_19r()
 
     print("\n" + "─" * 60)
     if _FALLOS:

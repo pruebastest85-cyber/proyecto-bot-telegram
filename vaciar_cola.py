@@ -210,6 +210,19 @@ def _bucle(techo_creditos: int, avisar) -> None:
                 _estado["hechas"] += n
                 _estado["trozos"] += 1
                 hechas, trozos = _estado["hechas"], _estado["trozos"]
+                _cred0 = _estado["creditos_inicio"]
+            # (19-R) El avance se guarda en CADA trozo. Si el bot se
+            # reinicia a mitad, la reanudacion sabe cuantas llevaba y
+            # -sobre todo- desde que credito se mide el techo.
+            try:
+                from db import get_conn as _gc
+                _c = _gc()
+                try:
+                    _guardar(_c, True, techo_creditos, _cred0, hechas)
+                finally:
+                    _c.close()
+            except Exception as _e:
+                print(f"· vaciarcola: no pude guardar el avance ({_e})")
             # Un aviso cada 20 trozos (500 billeteras): suficiente para
             # saber que sigue vivo sin inundar el chat en 8 horas.
             if avisar and trozos % 20 == 0:
@@ -221,6 +234,28 @@ def _bucle(techo_creditos: int, avisar) -> None:
         motivo = f"cortado por un error: {e}"
         print(f"· vaciarcola: {e}")
     finally:
+        # (19-R) Termino DE VERDAD (cola vacia, techo, freno o el dueño
+        # lo paro): se apaga la marca para que el proximo arranque NO lo
+        # reanude. Si el bot muere por un despliegue no se pasa por aqui,
+        # la marca sigue encendida y `reanudar_si_procede` lo continua —
+        # que es justo la diferencia que hay que distinguir.
+        #
+        # EL ORDEN IMPORTA: primero se apaga la marca EN LA BASE y solo
+        # despues se suelta el estado en memoria. Al reves habria una
+        # rendija (milisegundos, pero real) en la que el vaciado ya
+        # figura como terminado mientras la marca sigue encendida: un
+        # despliegue justo ahi resucitaria un vaciado ya acabado. Todo
+        # el bloque va en try/except, asi que pase lo que pase se llega
+        # a soltar "corriendo" y el mando no se queda trabado.
+        try:
+            from db import get_conn as _gc2
+            _c2 = _gc2()
+            try:
+                _guardar(_c2, False, 0, 0, 0)
+            finally:
+                _c2.close()
+        except Exception as _e:
+            print(f"· vaciarcola: no pude apagar la marca ({_e})")
         with _lock:
             _estado["corriendo"] = False
             _estado["parar"] = False
@@ -238,15 +273,96 @@ def _bucle(techo_creditos: int, avisar) -> None:
                 print(f"· vaciarcola: no pude avisar del final ({e})")
 
 
-def arrancar(techo_creditos: int = 0, avisar=None) -> bool:
-    """Lanza el vaciado en segundo plano. False si ya había uno."""
+def _guardar(conn, activo: bool, techo: int, cred_inicio: int,
+             hechas: int) -> None:
+    """(19-R) Deja constancia EN LA BASE de que hay un vaciado en curso.
+
+    El vaciado vive en un hilo del bot, y el supervisor reinicia el bot
+    en CADA despliegue: el hilo muere en silencio, sin avisar y sin
+    dejar rastro. Le paso al dueño el 2/9 — su vaciado se corto cuando
+    desplegué la 19-Q y no se entero hasta mirar los numeros. Con
+    diecisiete despliegues en una semana, eso es un vaciado cortado
+    cada pocas horas.
+
+    `creditos_inicio` se guarda a proposito: el techo de gasto tiene que
+    medirse sobre el vaciado ENTERO, no reiniciarse en cada reanudacion.
+    Si no, un bot que se reinicie cinco veces gastaria cinco veces el
+    techo que puso el dueño — el fallo seria justo el que el techo
+    existe para evitar.
+    """
+    from db import set_setting
+    try:
+        set_setting(conn, "vaciarcola_activo", "1" if activo else "0")
+        if activo:
+            set_setting(conn, "vaciarcola_techo", str(int(techo)))
+            set_setting(conn, "vaciarcola_cred_inicio", str(int(cred_inicio)))
+            set_setting(conn, "vaciarcola_hechas", str(int(hechas)))
+        conn.commit()
+    except Exception as e:
+        print(f"· vaciarcola: no pude guardar el estado ({e})")
+
+
+def reanudar_si_procede(avisar=None) -> bool:
+    """(19-R) Al arrancar el bot: si habia un vaciado en curso, seguir.
+
+    Se llama desde `_post_init`. Solo reanuda si el estado guardado dice
+    que estaba activo — o sea, si murio por un reinicio y no porque
+    terminara o el dueño lo parara (esos casos apagan la marca).
+    """
+    from db import get_conn, get_setting
+    conn = get_conn()
+    try:
+        if (get_setting(conn, "vaciarcola_activo", "0") or "0").strip() != "1":
+            return False
+        try:
+            techo = int(float(get_setting(conn, "vaciarcola_techo", "0") or 0))
+            cred0 = int(float(get_setting(
+                conn, "vaciarcola_cred_inicio", "0") or 0))
+            hechas = int(float(get_setting(
+                conn, "vaciarcola_hechas", "0") or 0))
+        except (TypeError, ValueError):
+            techo, cred0, hechas = 0, 0, 0
+    finally:
+        conn.close()
+    if not arrancar(techo_creditos=techo, avisar=avisar,
+                    _cred_inicio=cred0, _hechas=hechas):
+        return False
+    print(f"· vaciarcola: reanudado tras el reinicio "
+          f"({hechas:,} ya perfiladas, techo {techo:,})")
+    if avisar:
+        try:
+            avisar(f"🔄 *Vaciado reanudado* tras el reinicio del bot.\n"
+                   f"Llevaba *{hechas:,}* perfiladas"
+                   + (f" · techo {techo:,} créditos" if techo else "")
+                   + ".\n_El gasto se sigue contando desde el principio, "
+                     "no desde ahora._")
+        except Exception as e:
+            print(f"· vaciarcola: aviso de reanudacion perdido ({e})")
+    return True
+
+
+def arrancar(techo_creditos: int = 0, avisar=None,
+             _cred_inicio: int | None = None, _hechas: int = 0) -> bool:
+    """Lanza el vaciado en segundo plano. False si ya había uno.
+
+    `_cred_inicio` y `_hechas` los usa `reanudar_si_procede`: al
+    reanudar hay que CONSERVAR el contador de gasto y el total, no
+    empezar de cero.
+    """
     from db import get_conn
     with _lock:
         if _estado["corriendo"]:
             return False
-        _estado.update({"corriendo": True, "parar": False, "hechas": 0,
+        # `creditos_inicio` se pone AQUI a proposito, aunque unas lineas
+        # mas abajo se vuelva a calcular: si no se tocara, un vaciado
+        # nuevo heredaria en silencio el contador de partida del vaciado
+        # ANTERIOR cuando la lectura del presupuesto falle. El techo se
+        # mediria entonces desde un numero de hace horas y saltaria (o
+        # no saltaria) por motivos invisibles.
+        _estado.update({"corriendo": True, "parar": False, "hechas": _hechas,
                         "trozos": 0, "inicio": time.time(),
-                        "motivo_fin": "", "techo": techo_creditos})
+                        "motivo_fin": "", "techo": techo_creditos,
+                        "creditos_inicio": int(_cred_inicio or 0)})
     # El contador de partida se lee DESPUÉS de marcar "corriendo": si
     # fallara, el hilo no arrancaría y el estado se quedaría en
     # "corriendo" para siempre, bloqueando cualquier intento futuro.
@@ -255,7 +371,11 @@ def arrancar(techo_creditos: int = 0, avisar=None) -> bool:
         conn = get_conn()
         try:
             with _lock:
-                _estado["creditos_inicio"] = hb.creditos_usados(conn)
+                _estado["creditos_inicio"] = (
+                    _cred_inicio if _cred_inicio is not None
+                    else hb.creditos_usados(conn))
+            _guardar(conn, True, techo_creditos,
+                     _estado["creditos_inicio"], _hechas)
         finally:
             conn.close()
     except Exception as e:

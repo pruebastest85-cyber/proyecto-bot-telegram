@@ -2635,6 +2635,35 @@ async def _post_init(app: Application):
     except Exception as e:
         print(f"· set_my_commands falló: {e}")
 
+    # (19-R) Si un despliegue corto un vaciado a mitad, se reanuda.
+    #
+    # El vaciado vive en un hilo del bot, y el supervisor reinicia el bot
+    # en CADA despliegue: el hilo moria en silencio, sin avisar y sin
+    # dejar rastro. Le paso al dueño el 2/9 — su vaciado se corto con el
+    # despliegue de la 19-Q y no se entero hasta mirar los numeros a
+    # mano. Con la frecuencia de despliegues de esta semana, eso era un
+    # vaciado cortado cada pocas horas.
+    #
+    # Solo reanuda si la marca guardada dice que seguia activo: uno que
+    # TERMINO (cola vacia, techo, freno) o que el dueño paro la deja
+    # apagada, asi que no puede resucitar solo.
+    try:
+        import vaciar_cola as _vc
+        _loop_pi = asyncio.get_running_loop()
+
+        def _avisar_pi(texto: str) -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    app.bot.send_message(ADMIN_ID, texto,
+                                         parse_mode="Markdown"), _loop_pi)
+            except Exception as _e:
+                print(f"· vaciarcola: aviso de arranque perdido ({_e})")
+
+        if _vc.reanudar_si_procede(avisar=_avisar_pi):
+            print("· vaciarcola: habia uno en curso; reanudado")
+    except Exception as e:
+        print(f"· vaciarcola: no pude comprobar si habia uno en curso: {e}")
+
 
 def _marcar_reevaluacion(solo_sin_estrella: bool = True) -> int:
     """Marca billeteras para que el próximo ciclo las vuelva a graduar.
