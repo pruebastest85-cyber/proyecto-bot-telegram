@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from db import now_iso
 from wallet_profiler import profile_wallet
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -114,8 +115,11 @@ def _ensure_columns(conn):
                      ("turno_desde", "BIGINT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {ine}{col} {typ}")
-        except Exception:
-            pass
+        except Exception as _ex:
+            # (19-AE) "duplicate column" es el camino normal en SQLite
+            # (no admite IF NOT EXISTS); lo demas si se dice.
+            if "duplicate column" not in str(_ex).lower():
+                _avisar_ex("ai_analyst:_ensure_columns:117", _ex)
     conn.commit()
 
 
@@ -246,7 +250,8 @@ def nota_vinculante(conn) -> bool:
         # eso lo decide el dueño con `/nota on` cuando vea las cifras, no
         # un despliegue. Ver el comando en telegram_bot.
         return (get_setting(conn, "grado_vinculante", "0") or "0").strip() == "1"
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:nota_vinculante:249", _ex)
         return False
 
 
@@ -291,7 +296,8 @@ def _bump(conn, key: str, n: int = 1):
         from db import get_setting, set_setting
         set_setting(conn, key,
                     int(float(get_setting(conn, key, "0") or 0)) + n)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:_bump:294", _ex)
         pass
 
 
@@ -335,6 +341,7 @@ def cupo_evaluaciones(conn, base: int) -> tuple[int, str]:
         suelo = int(getattr(_c, "EVAL_MIN_POR_CICLO", 10))
         coste_def = float(getattr(_c, "EVAL_COSTE_CREDITOS", 300))
     except Exception as e:
+        _avisar_ex("ai_analyst:cupo_evaluaciones:337", e)
         return base, f"cupo fijo (no pude leer la configuración: {e})"
     # (19-L) `AUTO_CYCLE_HOURS` NO vive en `config`: lo lee `telegram_bot`
     # del entorno y punto. La 19-K hacía `getattr(config,
@@ -361,6 +368,7 @@ def cupo_evaluaciones(conn, base: int) -> tuple[int, str]:
         margen = hb.CUOTA_MENSUAL * hb.FRENO_PCT / 100.0 - usados
         dia = max(1, hb.dia_del_ciclo(conn))
     except Exception as e:
+        _avisar_ex("ai_analyst:cupo_evaluaciones:363", e)
         return base, f"cupo fijo (no pude leer el presupuesto: {e})"
     if margen <= 0:
         # Ya estamos en el freno: no gastar más. El corte duro lo hace
@@ -377,7 +385,8 @@ def cupo_evaluaciones(conn, base: int) -> tuple[int, str]:
         if perfiladas >= 50 and usados > 0:
             coste = max(1.0, usados / float(perfiladas))
             origen = f"medido sobre {perfiladas:,} perfilados"
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:cupo_evaluaciones:380", _ex)
         pass
     dias_quedan = max(1, 31 - dia)
     ciclos_dia = max(1.0, 24.0 / horas)
@@ -403,7 +412,8 @@ def _inicio_ciclo_iso(conn) -> str:
     try:
         import helius_budget as hb
         return hb._inicio_ciclo(conn).strftime("%Y-%m-%dT00:00:00+00:00")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:_inicio_ciclo_iso:406", _ex)
         return "0000-01-01T00:00:00+00:00"
 
 
@@ -429,7 +439,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         import config as _cfg
         _lim = int(getattr(_cfg, "MAX_EVAL_PER_CYCLE", 20))
         _min = int(getattr(_cfg, "MIN_WINNING_TOKENS", 1))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:evaluate_tracked:432", _ex)
         _lim, _min = 20, 1
     if limite is not None:
         _lim = max(0, int(limite))
@@ -457,7 +468,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
     try:
         _s0 = float(getattr(_cfg, "MIN_BUY_SOL", 1.0))
         _m0 = float(getattr(_cfg, "MIN_ENTRY_MULTIPLE", 3.0))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:evaluate_tracked:460", _ex)
         _s0, _m0 = 1.0, 3.0
     # Cola PRIORIZADA con enfriamiento (v2, auditoria 19/8). La version
     # anterior re-evaluaba a las RECHAZADAS cada 3 dias para siempre y,
@@ -524,7 +536,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
 
     try:
         from signal_tracker import wallet_track_record
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:evaluate_tracked:527", _ex)
         wallet_track_record = None
 
     # Apodos ya usados → la IA debe evitarlos; aquí garantizamos unicidad
@@ -532,7 +545,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         owner = {r["alias"]: r["address"] for r in conn.execute(
             "SELECT alias, address FROM wallets WHERE alias IS NOT NULL"
         ).fetchall()}
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:evaluate_tracked:535", _ex)
         owner = {}
 
     # (18-O) AVISO, no interruptor. `_podar_global` deja la tabla
@@ -553,7 +567,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
                   f"a partir de aquí se poda historial viejo de las "
                   f"candidatas y las puertas 1-2 las juzgarán con menos "
                   f"datos. Sube MAX_TRADES_TOTAL.")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_analyst:evaluate_tracked:556", _ex)
         pass
 
     evaluated = 0
@@ -627,7 +642,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
                 "SELECT is_tracked FROM wallets WHERE address = ?",
                 (addr,)).fetchone()
             _era_estrella = bool(_fila_prev and _fila_prev["is_tracked"])
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_analyst:evaluate_tracked:630", _ex)
             _era_estrella = False
 
         # ── (19-Q) LAS PUERTAS 1-2 SE MIRAN *ANTES* DE GASTAR LA IA ──
@@ -729,7 +745,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         try:
             from wallet_score import compute_score
             wscore = compute_score(profile, track)["score"]
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_analyst:evaluate_tracked:732", _ex)
             wscore = None
 
         # Grading en cascada: Consistency Score + nivel (Elite/…/Descartada)
@@ -1002,7 +1019,8 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         try:
             from db import invalidar_copiables
             invalidar_copiables()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_analyst:evaluate_tracked:1005", _ex)
             pass
     return evaluated
 
@@ -1163,7 +1181,8 @@ def depurar_estrellas(conn) -> dict:
         try:
             from db import invalidar_copiables
             invalidar_copiables()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_analyst:depurar_estrellas:1166", _ex)
             pass
     return {"no_seguibles": len(fuera_hold), "hermanas": len(fuera_fam),
             "descartadas": len(fuera_grade),

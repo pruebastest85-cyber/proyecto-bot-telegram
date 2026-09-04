@@ -40,6 +40,7 @@ import time
 
 import db as _db
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 _CACHE = {"g": None, "ts": 0.0, "fallo": 0.0}
 _TTL = 1800        # 30 min. Antes 300 s, pero predictions_job corre
@@ -162,8 +163,11 @@ def _build():
             # con esta conexion) y con el candado solo hay un build a la
             # vez, asi que el pico de memoria queda acotado (~2-3 nodos
             # x 256 MB en un contenedor con varios GB).
-            conn.execute("SET work_mem = '256MB'")
-        except Exception:
+            import db as _dbmod
+            if getattr(_dbmod, "USE_PG", False):     # (19-AE) solo Postgres
+                conn.execute("SET work_mem = '256MB'")
+        except Exception as _ex:
+            _avisar_ex("influence:_build:166", _ex)
             pass          # SQLite no lo tiene; alli tampoco hace falta
         conn.execute(f"CREATE TEMPORARY TABLE tmp_pares AS "
                      f"WITH {ap}, {_CTE_PARES} SELECT * FROM pares")

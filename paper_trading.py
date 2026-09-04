@@ -42,6 +42,7 @@ Settings (tabla settings, editables con /paper o desde el chat):
 import time
 
 from db import get_conn, get_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 HOUR = 3600
 # (Ola 16) Segundos que un par debe llevar MUERTO antes de cerrar la
@@ -78,7 +79,8 @@ def _g(conn, key: str, default):
     try:
         from db import get_setting
         return get_setting(conn, key, default)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_g:81", _ex)
         return default
 
 
@@ -122,7 +124,8 @@ def _precio(x) -> str:
     try:
         from card_image import _fmt_price
         return _fmt_price(x)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_precio:125", _ex)
         try:
             return f"{float(x):.10f}".rstrip("0").rstrip(".")
         except (TypeError, ValueError):
@@ -134,7 +137,8 @@ def _sol_a_usd() -> float | None:
     try:
         from unrealized_pnl import _sol_usd
         return _sol_usd()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_sol_a_usd:137", _ex)
         return None
 
 
@@ -170,7 +174,8 @@ def _symbol_db(conn, mint: str) -> str | None:
             r = conn.execute(sql, (mint,)).fetchone()
             if r and r["symbol"] and not mint.startswith(r["symbol"]):
                 return str(r["symbol"]).strip()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_symbol_db:173", _ex)
         pass
     return None
 
@@ -182,7 +187,8 @@ def _symbol_helius(mint: str) -> str | None:
     try:
         from helius_rpc import simbolo_token
         return simbolo_token(mint)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_symbol_helius:185", _ex)
         return None
 
 
@@ -198,7 +204,8 @@ def _symbol_rapido(mint: str) -> str | None:
         if pares:
             s = ((pares[0].get("baseToken") or {}).get("symbol") or "")
             return s.strip() or None
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_symbol_rapido:201", _ex)
         pass
     return None
 
@@ -338,7 +345,8 @@ def open_trade(conn, trade: dict, token: dict, score,
             n_previas = conn.execute(
                 "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"]
             gestion = "ia" if n_previas % 2 else "reglas"
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:open_trade:341", _ex)
         pass
     # (19-D) El INSERT puede chocar ahora con el índice ÚNICO PARCIAL
     # `idx_paper_abierta_unica` (una fila abierta por mint). Ese choque
@@ -385,7 +393,8 @@ def open_trade(conn, trade: dict, token: dict, score,
         if "Integrity" in _nombre or "Unique" in _nombre:
             try:
                 conn.rollback()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("paper_trading:open_trade:388", _ex)
                 pass
             print(f"· Paper: otro hilo abrió {sym} mientras cotizaba; "
                   f"no abro una segunda posición del mismo token")
@@ -424,7 +433,8 @@ def open_trade(conn, trade: dict, token: dict, score,
         try:
             from wallet_ident import posicion
             _pos = posicion(conn, trade["wallet"], 30)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("paper_trading:open_trade:427", _ex)
             pass
         linea_star = (f"\n⭐ Copiando a *{_md(_nom)}*"
                       + (f" (#{_pos} del top)" if _pos else "")
@@ -433,7 +443,8 @@ def open_trade(conn, trade: dict, token: dict, score,
         if origen == "consenso":
             linea_star += ("\n🤝 *Copia por CONSENSO*: varias ⭐ entraron "
                            "a este token; se imita a la LÍDER (la primera)")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:open_trade:436", _ex)
         pass
     extra_cot = ""
     if cot and cot.get("slippage_pct") is not None:
@@ -932,7 +943,8 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     nota_liq = ""
     try:
         from signal_tracker import LIQ_FIABLE_USD as _LIQF
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:_close:935", _ex)
         _LIQF = 1000.0
     if liq_salida is not None and 0 < liq_salida < _LIQF * 10:
         _rel = (stake_usd / liq_salida * 100) if (stake_usd and liq_salida) else None
@@ -1217,7 +1229,8 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
                 "SELECT 1 FROM paper_fills WHERE trade_id=? AND firma=?",
                 (row["id"], _firma)).fetchone():
             return
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:close_on_wallet_sell:1220", _ex)
         pass
     if row["wallet"] and trade.get("wallet") \
             and row["wallet"] != trade["wallet"]:
@@ -1404,7 +1417,8 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
         try:
             from salidas import perfil_salida
             perfil = perfil_salida(conn, row["wallet"])
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("paper_trading:close_on_wallet_sell:1407", _ex)
             perfil = None
 
         # ── Mitad "ia" del A/B: decide la IA local (con barandillas) ──
@@ -1484,7 +1498,8 @@ def close_on_wallet_sell(conn, trade: dict, token: dict,
                 conn.execute("UPDATE paper_trades SET decidido_por='reglas' "
                              "WHERE id=? AND decidido_por IS NULL",
                              (row["id"],))
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("paper_trading:close_on_wallet_sell:1487", _ex)
                 pass
             extra_min = _f(conn, "paper_hold_extra_min", 60.0)
             hasta = int(time.time() + extra_min * 60)
@@ -1904,7 +1919,8 @@ def update_open_trades() -> int:
     finally:
         try:
             conn.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("paper_trading:update_open_trades:1907", _ex)
             pass
     # (Ola 12, afinado Ola 15) Vigilancia dev-sell de respaldo EN HILO
     # DE FONDO: hasta 15 posiciones x llamadas de red podian alargar
@@ -2343,8 +2359,9 @@ def resumen_text() -> str:
         now = time.time()
         try:
             from card_image import _ago
-        except Exception:
+        except Exception as _ex:
             # Pillow roto no puede tumbar /paper (politica del modulo).
+            _avisar_ex("paper_trading:resumen_text:2346", _ex)
             def _ago(hs):
                 return (f"hace {hs:.1f}h" if hs < 24
                         else f"hace {hs / 24:.1f}d")
@@ -2374,7 +2391,8 @@ def contar() -> tuple[int, int]:
         c = conn.execute("SELECT COUNT(*) c FROM paper_trades "
                          "WHERE status='cerrada'").fetchone()["c"]
         return a, c
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("paper_trading:contar:2377", _ex)
         return 0, 0
     finally:
         conn.close()

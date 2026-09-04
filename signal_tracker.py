@@ -19,10 +19,12 @@ import requests
 
 import config
 from db import get_conn, get_setting, set_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 try:
     from api_usage import record as _api_rec
-except Exception:          # nunca romper el flujo por el contador
+except Exception as _ex:          # nunca romper el flujo por el contador
+    _avisar_ex("signal_tracker:modulo:25", _ex)
     def _api_rec(*a, **k):
         pass
 
@@ -447,7 +449,8 @@ def _alert_milestone(conn, s, pct: float, price: float,
     w_base, ts_base, mc_base = s["wallet"], s["ts"], None
     try:
         mc_base = s["mc"]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("signal_tracker:_alert_milestone:450", _ex)
         pass
     key_base = f"mult_base:{s['mint']}"
     try:
@@ -460,7 +463,8 @@ def _alert_milestone(conn, s, pct: float, price: float,
                 w_base = _pin.get("wallet") or w_base
                 ts_base = _pin.get("ts") or ts_base
                 mc_base = _pin.get("mc", mc_base)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("signal_tracker:_alert_milestone:463", _ex)
         pass
     mult = int(price / base)          # 2 = x2 (doble), 3 = x3, …
     if mult < MIN_MULTIPLE:
@@ -503,7 +507,8 @@ def _alert_milestone(conn, s, pct: float, price: float,
             set_setting(conn, key_base, _json.dumps(
                 {"price": base, "wallet": w_base, "ts": ts_base,
                  "mc": mc_base}))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("signal_tracker:_alert_milestone:506", _ex)
             pass
 
     # Solo el top del ranking manda tarjeta. Si la señal la dio una ⭐
@@ -525,14 +530,16 @@ def _alert_milestone(conn, s, pct: float, price: float,
 
     try:
         from realtime import tg_send
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("signal_tracker:_alert_milestone:528", _ex)
         return
 
     # Nombre SIEMPRE legible (los alias son deterministas) + posición en /top
     try:
         from wallet_ident import identidad
         _ident = identidad(conn, w_base)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("signal_tracker:_alert_milestone:535", _ex)
         _ident = {"nombre": f"{w_base[:8]}…", "pos": None}
     alias = _ident["nombre"]
     _pos = _ident.get("pos")
@@ -747,7 +754,8 @@ def _auto_threshold(conn):
             tg_send(f"🎚️ Umbral de alerta auto-ajustado a *{mejor}* "
                     f"(win rate histórico {mejor_wr*100:.0f}% con ese corte). "
                     "Las señales por debajo se miden pero no alertan.")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("signal_tracker:_auto_threshold:750", _ex)
             pass
 
 
@@ -823,7 +831,8 @@ def _track_outcomes(conn) -> int:
             _rec("medicion.fuera_de_ventana",
                  RuntimeError(f"{_perdidas} señales sin chg_1h, "
                               f"ventana cerrada"))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("signal_tracker:_track_outcomes:826", _ex)
             pass
     if len(pend) >= 100:
         # Tope alcanzado: el excedente envejece y puede caer fuera de la

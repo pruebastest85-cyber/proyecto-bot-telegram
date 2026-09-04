@@ -19,6 +19,7 @@ cambian de URL al reiniciar.
 
 import json
 import os
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # Tiempos (v2, auditoria 19/8). La salida tenia TIMEOUT=8 y un POST crudo
 # que se saltaba el puente: contra el Qwen pensante CADA llamada volvia
@@ -41,7 +42,8 @@ def _url(conn) -> str | None:
         try:
             from db import get_setting
             u = (get_setting(conn, "local_ai_url", "") or "").strip()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("decision_ia:_url:44", _ex)
             u = ""
     return u.rstrip("/") or None
 
@@ -52,7 +54,8 @@ def _modelo(conn) -> str:
         try:
             from db import get_setting
             m = (get_setting(conn, "local_ai_model", "") or "").strip()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("decision_ia:_modelo:55", _ex)
             m = ""
     # El Qwen GRANDE, montado permanente para la semana de prueba del
     # experimento (si el A/B no muestra mejora, se retira). Identificador
@@ -97,7 +100,8 @@ def armar_contexto(conn, row, price: float, perfil,
         if mc_senal and mc_ahora and mc_senal > 0:
             ctx["momentum_mc_desde_senal_pct"] = round(
                 (mc_ahora / mc_senal - 1) * 100, 1)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:armar_contexto:100", _ex)
         pass
     # ── Billetera: track record amplio (aciertos medidos) ──
     try:
@@ -105,7 +109,8 @@ def armar_contexto(conn, row, price: float, perfil,
         tr = wallet_track_record(conn, wallet)
         if tr:
             ctx["track_record_billetera"] = tr
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:armar_contexto:108", _ex)
         pass
     # ── Consenso: ¿cuantas ⭐ siguen DENTRO del token? ──
     try:
@@ -123,7 +128,8 @@ def armar_contexto(conn, row, price: float, perfil,
             (mint, int(_t.time()) - 3600, wallet)).fetchone()["c"]
         ctx["otras_estrellas_aun_dentro"] = dentro
         ctx["estrellas_que_vendieron_ultima_hora"] = vendieron
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:armar_contexto:126", _ex)
         pass
     return ctx
 
@@ -151,14 +157,16 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
         tr = wallet_track_record(conn, trade["wallet"])
         if tr:
             ctx["track_record_billetera"] = tr
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:decidir_entrada:154", _ex)
         pass
     try:
         from salidas import perfil_salida
         pf = perfil_salida(conn, trade["wallet"])
         if pf:
             ctx["perfil_salida_billetera"] = pf
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:decidir_entrada:161", _ex)
         pass
     # (Ola 10, 21/8) Rol en el cluster, solo del cache del grafo: una
     # seguidora cronica copia tarde — la IA de entrada debe saberlo.
@@ -177,7 +185,8 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
                          "lider: suele comprar antes que su cluster"
                          if (rol.get("leader_score") or 0) >= 70 else
                          "sin sesgo claro")}
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:decidir_entrada:180", _ex)
         pass
     try:
         if token and token.get("mc"):
@@ -195,7 +204,8 @@ def decidir_entrada(conn, trade: dict, token: dict | None) -> dict | None:
                WHERE p.mint=? AND COALESCE(p.tokens,0) > 0""",
             (trade["mint"],)).fetchone()["c"]
         ctx["estrellas_dentro_del_token"] = dentro
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("decision_ia:decidir_entrada:198", _ex)
         pass
 
     prompt = (

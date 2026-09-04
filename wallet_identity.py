@@ -24,6 +24,7 @@ import time
 import requests
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 API = "https://api.helius.xyz/v1/wallet/batch-identity"
 
@@ -65,7 +66,8 @@ def _cacheadas(conn, direcciones):
                 out[a] = {"tipo": r["tipo"], "nombre": r["nombre"],
                           "categoria": r["categoria"],
                           "etiquetas": json.loads(r["etiquetas"] or "[]")}
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_identity:_cacheadas:68", _ex)
         pass
     return out
 
@@ -169,6 +171,7 @@ def etiqueta(address: str) -> str | None:
                 return f"{r['nombre']} ({r['categoria']})"
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_identity:etiqueta:172", _ex)
         pass
     return None

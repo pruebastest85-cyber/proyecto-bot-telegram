@@ -12073,6 +12073,87 @@ def prueba_19ad():
     conn.close()
 
 
+def prueba_19ae():
+    bloque("19-AE - ningun except amplio se traga el error en silencio")
+    import ast as _a
+    import contextlib
+    import io
+    import os as _os
+    import telegram_bot as tb
+
+    # ── 1) avisos.aviso: imprime, frena por etiqueta y cuenta lo callado ─
+    import avisos
+    avisos._reiniciar()
+    _t_prev = avisos.time.time
+    reloj = [1000.0]
+    avisos.time.time = lambda: reloj[0]
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            avisos.aviso("prueba:x", ValueError("uno"))
+            avisos.aviso("prueba:x", ValueError("dos"))
+            avisos.aviso("prueba:x", ValueError("tres"))
+            avisos.aviso("prueba:y", KeyError("otra"))
+        out = buf.getvalue()
+        comprobar("la primera vez se imprime con etiqueta, tipo y mensaje",
+                  "· prueba:x: ValueError: uno" in out, out)
+        comprobar("las repeticiones de la misma etiqueta se callan (una "
+                  "cada 10 min)", out.count("prueba:x") == 1, out)
+        comprobar("otra etiqueta sí sale", "prueba:y: KeyError" in out, out)
+        reloj[0] += avisos.ESPACIADO_S + 1
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            avisos.aviso("prueba:x", ValueError("cuatro"))
+        comprobar("pasado el espaciado vuelve a salir y dice cuántas calló",
+                  "cuatro" in buf2.getvalue()
+                  and "+2 repetidos callados" in buf2.getvalue(),
+                  buf2.getvalue())
+        comprobar("un objeto que no es excepción no rompe",
+                  avisos.aviso("prueba:z", "texto") is None)
+    finally:
+        avisos.time.time = _t_prev
+        avisos._reiniciar()
+
+    # ── 2) Guarda permanente: cero excepts amplios mudos en el repo ────
+    raiz = _os.path.dirname(_os.path.abspath(tb.__file__))
+    CON_SALIDA = ("record", "warning", "error", "exception", "info", "_rec",
+                  "_tg", "tg_send", "aviso", "_avisar_ex", "_avisar_px",
+                  "print")
+
+    def _tiene_salida(n):
+        for x in _a.walk(n):
+            if isinstance(x, _a.Raise):
+                return True
+            if isinstance(x, _a.Call):
+                f = x.func
+                if (getattr(f, "id", "") in CON_SALIDA
+                        or getattr(f, "attr", "") in CON_SALIDA):
+                    return True
+        return False
+    mudos = []
+    for fn in sorted(_os.listdir(raiz)):
+        if (not fn.endswith(".py") or fn.startswith("pruebas")
+                or fn.startswith("test_") or fn == "avisos.py"):
+            continue
+        with open(_os.path.join(raiz, fn), encoding="utf-8") as f:
+            src = f.read()
+        for n in _a.walk(_a.parse(src)):
+            if not isinstance(n, _a.ExceptHandler):
+                continue
+            amplio = n.type is None or (isinstance(n.type, _a.Name)
+                                        and n.type.id in ("Exception",
+                                                          "BaseException"))
+            if amplio and not _tiene_salida(n):
+                mudos.append(f"{fn}:{n.lineno}")
+    comprobar("NINGÚN `except Exception:` del repo se traga el error sin "
+              "decirlo (regla del dueño; eran 279)", not mudos,
+              f"{len(mudos)} mudos: {mudos[:8]}")
+    comprobar("los avisos llevan etiqueta archivo:funcion:linea",
+              '_avisar_ex("paper_trading:' in open(
+                  _os.path.join(raiz, "paper_trading.py"),
+                  encoding="utf-8").read())
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12129,6 +12210,7 @@ def main():
     prueba_19ab()
     prueba_19ac()
     prueba_19ad()
+    prueba_19ae()
 
     print("\n" + "─" * 60)
     if _FALLOS:

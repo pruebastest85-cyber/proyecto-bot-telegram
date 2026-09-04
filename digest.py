@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from db import get_conn, get_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 # ── (Ola 18-E) Texto ajeno dentro de un mensaje en Markdown ──────────
@@ -65,7 +66,8 @@ def resumen_text() -> str:
                 nom = _txt(r["alias"] or r["address"][:8])
                 pnl = f" · {r['pnl_total']:+.0f} SOL" if r["pnl_total"] is not None else ""
                 out.append(f"  • {nom}{pnl}")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:68", _ex)
         pass
 
     # 🚀 Señales de alta confianza (24h, alertadas, score alto)
@@ -82,7 +84,8 @@ def resumen_text() -> str:
                 out.append(f"  • {_txt(s['symbol'])} "
                            f"({_txt(s['side'], '?')}, "
                            f"score {round(s['signal_score'])})")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:85", _ex)
         pass
 
     conn.close()
@@ -98,7 +101,8 @@ def resumen_text() -> str:
                 out.append(f"  • {_txt(w['alias'])} · "
                            f"Alpha {w['alpha_score']} · "
                            f"~{w['avg_lead_min']:.0f} min antes")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:101", _ex)
         pass
 
     # ⚠️ Líderes en declive (predicciones recientes fallando)
@@ -131,7 +135,8 @@ def resumen_text() -> str:
                 nom = _txt(gmap.get(d["leader"]) or d["leader"][:8])
                 out.append(f"  • {nom} · {round(d['a'])}% acierto "
                            f"({d['n']} pred.)")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:134", _ex)
         pass
 
     # 🔥 Clusters activos
@@ -145,7 +150,8 @@ def resumen_text() -> str:
                 lid = _txt(c.get("leader"))
                 out.append(f"  • {c['size']} billeteras · líder {lid} · "
                            f"{c['shared_tokens']} tokens en común")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:148", _ex)
         pass
 
     # 🧠 Hipótesis nuevas
@@ -161,7 +167,8 @@ def resumen_text() -> str:
             # La hipotesis la escribe la IA: mismo saneado.
             primera = _txt(hyp.split("\n")[0][:200], "")
             out.append(f"\n🧠 *Hipótesis ({hts}):*\n  {primera}\n  _(completo: /hipotesis)_")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:164", _ex)
         pass
 
     # 📡 Radar (Ola 18-P). Va aquí porque el radar trabaja EN SILENCIO:
@@ -183,7 +190,8 @@ def resumen_text() -> str:
             # al dueño mientras el radar le escribe.
             out.append("  _(trabaja en silencio · detalle: /radar)_"
                        if _rad_mudo else "  _(detalle: /radar)_")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("digest:resumen_text:186", _ex)
         pass
 
     if not algo:

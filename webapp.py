@@ -19,6 +19,7 @@ from urllib.parse import parse_qsl
 from flask import request, jsonify, Response
 
 from db import get_conn, get_setting, top_wallets
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
@@ -61,7 +62,8 @@ def _valid_init_data(init_data: str) -> bool:
             return False
         user = json.loads(data.get("user", "{}"))
         return bool(ADMIN_ID) and str(user.get("id")) == str(ADMIN_ID)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("webapp:_valid_init_data:64", _ex)
         return False
 
 

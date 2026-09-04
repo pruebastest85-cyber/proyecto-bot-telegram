@@ -20,6 +20,7 @@ import config
 from wallet_profiler import JITO_TIP_ACCOUNTS, _api_rec
 from db import (get_conn, pending_tokens, mark_analyzed,
                 upsert_wallet_appearance, recompute_scores, top_wallets)
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 LAMPORTS = 1_000_000_000  # 1 SOL
 
@@ -72,7 +73,8 @@ def fetch_parsed_txs(address: str, before: str | None = None,
                       "las descargas de historial hasta el próximo ciclo")
             _set_fallo("presupuesto de Helius agotado")
             return []
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_analyzer:fetch_parsed_txs:75", _ex)
         pass
     url = config.HELIUS_PARSED_TX.format(address=address)
     params = {"api-key": config.HELIUS_API_KEY, "limit": limit}
@@ -304,7 +306,8 @@ def analyze_token(conn, token) -> int:
             from errores import record as _rec
             _rec("wallet_analyzer.descarga",
                  RuntimeError(f"{mint[:12]}…: {_motivo}"))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("wallet_analyzer:analyze_token:307", _ex)
             pass
         return 0
     if not historial_completo:

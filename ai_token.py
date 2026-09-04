@@ -16,6 +16,7 @@ import os
 import time
 
 from token_check import ai_payload
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -87,7 +88,8 @@ def _cache_get(mint: str):
         if time.time() - d.get("ts", 0) > _cache_horas() * 3600:
             return None
         return d.get("v")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_token:_cache_get:90", _ex)
         return None
 
 
@@ -100,7 +102,8 @@ def _cache_put(mint: str, v: dict):
                                                         "v": v}))
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_token:_cache_put:103", _ex)
         pass
 
 
@@ -126,13 +129,15 @@ def token_verdict(t: dict, smart_ctx: dict, mint: str) -> dict | None:
                 return None
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_token:token_verdict:129", _ex)
         pass  # si el módulo de presupuesto falla, no bloquea el veredicto
 
     try:
         from token_learning import learnings_text
         aprendizajes = learnings_text() or "(aún sin aprendizajes acumulados)"
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_token:token_verdict:135", _ex)
         aprendizajes = "(aún sin aprendizajes acumulados)"
     prompt = PROMPT.format(
         ficha=json.dumps(ai_payload(t), ensure_ascii=False),

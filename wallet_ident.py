@@ -9,6 +9,7 @@ generar un nombre estable aunque la base aún no lo tenga.
 La posición usa EXACTAMENTE el mismo orden que /top (db.top_wallets), para
 que el número que ves en la tarjeta coincida con el del ranking.
 """
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def nombre(conn, address: str) -> str:
@@ -20,12 +21,14 @@ def nombre(conn, address: str) -> str:
                          (address,)).fetchone()
         if w and w["alias"]:
             return w["alias"]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_ident:nombre:23", _ex)
         pass
     try:
         from aliases import make_alias
         return make_alias(address)          # determinista y estable
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_ident:nombre:28", _ex)
         return f"{address[:8]}…"
 
 
@@ -69,7 +72,8 @@ def posicion(conn, address: str, tope: int = 200):
         for i, r in enumerate(rows, 1):
             if r["address"] == address:
                 return i
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_ident:posicion:72", _ex)
         pass
     return None
 

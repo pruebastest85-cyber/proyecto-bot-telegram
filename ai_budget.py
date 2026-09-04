@@ -20,6 +20,7 @@ import threading
 import time
 
 from db import get_setting, set_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 _LOCK = threading.Lock()
 
@@ -32,7 +33,8 @@ def _cap() -> int:
     try:
         import config
         return int(getattr(config, "AI_DAILY_BUDGET", 300))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_budget:_cap:35", _ex)
         return 300
 
 
@@ -77,7 +79,8 @@ def can_call(conn) -> bool:
         if str(get_setting(conn, "ia_proveedor", "local_primero")
                or "local_primero") != "nube":
             return True
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ai_budget:can_call:80", _ex)
         pass
     return budget_left(conn) > 0
 

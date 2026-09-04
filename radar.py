@@ -43,6 +43,7 @@ import time
 from datetime import datetime, timezone
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _int_env(n, d):
@@ -95,7 +96,8 @@ def silencioso(conn) -> bool:
     try:
         from db import get_setting
         v = get_setting(conn, "radar_silencioso", None)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("radar:silencioso:98", _ex)
         return bool(SILENCIOSO_DEF)
     if v is None or str(v).strip() == "":
         return bool(SILENCIOSO_DEF)
@@ -139,7 +141,8 @@ def resumen_linea(conn) -> str | None:
             "SELECT COUNT(*) AS c FROM radar_tokens WHERE ts >= ? "
             "AND resultado = 'ganador_promovido'",
             (ahora - 7 * 86400,)).fetchone()["c"]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("radar:resumen_linea:142", _ex)
         return None
     if not tot:
         # NO se calla. Con el radar encendido, 24 h sin examinar ni un
@@ -267,7 +270,8 @@ def escanear() -> int:
             print("· Radar: freno de presupuesto Helius activo; pasada "
                   "omitida")
             return 0
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("radar:escanear:270", _ex)
         pass
     try:
         candidatos = _frescos()
@@ -461,7 +465,8 @@ def escanear() -> int:
                 set_setting(_c2, "radar_sin_chequear_ts", int(time.time()))
             finally:
                 _c2.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("radar:escanear:464", _ex)
             pass
     return hallazgos
 
@@ -490,7 +495,8 @@ def _seguimiento(conn) -> int:
         try:
             from signal_tracker import _price_mc_ex
             px, mc, muerto, liq = _price_mc_ex(r["mint"])
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("radar:_seguimiento:493", _ex)
             continue
         if muerto:
             conn.execute("UPDATE radar_tokens SET resultado=? "
@@ -511,7 +517,8 @@ def _seguimiento(conn) -> int:
             try:
                 from token_check import analyze_token
                 t = analyze_token(r["mint"])
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("radar:_seguimiento:514", _ex)
                 t = {}
             vol = t.get("vol24") or 0
             liq_full = t.get("liq") or liq or 0
@@ -548,7 +555,8 @@ def _seguimiento(conn) -> int:
                             f"${liq_full:,.0f} · MC ${mc_full:,.0f}). "
                             f"El próximo ciclo analizará a sus compradores "
                             f"tempranos.\n`{r['mint']}`")
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("radar:_seguimiento:551", _ex)
                     pass
         elif ahora - r["ts"] > SEG_MAX_H * 3600 - 3600:
             conn.execute("UPDATE radar_tokens SET resultado=? "
@@ -655,7 +663,8 @@ def radar_text() -> str:
         if _sc and time.time() - _sc_ts < 3600:
             out.append(f"  ⚪ sin poder comprobar (fuente caída) en la última "
                        f"pasada: {_sc} (vuelven a la cola, no se pierden)")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("radar:radar_text:658", _ex)
         pass
     if alertados:
         out.append("\n🎯 Con smart money de tu base:")

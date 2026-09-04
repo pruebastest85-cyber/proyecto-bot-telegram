@@ -15,6 +15,7 @@ import requests
 
 from config import DB_PATH
 from db import get_conn, get_setting, set_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID", "")
@@ -165,7 +166,8 @@ def send_db_backup():
         try:
             from errores import record
             record("backup", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("maintenance:send_db_backup:168", _ex)
             pass
         # (Ola 17-E) Se PROPAGA. Antes se tragaba aqui, asi que el `raise`
         # que la Ola 17-B puso en `backup_job` era letra muerta y
@@ -298,7 +300,8 @@ def weekly_learning():
         try:
             from errores import record
             record("weekly_learning", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("maintenance:weekly_learning:301", _ex)
             pass
         return
     if not hallazgos:
@@ -313,6 +316,7 @@ def weekly_learning():
                     f"({len(rows)} señales analizadas):\n\n{hallazgos[:3000]}"
                     "\n\n_Estos hallazgos ya se inyectan a los veredictos "
                     "de las próximas señales._")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("maintenance:weekly_learning:316", _ex)
             pass
         print("🧠 Aprendizaje semanal guardado")

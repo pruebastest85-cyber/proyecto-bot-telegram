@@ -22,10 +22,12 @@ from collections import defaultdict
 import requests
 
 import config
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 try:
     from api_usage import record as _api_rec
-except Exception:          # nunca romper el flujo por el contador
+except Exception as _ex:          # nunca romper el flujo por el contador
+    _avisar_ex("wallet_profiler:modulo:28", _ex)
     def _api_rec(*a, **k):
         pass
 
@@ -106,7 +108,8 @@ def _fetch_txs(address: str, pages: int | None = None) -> tuple[list, bool]:
                 print("  ⛔ Presupuesto de Helius casi agotado: no perfilo "
                       "por el método antiguo")
                 return ([], False)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("wallet_profiler:_fetch_txs:109", _ex)
             pass
         params = {"api-key": config.HELIUS_API_KEY, "limit": 100}
         if before:
@@ -568,7 +571,8 @@ def format_profile(p: dict) -> str:
         if ml:
             lines.append("")
             lines.extend(ml)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_profiler:format_profile:571", _ex)
         pass
     if p.get("hold_median_min") is not None:
         h = p["hold_median_min"]

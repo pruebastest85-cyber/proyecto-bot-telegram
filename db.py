@@ -27,6 +27,7 @@ import threading
 from datetime import datetime, timezone
 
 from config import DB_PATH
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_PG = bool(DATABASE_URL)
@@ -468,7 +469,8 @@ class _PgConn:
         # para que quien haga `hasattr(conn, "rollback")` no se confunda.
         try:
             self._conn.rollback()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("db:rollback:471", _ex)
             pass
 
     def executescript(self, script: str):
@@ -483,7 +485,8 @@ class _PgConn:
     def close(self):
         try:
             self._conn.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("db:close:486", _ex)
             pass
 
 
@@ -641,7 +644,8 @@ def _crear_indices_tardios(conn):
     if USE_PG:
         try:
             conn.execute("SET lock_timeout = '5s'")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("db:_crear_indices_tardios:644", _ex)
             pass
     for sql in _INDICES_TARDIOS:
         try:
@@ -651,11 +655,13 @@ def _crear_indices_tardios(conn):
     if USE_PG:
         try:
             conn.execute("SET lock_timeout = DEFAULT")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("db:_crear_indices_tardios:654", _ex)
             pass
     try:
         conn.commit()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("db:_crear_indices_tardios:658", _ex)
         pass
 
 
@@ -783,7 +789,8 @@ def _preparar_pg(pg):
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("db:_preparar_pg:786", _ex)
             pass
     _crear_indices_tardios(pg)
     _dedupe_aliases(pg)

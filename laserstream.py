@@ -26,6 +26,7 @@ import threading
 import time
 
 import config
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 WS_URL = "wss://mainnet.helius-rpc.com/?api-key={key}"
 _HILO = None
@@ -190,7 +191,8 @@ def _guardar_slot(slot: int) -> None:
             set_setting(conn, "laserstream_slot", slot)
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("laserstream:_guardar_slot:193", _ex)
         pass
 
 
@@ -207,7 +209,8 @@ def _cargar_slot() -> int:
             return int(float(get_setting(conn, "laserstream_slot", 0) or 0))
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("laserstream:_cargar_slot:210", _ex)
         return 0
 
 
@@ -236,7 +239,8 @@ def _procesar(mensaje: str) -> None:
     """Traduce la notificación y la manda al MISMO camino que el webhook."""
     try:
         d = json.loads(mensaje)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("laserstream:_procesar:239", _ex)
         return
     params = d.get("params") or {}
     resultado = params.get("result") or {}
@@ -258,7 +262,8 @@ def _procesar(mensaje: str) -> None:
             try:
                 from errores import record
                 record("laserstream", RuntimeError(err))
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("laserstream:_procesar:261", _ex)
                 pass
         elif "result" in d:
             print(f"· LaserStream: suscripción confirmada "
@@ -274,7 +279,8 @@ def _procesar(mensaje: str) -> None:
     try:
         from helius_rpc import traducir
         t = traducir(entrada)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("laserstream:_procesar:277", _ex)
         t = None
     if not t or not t.get("signature"):
         return
@@ -344,7 +350,8 @@ def _bucle() -> None:
         try:
             from realtime import watch_addresses
             direcciones = watch_addresses() or []
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("laserstream:_bucle:347", _ex)
             direcciones = []
         if not direcciones:
             time.sleep(120)        # aún no hay ⭐ que vigilar
@@ -366,7 +373,8 @@ def _bucle() -> None:
                 try:
                     ws.settimeout(60)
                     mensaje = ws.recv()
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("laserstream:_bucle:369", _ex)
                     mensaje = None
                 if mensaje:
                     ultimo_mensaje = time.time()
@@ -404,7 +412,8 @@ def _bucle() -> None:
                     ultimo_chequeo_lista = ahora
                     try:
                         nuevas = watch_addresses() or []
-                    except Exception:
+                    except Exception as _ex:
+                        _avisar_ex("laserstream:_bucle:407", _ex)
                         nuevas = []
                     if nuevas and _huella(nuevas) != huella:
                         print("· LaserStream: la lista vigilada cambió "
@@ -418,13 +427,15 @@ def _bucle() -> None:
             try:
                 from errores import record
                 record("laserstream", e)
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("laserstream:_bucle:421", _ex)
                 pass
         finally:
             _ESTADO["conectado"] = False
             try:
                 ws.close()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("laserstream:_bucle:427", _ex)
                 pass
         time.sleep(espera)
         espera = min(espera * 2, 300)      # hasta 5 min entre reintentos

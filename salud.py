@@ -21,6 +21,7 @@ import os
 import time
 
 from db import get_conn, get_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 OK, WARN, CRIT = "ok", "warn", "crit"
 _ICONO = {OK: "🟢", WARN: "🟡", CRIT: "🔴"}
@@ -104,7 +105,8 @@ def _c_webhook():
                 # si nunca llego ninguno, se cuenta desde el arranque.
                 ls_h = _horas(e.get("ultimo") or e.get("arranque")
                               or e.get("desde"))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_webhook:107", _ex)
             ls_activo = False        # modulo ausente: no es via disponible
         # ── Via 2: webhook HTTP de Helius ──
         hook_conf = bool(PUBLIC_URL)
@@ -255,6 +257,7 @@ def _c_webhook():
         return _chk("Ingesta", WARN, f"{hook_h:.0f} h sin transacciones",
                     "puede ser normal si las ⭐ están inactivas")
     except Exception as e:
+        _avisar_ex("salud:_c_webhook:257", e)
         return _chk("Ingesta", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -277,6 +280,7 @@ def _c_senales(conn):
                         "puede ser mercado tranquilo")
         return _chk("Señales", OK, f"{n24} en 24 h · {n7} en 7 días")
     except Exception as e:
+        _avisar_ex("salud:_c_senales:279", e)
         return _chk("Señales", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -477,6 +481,7 @@ def _c_medicion(conn):
                     + (f", {al_sin} sin precio de entrada" if al_sin else "")
                     + f" · 7 días){_ctx}")
     except Exception as e:
+        _avisar_ex("salud:_c_medicion:479", e)
         return _chk("Medición", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -530,7 +535,8 @@ def _c_embudo(conn):
                 _min_gan = int(getattr(_cfg_e, "MIN_WINNING_TOKENS", 1))
                 _min_sol = float(getattr(_cfg_e, "MIN_BUY_SOL", 1.0))
                 _min_mul = float(getattr(_cfg_e, "MIN_ENTRY_MULTIPLE", 3.0))
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("salud:_c_embudo:533", _ex)
                 _min_gan, _min_sol, _min_mul = 1, 1.0, 3.0
             try:
                 from ai_analyst import REEVAL_DAYS as _rd, RECHAZO_DIAS as _rech
@@ -562,11 +568,13 @@ def _c_embudo(conn):
                         f"{wallets} conocidas · {en_cola} en cola de "
                         f"examen · {enfriando} en enfriamiento · "
                         f"{estrellas} ⭐")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_embudo:565", _ex)
             return _chk("Embudo", OK,
                         f"{wallets} candidatas · {evaluadas} evaluadas · "
                         f"{estrellas} ⭐")
     except Exception as e:
+        _avisar_ex("salud:_c_embudo:569", e)
         return _chk("Embudo", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -600,6 +608,7 @@ def _c_presupuesto(conn):
                         f"quedan {quedan} de {cap} (respaldo)")
         return _chk("Presupuesto IA nube", OK, f"{usadas}/{cap} usadas hoy")
     except Exception as e:
+        _avisar_ex("salud:_c_presupuesto:602", e)
         return _chk("Presupuesto IA nube", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -634,6 +643,7 @@ def _c_ia_local(conn):
         return _chk("IA local", OK,
                     f"responde · modelo {_md_plano(modelo)}")
     except Exception as e:
+        _avisar_ex("salud:_c_ia_local:636", e)
         grave = CRIT if not os.getenv("ANTHROPIC_API_KEY") else WARN
         return _chk("IA local", grave, f"no responde ({_md_plano(e)})",
                     "¿PC apagada o túnel caído? repite /ialocal <url>")
@@ -655,7 +665,8 @@ def _c_apis():
     try:
         from ia_puente import hay_ia
         ia_ok = hay_ia()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("salud:_c_apis:658", _ex)
         ia_ok = not sin_nube
     if not ia_ok:
         return _chk("Claves API", WARN, "sin IA disponible (ni local ni nube)",
@@ -692,6 +703,7 @@ def _c_helius(conn):
                         det + " — sobra cuota, se puede analizar más")
         return _chk("Créditos Helius", OK, det)
     except Exception as e:
+        _avisar_ex("salud:_c_helius:694", e)
         return _chk("Créditos Helius", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -723,7 +735,8 @@ def _c_base_datos(conn):
         import config as _cfg
         try:
             from db import USE_PG as _pg
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_base_datos:726", _ex)
             _pg = False
         ruta = getattr(_cfg, "DB_PATH", None)
         if _pg or not ruta or not os.path.exists(ruta):
@@ -745,7 +758,8 @@ def _c_base_datos(conn):
         try:
             from trades_store import estadisticas
             ops = estadisticas().get("operaciones", 0)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_base_datos:748", _ex)
             ops = 0
         # Se DICE que el WAL va dentro: si no, el dueño ve aquí 480 MB y
         # en el explorador de archivos 330, y no hay nada que se lo
@@ -763,7 +777,8 @@ def _c_base_datos(conn):
             _fl = conn.execute("PRAGMA freelist_count").fetchone()[0]
             _ps = conn.execute("PRAGMA page_size").fetchone()[0]
             hueco_mb = (_fl or 0) * (_ps or 0) / 1e6
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_base_datos:766", _ex)
             hueco_mb = 0.0
         if hueco_mb >= 20 and mb and hueco_mb / mb >= 0.15:
             # No es un aviso: esas páginas SQLite las reutiliza para los
@@ -817,7 +832,8 @@ def _c_base_datos(conn):
                     _b = float(get_setting(
                         conn, "last_backup_manual_ts", 0) or 0)
                     _reg = max(_a, _b)
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("salud:_c_base_datos:820", _ex)
                     _reg = None          # sin relojes: no se juzga
                 _registrada = (_reg is None
                                or (_reg > 0
@@ -861,7 +877,8 @@ def _c_base_datos(conn):
                             f"{_uh:.0f} h en `backups/`"
                             + (" (no cabe en Telegram, tope 50 MB)"
                                if _umb > 49 else " (cabe en Telegram)"))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_base_datos:864", _ex)
             pass
 
         # LO ÚNICO QUE DE VERDAD IMPORTA: que quede sitio en el disco.
@@ -900,7 +917,8 @@ def _c_base_datos(conn):
             try:
                 _mismo = (os.stat(_base_dir).st_dev
                           == os.stat(_tmp_dir).st_dev)
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("salud:_c_base_datos:903", _ex)
                 _mismo = (os.path.normcase(os.path.abspath(_tmp_dir))
                           == os.path.normcase(os.path.abspath(_base_dir)))
             _libre_tmp = (_libre_base if _mismo
@@ -908,6 +926,7 @@ def _c_base_datos(conn):
         except Exception as _e:
             # Ciego, no sano: antes esto devolvía VERDE y la línea del
             # disco desaparecía sin una palabra.
+            _avisar_ex("salud:_c_base_datos:908", _e)
             return _chk("Base de datos", WARN,
                         det + " · no se pudo medir el disco",
                         "comprueba los permisos de la carpeta "
@@ -988,6 +1007,7 @@ def _c_base_datos(conn):
             return _chk("Base de datos", WARN, det, _aviso)
         return _chk("Base de datos", OK, det)
     except Exception as e:
+        _avisar_ex("salud:_c_base_datos:990", e)
         return _chk("Base de datos", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -1007,7 +1027,8 @@ def _c_laserstream():
         # PUBLIC_URL; en local no la hay y LaserStream caido = sin datos.
         try:
             from realtime import PUBLIC_URL as _pu
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:_c_laserstream:1010", _ex)
             _pu = ""
         return _chk("LaserStream", WARN,
                     "desconectado"
@@ -1017,6 +1038,7 @@ def _c_laserstream():
                     else "SIN respaldo (no hay webhook en local): no "
                          "llegan transacciones hasta que reconecte")
     except Exception as e:
+        _avisar_ex("salud:_c_laserstream:1019", e)
         return _chk("LaserStream", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -1040,6 +1062,7 @@ def _c_errores():
                     f"({_md_plano(peor.get('tipo'))})",
                     "mira /errores para el detalle")
     except Exception as e:
+        _avisar_ex("salud:_c_errores:1042", e)
         return _chk("Errores", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -1075,6 +1098,7 @@ def _c_backup(conn):
                         "revisa la carpeta backups/ junto a la base")
         return _chk("Backup", OK, f"hace {h:.0f} h" + extra)
     except Exception as e:
+        _avisar_ex("salud:_c_backup:1077", e)
         return _chk("Backup", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")
 
@@ -1091,6 +1115,7 @@ def diagnostico() -> list[dict]:
                    _c_presupuesto(conn), _c_ia_local(conn), _c_helius(conn),
                    _c_base_datos(conn), _c_backup(conn)]
     except Exception as e:
+        _avisar_ex("salud:diagnostico:1093", e)
         checks.append(_chk(
             "Base de datos", CRIT, f"no accesible: {_md_plano(e)}",
             "si es el archivo local, mira el disco y los permisos de su "
@@ -1099,7 +1124,8 @@ def diagnostico() -> list[dict]:
         if conn:
             try:
                 conn.close()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("salud:diagnostico:1102", _ex)
                 pass
     checks.append(_c_laserstream())
     checks.append(_c_errores())
@@ -1154,7 +1180,8 @@ def interpretar(checks) -> str | None:
                 return None
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("salud:interpretar:1157", _ex)
         return None
 
     import json
@@ -1179,7 +1206,8 @@ def interpretar(checks) -> str | None:
         try:
             from errores import record
             record("salud", e, "interpretar")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("salud:interpretar:1182", _ex)
             pass
         return None
     if not txt:
@@ -1214,7 +1242,8 @@ def revisar_y_avisar() -> str | None:
             set_setting(conn, "salud_ultimo_aviso_ts", time.time())
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("salud:revisar_y_avisar:1217", _ex)
         pass
     texto = salud_text(checks, con_ia=True)
     # (Ola 18-Q) Telegram corta en 4096 y `tg_send` NO recorta: pasado
@@ -1248,6 +1277,7 @@ def revisar_y_avisar() -> str | None:
                 _ss(_c2, "salud_ultimo_aviso", "")
             finally:
                 _c2.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("salud:revisar_y_avisar:1251", _ex)
         pass
     return texto

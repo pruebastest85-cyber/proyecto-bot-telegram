@@ -30,6 +30,7 @@ import os
 import time
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _int_env(n, d):
@@ -94,7 +95,8 @@ def guardar(wallet: str, operaciones: list[dict]) -> int:
                     (wallet,)).fetchone()
                 if r and r["b"]:
                     return 0
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("trades_store:guardar:97", _ex)
                 pass          # si la consulta falla, se guarda igual
             for o in operaciones:
                 sig = o.get("signature")
@@ -131,7 +133,8 @@ def _podar(conn, wallet: str) -> None:
                  ORDER BY ts ASC LIMIT ?)""",
             (wallet, wallet, n - MAX_TRADES_POR_WALLET))
         conn.commit()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("trades_store:_podar:134", _ex)
         pass
 
 
@@ -169,7 +172,8 @@ def _podar_global(conn) -> int:
             conn.commit()
         return total - conn.execute(
             "SELECT COUNT(*) c FROM trades").fetchone()["c"]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("trades_store:_podar_global:172", _ex)
         return 0
 
 
@@ -185,7 +189,8 @@ def ultimo_ts(wallet: str) -> int:
             return int(r["m"] or 0)
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("trades_store:ultimo_ts:188", _ex)
         return 0
 
 
@@ -202,7 +207,8 @@ def cargar(wallet: str, limite: int = 5000) -> list[dict]:
             return [dict(f) for f in filas]
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("trades_store:cargar:205", _ex)
         return []
 
 
@@ -261,7 +267,8 @@ def estadisticas() -> dict:
                     "tokens": r["m"] or 0, "desde": r["desde"]}
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("trades_store:estadisticas:264", _ex)
         return {"operaciones": 0, "billeteras": 0, "tokens": 0, "desde": None}
 
 

@@ -40,6 +40,7 @@ decisión con el historial ya guardado es gratis y la hace `/promover`.
 
 import threading
 import time
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 TROZO = 25          # billeteras por pasada; el candado se suelta al acabar
 ESPERA_CANDADO = 45  # s de espera si el ciclo automático tiene el candado
@@ -93,7 +94,8 @@ def en_cola(conn) -> int:
         _min = int(getattr(_c, "MIN_WINNING_TOKENS", 1))
         _s0 = float(getattr(_c, "MIN_BUY_SOL", 1.0))
         _m0 = float(getattr(_c, "MIN_ENTRY_MULTIPLE", 3.0))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("vaciar_cola:en_cola:96", _ex)
         _min, _s0, _m0 = 1, 1.0, 3.0
     try:
         from ai_analyst import REEVAL_DAYS as _rd, RECHAZO_DIAS as _rechazo

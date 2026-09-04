@@ -15,6 +15,7 @@ una garantía.
 
 from db import get_conn
 from token_check import analyze_token
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _score_liquidez(liq):
@@ -85,7 +86,8 @@ def token_dna_text(mint: str) -> str:
             w = gw.get(r["wallet"])
             if w and (w.get("leader_score") or 0) >= 60:
                 leaders.append(r["alias"] or r["wallet"][:6])
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("token_dna:token_dna_text:88", _ex)
         pass
 
     liq_s = _score_liquidez(t.get("liq"))

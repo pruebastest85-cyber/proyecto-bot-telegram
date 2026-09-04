@@ -23,6 +23,7 @@ import tempfile
 import time
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _filas(conn, sql, params=()):
@@ -152,7 +153,8 @@ def resumen() -> str:
             try:
                 return conn.execute(
                     f"SELECT COUNT(*) c FROM {tabla} {extra}").fetchone()["c"]
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("exportar:n:155", _ex)
                 return 0
         w = n("wallets", "WHERE COALESCE(is_bot,0)=0")
         t = n("trades")

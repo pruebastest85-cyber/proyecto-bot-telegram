@@ -24,6 +24,7 @@ import json
 import time
 
 from db import get_conn, get_setting, set_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _datos(conn) -> dict:
@@ -68,6 +69,7 @@ def _datos(conn) -> dict:
                      AND pnl_usd > 0 AND exit_ts >= ?
                    ORDER BY pnl_usd DESC LIMIT 5""", (hace7,)).fetchall()]
     except Exception as e:
+        _avisar_ex("post_mortem:_datos:70", e)
         d["filtro_entrada_error"] = str(e)
 
     # ── A/B de salidas: gestión 'ia' vs 'reglas' (acumulado: la muestra
@@ -85,6 +87,7 @@ def _datos(conn) -> dict:
              "pnl_usd": round(r["pnl"], 2) if r["pnl"] is not None else None,
              "con_dato": r["con_dato"]} for r in filas]
     except Exception as e:
+        _avisar_ex("post_mortem:_datos:87", e)
         d["ab_salidas_error"] = str(e)
 
     # ── Salidas decididas por la IA esta semana, por motivo ──
@@ -99,6 +102,7 @@ def _datos(conn) -> dict:
                      AND exit_ts >= ?
                    GROUP BY exit_reason""", (hace7,)).fetchall()]
     except Exception as e:
+        _avisar_ex("post_mortem:_datos:101", e)
         d["salidas_ia_error"] = str(e)
 
     # ── Rechazadas que siguieron acertando: billeteras evaluadas y NO
@@ -119,6 +123,7 @@ def _datos(conn) -> dict:
                    HAVING COUNT(*) >= 2
                    ORDER BY c DESC LIMIT 6""").fetchall()]
     except Exception as e:
+        _avisar_ex("post_mortem:_datos:121", e)
         d["rechazadas_error"] = str(e)
 
     # ── Señales de la semana: ¿el umbral silencia lo bueno? ──
@@ -136,6 +141,7 @@ def _datos(conn) -> dict:
             "chg24_medio_pct": round(r["media"], 1)
             if r["media"] is not None else None}
     except Exception as e:
+        _avisar_ex("post_mortem:_datos:138", e)
         d["silenciadas_error"] = str(e)
     return d
 

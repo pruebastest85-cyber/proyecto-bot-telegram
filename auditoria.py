@@ -53,6 +53,7 @@ def _base():
     c = dbmod.get_conn()
     c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, "
               "value TEXT)")
+    _omitidas = 0
     # Tablas que los módulos crean de forma PEREZOSA (no están en el
     # esquema central): se descubren leyendo el propio código, así el
     # auditor no hay que tocarlo cada vez que se añade una tabla nueva.
@@ -82,9 +83,16 @@ def _base():
                 continue
             try:
                 c.execute(txt[m.start():fin])
-            except Exception:
-                pass
+            except Exception as _ex:
+                # Fragmentos CREATE que no son ejecutables sueltos (ramas
+                # Postgres, trozos con f-strings): se cuentan y se dicen.
+                _omitidas += 1
+                if os.getenv("AUDITORIA_VERBOSE"):
+                    print(f"· esquema: fragmento omitido ({str(_ex)[:60]})")
     c.commit()
+    if _omitidas:
+        print(f"  esquema: {_omitidas} fragmentos CREATE no ejecutables "
+              f"(AUDITORIA_VERBOSE=1 para verlos)")
     raw = sqlite3.connect(os.environ["DB_PATH"])
     raw.row_factory = sqlite3.Row
     # Tablas TEMPORALES que el codigo crea en tiempo de ejecucion y que

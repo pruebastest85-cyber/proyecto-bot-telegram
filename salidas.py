@@ -17,6 +17,7 @@ decide las salidas.
 """
 
 from statistics import median
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # Minimo de ventas medidas para emitir un perfil. Por debajo, None:
 # con 1-2 datos la "estadistica" seria ruido disfrazado.
@@ -145,7 +146,8 @@ def hold_report(conn) -> str | None:
                  AND precio_venta_lider IS NOT NULL
                  AND precio_venta_lider > 0
                ORDER BY exit_ts DESC LIMIT 50""").fetchall()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("salidas:hold_report:148", _ex)
         return None
     if not rows:
         return None

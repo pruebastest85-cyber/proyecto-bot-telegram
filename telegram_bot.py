@@ -30,6 +30,7 @@ from wallet_analyzer import run_analysis
 from wallet_profiler import profile_wallet, format_profile
 from wallet_admin import (discard_wallet, restore_wallet, build_top_message)
 from realtime import start_webhook_server, sync_helius_webhook
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _ADMIN_ID_RAW = os.getenv("TELEGRAM_ADMIN_ID")
@@ -420,7 +421,8 @@ async def _send_md(chat, text, **kw):
                     f"{_largo_tg(text)} unidades (tope {TG_MAX_CHARS}); "
                     f"Markdown fallo con: "
                     f"{str(e)[:120]}")
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:_send_md:423", _ex)
                 pass
             return None
 
@@ -696,7 +698,8 @@ def _status_text() -> str:
             from api_usage import usage_line, flush as _api_flush
             _api_flush()
             apis = usage_line(conn)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:_status_text:699", _ex)
             apis = ""
     finally:
         conn.close()
@@ -828,7 +831,8 @@ def _ficha_text(address: str):
                         timeout=15)
         sol = resp.json()["result"]["value"] / 1e9
         ficha += f"\n💰 Saldo actual: *{sol:,.2f} SOL*"
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("telegram_bot:_ficha_text:831", _ex)
         pass
     return ficha
 
@@ -979,7 +983,8 @@ async def salud_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "salud_job", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:salud_job:982", _ex)
             pass
         raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
@@ -1043,7 +1048,8 @@ async def track_outcomes_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "track_outcomes", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:track_outcomes_job:1046", _ex)
             pass
 
 
@@ -1087,7 +1093,8 @@ async def predictions_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "predictions_job", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:predictions_job:1090", _ex)
             pass
 
 
@@ -1101,7 +1108,8 @@ async def hypotheses_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "hypotheses_job", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:hypotheses_job:1104", _ex)
             pass
         raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
@@ -1116,7 +1124,8 @@ async def paper_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "paper_job", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:paper_job:1119", _ex)
             pass
 
 
@@ -1178,7 +1187,8 @@ async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
                                        parse_mode="Markdown")
-        except Exception:               # (Ola 15 - M8) sin perder el informe
+        except Exception as _ex:               # (Ola 15 - M8) sin perder el informe
+            _avisar_ex("telegram_bot:post_mortem_job:1181", _ex)
             await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt)
     except Exception as e:
         print(f"· post-mortem semanal falló: {e}")
@@ -1195,7 +1205,8 @@ async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "radar", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:radar_job:1198", _ex)
             pass
 
 
@@ -1228,7 +1239,8 @@ async def sync_webhook_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from errores import record
             await asyncio.to_thread(record, "sync_webhook_job", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:sync_webhook_job:1231", _ex)
             pass
 
 
@@ -1253,7 +1265,8 @@ def solo_admin(func):
             try:
                 if update.message:
                     await update.message.reply_text("⛔ No autorizado.")
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:wrapper:1256", _ex)
                 pass
             return
         return await func(update, ctx)
@@ -1390,8 +1403,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await q.edit_message_text(txt, parse_mode="Markdown",
                                           reply_markup=kb_paper())
-            except Exception:
+            except Exception as _ex:
                 # Telegram rechaza editar si el texto no cambió
+                _avisar_ex("telegram_bot:on_callback:1393", _ex)
                 await q.message.chat.send_message(
                     txt, parse_mode="Markdown", reply_markup=kb_paper())
             return
@@ -1414,6 +1428,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 abiertas, cerradas = await asyncio.to_thread(reset)
             except Exception as e:
+                _avisar_ex("telegram_bot:on_callback:1416", e)
                 await q.edit_message_text(f"❌ No se pudo reiniciar: {e}")
                 return
             txt = await asyncio.to_thread(resumen_text)
@@ -1432,7 +1447,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from token_learning import set_feedback
             _guardado = await asyncio.to_thread(set_feedback, mint, good)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:on_callback:1435", _ex)
             _guardado = False
         # (Ola 17-E) Solo dar las gracias si de verdad se guardo. Antes
         # se contestaba "lo tendre en cuenta" aunque la ficha no
@@ -1475,7 +1491,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await q.edit_message_text(
                     "⌛ Propuesta caducada: hay una más reciente abajo.")
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:on_callback:1478", _ex)
                 pass
             return
         _pend = PENDING_ACTIONS.pop(q.from_user.id, None)
@@ -1499,7 +1516,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await q.edit_message_text(
                     "⌛ Propuesta expirada (el bot se reinició). "
                     "Vuelve a pedirla y la ejecuto.")
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:on_callback:1502", _ex)
                 pass
             return
         if data.startswith("agc:n") or not accion:
@@ -1507,7 +1525,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.answer("Cancelado")
             try:
                 await q.edit_message_text("❌ Acción cancelada.")
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:on_callback:1510", _ex)
                 pass
             # (21/8) El agente también debe recordar los rechazos.
             if accion:
@@ -1516,7 +1535,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await asyncio.to_thread(
                         _save_turn, "(cancelé la acción propuesta)",
                         f"(acción CANCELADA: {describe_action(accion)})")
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("telegram_bot:on_callback:1519", _ex)
                     pass
             return
         # (Ola 17-E) Marcar ANTES del `await`: entre el `pop` y esta
@@ -2735,7 +2755,8 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text(msg, parse_mode="Markdown",
                                             reply_markup=kb)
-        except Exception:      # (Ola 15 - M8) un "_" impar del modelo no
+        except Exception as _ex:      # (Ola 15 - M8) un "_" impar del modelo no
+            _avisar_ex("telegram_bot:on_chat:2738", _ex)
             await update.message.reply_text(msg, reply_markup=kb)
     else:
         # (19-Z) Recortada: con el modelo pensante sin tope la respuesta
@@ -2756,14 +2777,16 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from errores import record
         await asyncio.to_thread(record, "telegram", err, "handler")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("telegram_bot:on_error:2759", _ex)
         pass
     try:
         if isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text(
                 "⚠️ Algo falló al procesar eso. Ya quedó registrado; "
                 "míralo con /errores.")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("telegram_bot:on_error:2766", _ex)
         pass
 
 
@@ -2926,6 +2949,7 @@ async def cmd_exportar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     caption=cap)
             enviadas += 1
         except Exception as e:
+            _avisar_ex("telegram_bot:cmd_exportar:2928", e)
             await update.message.reply_text(
                 f"No se pudo enviar la parte {i}/{total}: {e}")
         finally:
@@ -3198,6 +3222,7 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         # (19-AC) Si la copia YA esta en disco, lo que fallo fue el envio:
         # decir "no pude generar" era falso y asustaba sin motivo.
+        _avisar_ex("telegram_bot:cmd_backup:3198", e)
         if destino:
             await update.message.reply_text(
                 f"La copia está guardada en el equipo ({destino}), pero "
@@ -3428,7 +3453,8 @@ def _saldo_uno_text(addr: str) -> str:
                         timeout=15)
         sol = resp.json()["result"]["value"] / 1e9
         return f"💰 Saldo de `{addr[:10]}…`: *{sol:,.2f} SOL*"
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("telegram_bot:_saldo_uno_text:3431", _ex)
         return "No pude consultar el saldo."
 
 
@@ -3468,7 +3494,8 @@ def _saldos_text():
                                       "params": [r["address"]]},
                                 timeout=15)
                 sol = resp.json()["result"]["value"] / 1e9
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:_saldos_text:3471", _ex)
                 sol = None
             nombre = _alias_md(r["alias"] or r["address"][:8])
             icono = "⭐" if r["is_tracked"] else "👁"
@@ -3523,7 +3550,8 @@ def _con_reloj(nombre: str, fn, intervalo: int | None = None):
                 _last = await asyncio.to_thread(_leer_reloj, nombre)
                 if _last and (_t.time() - _last) < intervalo:
                     return                     # aún no toca
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:_w:3526", _ex)
                 pass       # si no se puede leer el reloj, se ejecuta
         # (Ola 15 - B3, corregido en Ola 16) DOS relojes:
         #   job_intento:<n>  → SIEMPRE, haya ido bien o mal.
@@ -3561,6 +3589,7 @@ def _con_reloj(nombre: str, fn, intervalo: int | None = None):
             print(f"· {nombre}: {e} — reloj intacto, se reintenta "
                   f"en el siguiente sondeo")
         except Exception as e:
+            _avisar_ex("telegram_bot:_w:3563", e)
             _err = e
         finally:
             # El marcado va a un HILO: `get_conn()` en el bucle
@@ -3591,7 +3620,8 @@ def _con_reloj(nombre: str, fn, intervalo: int | None = None):
                 try:
                     from errores import record as _rec
                     await asyncio.to_thread(_rec, f"job:{nombre}", _err)
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("telegram_bot:_w:3594", _ex)
                     pass
     return _w
 
@@ -3743,7 +3773,8 @@ def main():
                     float(get_setting(_c, f"job_intento:{nombre}", 0) or 0))
             finally:
                 _c.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:_reloj_first:3746", _ex)
             return defecto
         if not last:
             # Primera vez: se ancla el reloj YA, para que el tiempo de
@@ -3758,7 +3789,8 @@ def main():
                                 _t.time() - intervalo + defecto)
                 finally:
                     _c.close()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:_reloj_first:3761", _ex)
                 pass
             return defecto
         falta = intervalo - (_t.time() - last)

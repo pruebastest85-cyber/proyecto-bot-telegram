@@ -21,6 +21,7 @@ import threading
 import time
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # Candado de vuelo unico para la pasada de respaldo (Ola 15): el job del
 # paper la lanza en fondo y no debe haber dos a la vez.
@@ -64,7 +65,8 @@ def guardar_dev(trade_id: int, mint: str) -> None:
             from errores import record as _rec
             _rec("dev_watch.sin_dev",
                  RuntimeError(f"posición {trade_id}, mint {mint[:12]}…"))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("dev_watch:guardar_dev:67", _ex)
             pass
         return
     try:
@@ -82,7 +84,8 @@ def guardar_dev(trade_id: int, mint: str) -> None:
         try:
             from realtime import invalidar_vigiladas
             invalidar_vigiladas()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("dev_watch:guardar_dev:85", _ex)
             pass
     except Exception as e:
         print(f"· dev_watch: no pude guardar el dev: {e}")
@@ -176,7 +179,8 @@ def _dev_vendio(dev: str, mint: str, desde_ts: int) -> bool:
         try:
             from errores import record as _rec
             _rec("dev_watch.consulta", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("dev_watch:_dev_vendio:179", _ex)
             pass
     return False
 

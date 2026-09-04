@@ -51,12 +51,14 @@ los consumidores: una sola fuente de verdad.
 """
 
 import time
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _cfg() -> dict:
     try:
         import config as _c
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("filtro_calidad:_cfg:59", _ex)
         _c = None
 
     def g(nombre, defecto):
@@ -140,7 +142,8 @@ def historial(conn, wallet: str | None = None,
     try:
         from trades_store import _ensure
         _ensure(conn)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("filtro_calidad:historial:143", _ex)
         pass
     if wallet:
         rows = conn.execute(
@@ -669,7 +672,8 @@ def reevaluacion(conn, ejecutar: bool = False) -> dict:
     try:
         from db import invalidar_copiables
         invalidar_copiables()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("filtro_calidad:reevaluacion:672", _ex)
         pass
     res["ejecutado"] = True
     # El estado FINAL se cuenta DESPUES de clasificar (auditoria 18-M):
@@ -825,7 +829,8 @@ def promocion(conn, ejecutar: bool = False) -> dict:
     try:
         from db import invalidar_copiables
         invalidar_copiables()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("filtro_calidad:promocion:828", _ex)
         pass
     res["ejecutado"] = True
     # Igual que en `reevaluacion`: se informa lo que QUEDÓ en la base,

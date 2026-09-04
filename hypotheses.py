@@ -14,6 +14,7 @@ import json
 import os
 
 from db import get_conn, get_setting, set_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -32,7 +33,8 @@ def _gather_state() -> dict:
              "tokens_comunes": c["shared_tokens"],
              "seguidores": [o["alias"] for o in c.get("order", [])[1:5]]}
             for c in cs[:6]]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("hypotheses:_gather_state:35", _ex)
         state["clusters"] = []
     try:
         from alpha import top_alpha
@@ -41,7 +43,8 @@ def _gather_state() -> dict:
              "originality": w["originality"],
              "adelanto_min": w["avg_lead_min"]}
             for w in top_alpha(8)]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("hypotheses:_gather_state:44", _ex)
         state["descubridores_alfa"] = []
     try:
         from similarity import rising_stars
@@ -49,14 +52,16 @@ def _gather_state() -> dict:
             {"alias": w["alias"], "parecida_a": w["like"], "sim": w["sim"],
              "apariciones": w["n"]}
             for w in rising_stars(limit=6)]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("hypotheses:_gather_state:52", _ex)
         state["estrellas_emergentes"] = []
     conn = get_conn()
     try:
         state["conteo_por_grado"] = {r["grade"]: r["c"] for r in conn.execute(
             "SELECT grade, COUNT(*) c FROM wallets WHERE grade IS NOT NULL "
             "GROUP BY grade").fetchall()}
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("hypotheses:_gather_state:59", _ex)
         state["conteo_por_grado"] = {}
     finally:
         conn.close()
@@ -99,7 +104,8 @@ def generate_hypotheses() -> str | None:
                 return None
         finally:
             _c.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("hypotheses:generate_hypotheses:102", _ex)
         pass
     prompt = PROMPT.format(estado=json.dumps(state, ensure_ascii=False,
                                              indent=1)[:4000])

@@ -19,6 +19,7 @@ import threading
 import requests
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -232,7 +233,8 @@ def _save_turn(user_text: str, reply: str):
         if conn is not None:          # (Ola 15 - M7) cerrar siempre
             try:
                 conn.close()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("ai_agent:_save_turn:235", _ex)
                 pass
 
 
@@ -490,6 +492,7 @@ def _exec_read(name: str, args: dict) -> str:
             return ("Sección desconocida. Usa: paper, paper_ventana, "
                     "posiciones, rendimiento, salud o helius.")
     except Exception as e:
+        _avisar_ex("ai_agent:_exec_read:492", e)
         return f"Error ejecutando {name}: {e}"
     return "Herramienta desconocida."
 
@@ -676,7 +679,8 @@ def _chat_nube(messages: list[dict]):
               f"no gasto")
         try:
             _conn.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_agent:_chat_nube:679", _ex)
             pass
         return None
     try:
@@ -725,7 +729,8 @@ def _chat_nube(messages: list[dict]):
         # de dentro del bucle son cuatro y ninguno cerraba nada.
         try:
             _conn.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_agent:_chat_nube:728", _ex)
             pass
 
 
@@ -839,7 +844,8 @@ def _deshacer_ultimo(conn) -> str:
             try:
                 conn.execute("DELETE FROM settings WHERE key=?", (k,))
                 conn.commit()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("ai_agent:_deshacer_ultimo:842", _ex)
                 set_setting(conn, k, "")
             partes.append(f"{k} vuelve a su valor por defecto")
         else:
@@ -1078,5 +1084,6 @@ def _execute_action_serializado(action: dict) -> str:
                     f"para reactivarlo). Señales de compra con score "
                     f"menor quedarán silenciadas.")
     except Exception as e:
+        _avisar_ex("ai_agent:_execute_action_serializado:1080", e)
         return f"Error ejecutando la acción: {e}"
     return "Acción desconocida."

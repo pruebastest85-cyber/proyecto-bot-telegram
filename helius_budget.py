@@ -22,6 +22,7 @@ import datetime as _dt
 import os
 
 from db import get_conn, get_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _int_env(n, d):
@@ -49,7 +50,8 @@ def _dia_corte(conn=None) -> int:
     try:
         if conn is not None:
             v = get_setting(conn, "helius_cycle_day", None)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("helius_budget:_dia_corte:52", _ex)
         v = None
     if v is None:
         v = os.getenv("HELIUS_CYCLE_START_DAY", "1")
@@ -124,13 +126,15 @@ def puede_llamar(conn=None) -> bool:
         if propia:
             conn = get_conn()
         return pct_usado(conn) < FRENO_PCT
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("helius_budget:puede_llamar:127", _ex)
         return True          # ante la duda, no bloquear el sistema
     finally:
         if propia and conn:
             try:
                 conn.close()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("helius_budget:puede_llamar:133", _ex)
                 pass
 
 

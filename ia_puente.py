@@ -34,6 +34,7 @@ import re
 import threading
 
 import requests
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # (19-AA, auditoria M6) Bandera POR HILO: la ultima llamada a la local
 # fallo porque estaba OCUPADA (conecto, pero no contesto a tiempo). Con
@@ -67,7 +68,8 @@ def _setting(key: str, default, conn=None):
             return get_setting(c, key, default)
         finally:
             c.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("ia_puente:_setting:70", _ex)
         return default
 
 
@@ -229,7 +231,8 @@ def _nube(prompt: str, system: str | None, max_tokens: int,
         if texto:
             try:
                 record_call(_bconn)
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("ia_puente:_nube:232", _ex)
                 pass
         return texto
     except Exception as e:
@@ -259,7 +262,8 @@ def completar_ex(prompt: str, system: str | None = None,
         try:
             from db import get_conn
             propia = conn = get_conn()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ia_puente:completar_ex:262", _ex)
             conn = None
     try:
         orden = str(_setting("ia_proveedor", "local_primero", conn)

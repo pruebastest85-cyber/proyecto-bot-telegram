@@ -20,10 +20,12 @@ import time
 import requests
 
 import config
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 try:
     from api_usage import record as _api_rec
-except Exception:          # nunca romper el flujo por el contador
+except Exception as _ex:          # nunca romper el flujo por el contador
+    _avisar_ex("unrealized_pnl:modulo:26", _ex)
     def _api_rec(*a, **k):
         pass
 
@@ -60,7 +62,8 @@ def _sol_px_guardado():
         if px is None or ts is None:
             return (None, None)
         return (float(px), (time.time() - float(ts)) / 3600.0)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("unrealized_pnl:_sol_px_guardado:63", _ex)
         return (None, None)
 
 
@@ -73,7 +76,8 @@ def _guardar_sol_px(px: float):
             set_setting(conn, "sol_usd_ultimo_ts", time.time())
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("unrealized_pnl:_guardar_sol_px:76", _ex)
         pass
 
 

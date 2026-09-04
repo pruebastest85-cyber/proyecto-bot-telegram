@@ -15,6 +15,7 @@ envuelto en try/except mudo; si falla el registro, el flujo sigue igual.
 import time
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 RETENCION_DIAS = 7        # los errores viejos se purgan solos
 
@@ -45,7 +46,8 @@ def record(modulo: str, exc, contexto: str = "") -> None:
             conn.commit()
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("errores:record:48", _ex)
         pass          # jamás romper el flujo por el registro
 
 
@@ -74,7 +76,8 @@ def resumen(horas: int = 24) -> list[dict]:
             return [dict(r) for r in rows]
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("errores:resumen:77", _ex)
         return []
 
 
@@ -88,7 +91,8 @@ def total(horas: int = 24) -> int:
             return int(r["c"] or 0)
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("errores:total:91", _ex)
         return 0
 
 

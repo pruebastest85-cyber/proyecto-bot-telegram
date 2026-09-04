@@ -18,6 +18,7 @@ import time
 
 # ── Umbrales (tuneables por VARIABLE DE ENTORNO, sin redeploy) ────────
 import os as _os
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _env(name, default):
@@ -130,7 +131,8 @@ def consistency_score(p) -> int:
     try:
         from reliability import stat_confidence
         _conf = stat_confidence(p) / 100.0
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("grading:consistency_score:133", _ex)
         _conf = 1.0
     if pf is not None and pf >= 99:          # centinela "sin perdidas"
         f_pf *= _conf

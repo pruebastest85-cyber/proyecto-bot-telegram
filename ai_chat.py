@@ -14,6 +14,7 @@ import os
 import re
 
 from db import get_conn, wallet_positions_summary
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -42,7 +43,8 @@ def _snapshot() -> dict:
     finally:                       # (Ola 15 - M7) la conexión se cierra
         try:                       # pase lo que pase dentro
             conn.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_chat:_snapshot:45", _ex)
             pass
 
 
@@ -124,6 +126,7 @@ def answer_question(pregunta: str) -> str:
     try:
         data = _snapshot()
     except Exception as e:
+        _avisar_ex("ai_chat:answer_question:126", e)
         return f"No pude leer la base: {e}"
 
     # Si la pregunta menciona una dirección, adjunta su detalle de posiciones
@@ -134,7 +137,8 @@ def answer_question(pregunta: str) -> str:
             conn = get_conn()
             detalle_billetera = wallet_positions_summary(conn, m.group(0))
             conn.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("ai_chat:answer_question:137", _ex)
             detalle_billetera = None
     if detalle_billetera:
         data["billetera_consultada"] = {"address": m.group(0),
@@ -171,4 +175,5 @@ def answer_question(pregunta: str) -> str:
         return (text or "").strip() or \
             "La IA no está disponible (¿PC apagada? revisa /ialocal)."
     except Exception as e:
+        _avisar_ex("ai_chat:answer_question:173", e)
         return f"Error consultando a la IA: {e}"

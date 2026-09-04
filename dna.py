@@ -17,6 +17,7 @@ import time
 
 from db import get_conn
 from wallet_profiler import profile_wallet
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def wallet_dna_text(address: str) -> str | None:
@@ -37,7 +38,8 @@ def wallet_dna_text(address: str) -> str | None:
     try:
         from signal_tracker import wallet_track_record
         track = wallet_track_record(conn, address)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:40", _ex)
         track = None
     conn.close()
 
@@ -72,14 +74,16 @@ def wallet_dna_text(address: str) -> str | None:
         gap = format_elite_gap(p, _ginf, g["tier"])
         if gap:
             lines.append(gap)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:75", _ex)
         pass
     try:
         from reliability import format_reliability
         rel = format_reliability(p)
         if rel:
             lines.append(rel)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:82", _ex)
         pass
     lines += [f"🧮 *Score: {s['score']}/100* · riesgo {s['riesgo']} · {activa}",
               f"Tipo IA: *{ai_class.upper()}*"]
@@ -134,7 +138,8 @@ def wallet_dna_text(address: str) -> str | None:
         eq = format_exit_quality(exit_quality(p))
         if eq:
             lines.append(eq)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:137", _ex)
         pass
 
     # Track record
@@ -144,7 +149,8 @@ def wallet_dna_text(address: str) -> str | None:
             tl = format_track_record(track)
             if tl:
                 lines.append(tl)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("dna:wallet_dna_text:147", _ex)
             pass
 
     # Cluster
@@ -180,7 +186,8 @@ def wallet_dna_text(address: str) -> str | None:
                           if me.get("lead_pct") is not None else "")
                     lines.append(f"   ↪️ Sigue a *{me['follows_alias']}* "
                                  f"(rank medio {me['avg_rank']}{lp})")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:183", _ex)
         pass
 
     # ── Perfil social: rol en el grafo de influencia ──────────────────
@@ -199,7 +206,8 @@ def wallet_dna_text(address: str) -> str | None:
                 hl = leader_health_line(address)
                 if hl:
                     lines.append(f"   {hl}")
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("dna:wallet_dna_text:202", _ex)
                 pass
             if inf["followers"]:
                 top = ", ".join(
@@ -210,7 +218,8 @@ def wallet_dna_text(address: str) -> str | None:
                 jefe = inf["leaders"][0]
                 lines.append(f"   🎯 Ella suele ir detrás de *{jefe['alias']}* "
                              f"(~{jefe['eta_s']}s)")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:213", _ex)
         pass
 
     # ── Alpha Discovery + Originality: ¿descubre o copia? ──
@@ -218,7 +227,8 @@ def wallet_dna_text(address: str) -> str | None:
     try:
         from influence import influence as _inf2
         inf_for_alpha = _inf2(address)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:221", _ex)
         pass
     try:
         from alpha import format_alpha, smart_explanation
@@ -228,28 +238,32 @@ def wallet_dna_text(address: str) -> str | None:
         exp = smart_explanation(address, inf_for_alpha)
         if exp:
             lines.append(f"💡 _{exp}_")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:231", _ex)
         pass
     try:
         from similarity import format_similar
         sim = format_similar(address)
         if sim:
             lines.append(sim)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:238", _ex)
         pass
     try:
         from entity_resolution import format_entity
         ent = format_entity(address)
         if ent:
             lines.append(ent)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:245", _ex)
         pass
     try:
         from attention import format_attention
         att = format_attention(address, s.get("score") if isinstance(s, dict) else None)
         if att:
             lines.append(att)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:252", _ex)
         pass
 
     if row and row["ai_reason"]:
@@ -262,7 +276,8 @@ def wallet_dna_text(address: str) -> str | None:
         if _f:
             lines.append("")
             lines.append(_f)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:265", _ex)
         pass
     # Etiqueta conocida (exchange, protocolo, KOL…)
     try:
@@ -270,6 +285,7 @@ def wallet_dna_text(address: str) -> str | None:
         _e = _etq(address)
         if _e:
             lines.append(f"🏷️ Identificada por Helius: *{_e}*")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("dna:wallet_dna_text:273", _ex)
         pass
     return "\n".join(lines)

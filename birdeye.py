@@ -19,6 +19,7 @@ import time
 from statistics import median
 
 import requests
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 BASE = "https://public-api.birdeye.so"
@@ -48,7 +49,8 @@ def _get(path: str, params: dict):
         try:
             from api_usage import record as _api_rec
             _api_rec("birdeye")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("birdeye:_get:51", _ex)
             pass
         if r.status_code == 200:
             return r.json()

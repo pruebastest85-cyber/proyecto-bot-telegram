@@ -22,6 +22,7 @@ base y puede recuperar el grado si vuelve a rendir (la IA la re-evalúa).
 import os
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _int_env(name, default):
@@ -63,7 +64,8 @@ def inicio_del_turno(conn, wallet: str) -> int:
         r = conn.execute(
             "SELECT turno_desde FROM wallets WHERE address = ?",
             (wallet,)).fetchone()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("performance_review:inicio_del_turno:66", _ex)
         return 0
     if not r:
         return 0
@@ -141,7 +143,8 @@ def perdedora_confirmada(conn, wallet: str) -> str | None:
     """
     try:
         st = _stats(conn, wallet)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("performance_review:perdedora_confirmada:144", _ex)
         return None
     if not st or st["n"] < REVIEW_MIN_SIGNALS:
         return None                      # sin evidencia suficiente
@@ -173,7 +176,8 @@ def _tope_mm() -> tuple:
         import config as _cfg
         return (int(getattr(_cfg, "MM_VUELTAS_MAX", 5)),
                 int(getattr(_cfg, "MM_VENTANA_DIAS", 30)))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("performance_review:_tope_mm:176", _ex)
         return (5, 30)
 
 
@@ -264,7 +268,8 @@ def creadora_de_mercado(conn, wallet: str) -> str | None:
         return None
     try:
         peor = _vueltas_max(conn, dias, wallet)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("performance_review:creadora_de_mercado:267", _ex)
         return None                    # sin datos no se castiga a nadie
     dato = peor.get(wallet)
     if not dato or dato[0] <= tope:
@@ -375,7 +380,8 @@ def review_tracked(notify: bool = True) -> dict:
                     + "\n".join(lineas)
                     + "\n\n_No se descartan: si vuelven a rendir, la IA "
                       "puede devolverles el grado._")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("performance_review:review_tracked:378", _ex)
             pass
 
     return {"revisadas": revisadas, "degradadas": len(degradadas),

@@ -20,6 +20,7 @@ import time
 
 
 from db import get_conn, get_setting, set_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MIN_ETIQUETADOS = 8   # mínimo de tokens con 👍/👎 para que la IA aprenda
@@ -123,7 +124,8 @@ def learnings_text() -> str:
             return get_setting(conn, "token_learnings", "") or ""
         finally:
             conn.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("token_learning:learnings_text:126", _ex)
         return ""
 
 
@@ -196,7 +198,8 @@ def analyze_submitted() -> str | None:
                 "_Son SUGERENCIAS; no cambié ningún filtro. "
                 "Estos aprendizajes ya se inyectan al veredicto de los "
                 "próximos tokens que envíes._")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("token_learning:analyze_submitted:199", _ex)
         pass
     print("🧠 Aprendizaje de tokens guardado")
     return hallazgos

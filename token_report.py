@@ -11,6 +11,7 @@ Fase 2: se inserta el veredicto de la IA (bloque _ai_block).
 
 from db import get_conn
 from token_check import analyze_token
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def _esc(x) -> str:
@@ -112,7 +113,8 @@ def _ai_block(t: dict, smart_ctx: dict, mint: str) -> list:
     try:
         from ai_token import token_verdict
         v = token_verdict(t, smart_ctx, mint)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("token_report:_ai_block:115", _ex)
         v = None
     if not v:
         return []
@@ -175,7 +177,8 @@ def token_report(mint: str) -> dict:
     try:
         from token_learning import record_submission
         record_submission(mint, t, risk, len(smart), len(elite))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("token_report:token_report:178", _ex)
         pass
 
     if risk is None:

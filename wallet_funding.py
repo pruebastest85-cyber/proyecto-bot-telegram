@@ -24,6 +24,7 @@ import time
 import requests
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 API = "https://api.helius.xyz/v1/wallet/{addr}/funded-by"
 
@@ -131,7 +132,8 @@ def hermanas(address: str, limite: int = 12) -> list[str]:
             "SELECT address FROM wallet_funding WHERE funder=? AND address<>? "
             "LIMIT ?", (f["funder"], address, limite)).fetchall()
         return [r["address"] for r in filas]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_funding:hermanas:134", _ex)
         return []
     finally:
         conn.close()
@@ -208,7 +210,8 @@ def familia(address: str) -> list[str]:
         if len(otras) + 1 > MAX_FAMILIA:
             return []
         return otras
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_funding:familia:211", _ex)
         return []
     finally:
         conn.close()
@@ -229,7 +232,8 @@ def hermana_con_estrella(conn, address: str, mi_score) -> str | None:
             f"""SELECT address, COALESCE(wallet_score, -1) sc FROM wallets
                 WHERE address IN ({marcas}) AND is_tracked = 1
                 ORDER BY sc DESC""", hs).fetchall()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("wallet_funding:hermana_con_estrella:232", _ex)
         return None
     if not filas:
         return None

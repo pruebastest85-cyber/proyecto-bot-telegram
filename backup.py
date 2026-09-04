@@ -20,6 +20,7 @@ import time
 
 import db as _db
 from config import DB_PATH
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # (Ola 17-C, auditoria 4) Faltaban SIETE tablas, y el restaurador
 # (restaurar_backup.ORDEN) SI las esperaba: el que respalda no escribia
@@ -68,6 +69,7 @@ def make_backup() -> tuple[str, str, str]:
                     except Exception as e:
                         # La consulta fallo antes de escribir nada de la
                         # tabla, asi que el JSON sigue siendo valido.
+                        _avisar_ex("backup:make_backup:68", e)
                         f.write(json.dumps({"_error": str(e)}))
                         continue
                     f.write("[")

@@ -17,6 +17,7 @@ import threading
 import time
 
 from db import get_conn, get_setting
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 _BUF: dict = {}
 _LAST = [0.0]
@@ -37,7 +38,8 @@ def _volcar_al_salir():
     _LOCK.release()
     try:
         flush()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("api_usage:_volcar_al_salir:40", _ex)
         pass
 
 
@@ -57,7 +59,8 @@ def record(api: str, n: int = 1) -> None:
                          or sum(_BUF.values()) >= 25)
         if flush_now:
             flush()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("api_usage:record:60", _ex)
         pass
 
 
@@ -148,7 +151,8 @@ def flush() -> None:
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
+            except Exception as _ex:
+                _avisar_ex("api_usage:flush:151", _ex)
                 pass
     if pendientes:
         # (Ola 15) Lo que no se pudo escribir vuelve al búfer: antes se
@@ -161,7 +165,8 @@ def flush() -> None:
 def used_today(conn, api: str) -> int:
     try:
         return int(float(get_setting(conn, _key(api), "0") or 0))
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("api_usage:used_today:164", _ex)
         return 0
 
 

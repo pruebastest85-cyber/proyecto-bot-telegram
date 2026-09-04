@@ -28,10 +28,12 @@ import time
 import requests
 
 import config
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 try:
     from api_usage import record as _api_rec
-except Exception:
+except Exception as _ex:
+    _avisar_ex("helius_rpc:modulo:34", _ex)
     def _api_rec(*a, **k):
         pass
 
@@ -183,7 +185,8 @@ def traducir(entrada: dict) -> dict | None:
             "nativeTransfers": _native_transfers(msg, meta),
             "accountData": _account_data(msg, meta),
         }
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("helius_rpc:traducir:186", _ex)
         return None
 
 

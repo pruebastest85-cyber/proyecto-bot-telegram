@@ -23,6 +23,7 @@ import os
 import sys
 
 from db import get_conn, USE_PG
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # Tablas que el backup puede traer. Se restauran en este orden para que las
 # que otras referencian entren primero.
@@ -130,7 +131,8 @@ def _columnas_reales(conn, tabla: str) -> set:
             return {r["column_name"] for r in filas}
         filas = conn.execute(f"PRAGMA table_info({tabla})").fetchall()
         return {r["name"] for r in filas}
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("restaurar_backup:_columnas_reales:133", _ex)
         return set()
 
 
@@ -178,7 +180,8 @@ def _insertar(conn, tabla: str, filas: list, simular: bool) -> tuple:
                 try:
                     conn.execute(sql, fila)
                     puestas += 1
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("restaurar_backup:_insertar:181", _ex)
                     pass
             conn.commit()
     return (puestas, len(filas) - puestas)

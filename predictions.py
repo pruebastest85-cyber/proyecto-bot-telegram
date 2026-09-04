@@ -26,6 +26,7 @@ from db import get_conn, get_setting
 from influence import influence, graph, cache_lista
 
 import os as _os
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 WINDOW_MIN = 20          # ventana para que lleguen los seguidores
 EVAL_AFTER_MIN = 30      # a partir de aquí la predicción se evalúa sola
@@ -136,7 +137,8 @@ def marca_medicion(conn) -> int:
     try:
         v = get_setting(conn, "pred_medicion_desde", None)
         return int(float(v)) if v else 0
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("predictions:marca_medicion:139", _ex)
         return 0
 
 
@@ -156,9 +158,10 @@ def medicion_desde(conn) -> int:
         v = get_setting(conn, "pred_medicion_desde", None)
         if v:
             return int(float(v))
-    except Exception:
+    except Exception as _ex:
         # Incluye fallos de base (bloqueo de SQLite, Postgres caido): sin
         # la marca se mide como antes, que es peor pero no rompe nada.
+        _avisar_ex("predictions:medicion_desde:159", _ex)
         return 0
     ahora = int(time.time())
     try:
@@ -546,7 +549,8 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                                     ((inf or {}).get("followers") or [])
                                     if _num(f.get("prob"), 0) >= 60]
                             _ocultos_conf = max(0, len(_f60) - len(pred))
-                        except Exception:
+                        except Exception as _ex:
+                            _avisar_ex("predictions:on_buy:549", _ex)
                             pass
                         _ctx_al["_seguidores_ocultos"] = _ocultos_conf
                         aviso = (fresh, inf, conf, row["meta_score"], pred,
@@ -637,7 +641,8 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
         try:
             from errores import record as _rec_err
             _rec_err("predictions.cluster", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("predictions:on_buy:640", _ex)
             pass
     conf = confidence_score(inf, followers, token_ctx.get("liq"), health)
     meta = meta_score(inf, cluster, health, followers,
@@ -932,6 +937,7 @@ def metrics_text() -> str:
                 _diag.append("   Aún sin alertas emitidas, pero los "
                              "umbrales son alcanzables.")
     except Exception as _e:
+        _avisar_ex("predictions:metrics_text:934", _e)
         _diag = [f"\n🔎 Calibración: no se pudo comprobar ({_e})"]
 
     out = ["📊 *Panel del motor predictivo*\n",
@@ -953,7 +959,8 @@ def metrics_text() -> str:
                     (marca,)).fetchone()["c"]
             finally:
                 _c3.close()
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("predictions:metrics_text:956", _ex)
             _viejas = 0
         out.append(f"_Acierto medido desde {_desde}_ · "
                    f"{_viejas:,} predicciones anteriores quedan fuera "

@@ -15,6 +15,7 @@ import os
 import random
 
 from PIL import Image, ImageDraw, ImageFont
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _FONT = os.path.join(_DIR, "card_font.ttf")
@@ -33,7 +34,8 @@ SHADOW = (0, 0, 0)
 def _font(size: int):
     try:
         return ImageFont.truetype(_FONT, size)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("card_image:_font:36", _ex)
         return ImageFont.load_default()
 
 

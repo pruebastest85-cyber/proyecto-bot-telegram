@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import time
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 DESTINO = os.path.join(os.path.expanduser("~"), "wallet-edge-local")
 CADA_S = 300          # revisar GitHub cada 5 min
@@ -383,7 +384,8 @@ def parar(proc: subprocess.Popen):
             return                     # murio limpio: bufer volcado
         except subprocess.TimeoutExpired:
             print("⚠️  El bot no murio por las buenas en 10 s; termino")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("supervisor:parar:386", _ex)
             pass
     proc.terminate()
     try:
@@ -448,7 +450,8 @@ def instancia_unica() -> bool:
         _lock_fh.truncate()
         _lock_fh.write(f"{os.getpid()}\n")
         _lock_fh.flush()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("supervisor:instancia_unica:451", _ex)
         pass
     return True
 

@@ -18,6 +18,7 @@ Todo se calcula de señales ya existentes (alpha, originalidad, influencia).
 """
 
 from db import get_conn
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 
 def attention_score(address: str, inf=None, ap=None) -> int:
@@ -26,13 +27,15 @@ def attention_score(address: str, inf=None, ap=None) -> int:
         if ap is None:
             from alpha import alpha_profile
             ap = alpha_profile(address)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("attention:attention_score:29", _ex)
         ap = None
     try:
         if inf is None:
             from influence import influence as _inf
             inf = _inf(address)
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("attention:attention_score:35", _ex)
         inf = None
     ap = ap or {}
     inf = inf or {}
@@ -100,7 +103,8 @@ def enforce_budget(conn, max_elite: int) -> int:
     try:
         from db import invalidar_copiables
         invalidar_copiables()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("attention:enforce_budget:103", _ex)
         pass
     return len(to_demote)
 

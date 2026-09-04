@@ -12,6 +12,7 @@ import time
 import requests
 
 import config
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 # ── (Ola 17-G) Cache partida por VOLATILIDAD ──────────────────────────
 # Medido en la base del dueño: de 4.135 señales en 24 h, el 47% llega a
@@ -75,7 +76,8 @@ def limpiar_cache():
 
 try:
     from api_usage import record as _api_rec
-except Exception:          # nunca romper el flujo por el contador
+except Exception as _ex:          # nunca romper el flujo por el contador
+    _avisar_ex("token_check:modulo:78", _ex)
     def _api_rec(*a, **k):
         pass
 
@@ -112,7 +114,8 @@ def _get(url: str, timeout: int = 15):
         try:
             from errores import record as _rec
             _rec(f"api.{_fuente.lower()}", RuntimeError(_motivo))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("token_check:_get:115", _ex)
             pass
     return None
 

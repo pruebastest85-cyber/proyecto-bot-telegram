@@ -34,6 +34,7 @@ from db import get_conn, get_setting, top_addresses
 from db import en_top as _en_top
 from token_check import analyze_token, format_token_block, ai_payload
 from signal_score import compute_signal_score
+from avisos import aviso as _avisar_ex   # (19-AE)
 
 LAMPORTS = 1_000_000_000
 LAST_HOOK_TS = None   # última vez que Helius nos mandó algo (watchdog)
@@ -228,7 +229,8 @@ def tg_send(text: str, buttons: list | None = None) -> bool:
             record("telegram_send",
                    RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}"),
                    "rechazado tras reintento en texto plano")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:tg_send:231", _ex)
             pass
         return False
     except requests.RequestException as e:
@@ -236,7 +238,8 @@ def tg_send(text: str, buttons: list | None = None) -> bool:
         try:
             from errores import record
             record("telegram_send", e)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:tg_send:239", _ex)
             pass
         return False
 
@@ -318,7 +321,8 @@ def watch_addresses(conn=None) -> list[str]:
         huerfanas = [r["wallet"] for r in conn.execute(
             "SELECT DISTINCT wallet FROM paper_trades "
             "WHERE status='abierta'").fetchall()]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("realtime:watch_addresses:321", _ex)
         huerfanas = []            # tabla aún sin crear
     # (Ola 12b, 21/8) Devs de tokens con posición abierta: entran a la
     # VIGILANCIA EN TIEMPO REAL. El sondeo de 15 min llegaba tarde por
@@ -328,7 +332,8 @@ def watch_addresses(conn=None) -> list[str]:
         devs = [r["dev_wallet"] for r in conn.execute(
             "SELECT DISTINCT dev_wallet FROM paper_trades "
             "WHERE status='abierta' AND dev_wallet IS NOT NULL").fetchall()]
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("realtime:watch_addresses:331", _ex)
         devs = []                 # tabla/columna aún sin crear
     if propia:
         conn.close()
@@ -349,7 +354,8 @@ def _guardar_huella(huella: str) -> None:
             set_setting(_c, "webhook_sync_ts", time.time())
         finally:
             _c.close()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("realtime:_guardar_huella:352", _ex)
         pass
 
 
@@ -385,7 +391,8 @@ def sync_helius_webhook(forzar: bool = False) -> str:
             if previa == huella and (time.time() - ts_prev) < 86400:
                 return (f"Webhook sin cambios ({len(addrs)} billeteras); "
                         "no se gastan créditos")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:sync_helius_webhook:388", _ex)
             pass
 
     hook_url = f"https://{PUBLIC_URL}/helius"
@@ -560,7 +567,8 @@ def _plan_salida(w) -> str:
     try:
         hold = _wget(w, "hold_median_min")
         roi = _wget(w, "roi_median")
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("realtime:_plan_salida:563", _ex)
         return ""
     if hold is None and roi is None:
         return ""
@@ -660,7 +668,8 @@ def _sol_price() -> float | None:
     try:
         from unrealized_pnl import _sol_usd
         return _sol_usd()
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("realtime:_sol_price:663", _ex)
         return None
 
 
@@ -765,7 +774,8 @@ def _listas_vigiladas(conn):
         d = {(r["dev_wallet"], r["mint"]) for r in conn.execute(
             "SELECT DISTINCT dev_wallet, mint FROM paper_trades "
             "WHERE status='abierta' AND dev_wallet IS NOT NULL").fetchall()}
-    except Exception:
+    except Exception as _ex:
+        _avisar_ex("realtime:_listas_vigiladas:768", _ex)
         d = set()
     with _VIG_LOCK:
         _VIG_CACHE.update({"ts": ahora, "watch": w, "stars": e, "devs": d})
@@ -800,7 +810,8 @@ def process_transactions(txs: list[dict]):
                     from errores import record as _rec_lote
                     _rec_lote("realtime.lote", e,
                               f"{len(txs)} transaccion(es) sin procesar")
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("realtime:process_transactions:803", _ex)
                     pass
                 raise
             print("· Base ocupada; reintento el lote en 3 s")
@@ -1110,13 +1121,15 @@ def _proc(txs: list[dict], conn):
             from signal_tracker import wallet_track_record, format_track_record
             track = wallet_track_record(conn, trade["wallet"])
             track_line = format_track_record(track)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:_proc:1113", _ex)
             track, track_line = None, ""
         try:
             from wallet_score import wallet_pattern, format_pattern
             patron = wallet_pattern(conn, trade["wallet"])
             patron_line = format_pattern(patron, t.get("mc"))
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:_proc:1119", _ex)
             patron, patron_line = None, ""
 
         # Score de la señal (0-100) y umbral configurable
@@ -1129,7 +1142,8 @@ def _proc(txs: list[dict], conn):
         try:
             from influence import influencia_ligera
             _rol = influencia_ligera(trade["wallet"])
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:_proc:1132", _ex)
             _rol = None
         score_sig, desglose = compute_signal_score(
             t, _wget(w, "wallet_score"), track, consensus, patron_ok,
@@ -1199,7 +1213,8 @@ def _proc(txs: list[dict], conn):
                             "AND mint=? AND status='abierta' LIMIT 1",
                             (trade["wallet"],
                              trade["mint"])).fetchone() is not None
-                except Exception:
+                except Exception as _ex:
+                    _avisar_ex("realtime:_proc:1202", _ex)
                     _cerrar_huerfana = False       # tabla aún sin crear
             if not _cerrar_huerfana:
                 quien = "Candidata" if not es_star else "⭐ fuera del top"
@@ -1293,7 +1308,8 @@ def _proc(txs: list[dict], conn):
         try:
             from ai_budget import can_call
             _hay_ia = can_call(conn)
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:_proc:1296", _ex)
             _hay_ia = True
         if _hay_ia:
             verdict = _ai_signal_verdict(conn=conn, payload={
@@ -1352,7 +1368,8 @@ def _proc(txs: list[dict], conn):
             from wallet_ident import identidad
             _id = identidad(conn, trade["wallet"])
             alias, _postop = _id["nombre"], _id.get("pos")
-        except Exception:
+        except Exception as _ex:
+            _avisar_ex("realtime:_proc:1355", _ex)
             alias, _postop = (_wget(w, "alias")
                               or f"{trade['wallet'][:8]}…"), None
         clase = _wget(w, "ai_class") or "?"
