@@ -96,6 +96,52 @@ ACCIONES_CONSUMIDAS: dict[tuple, tuple] = {}
 _CONSUMIDAS_TTL = 900
 
 
+def _entero_no_negativo(txt) -> int | None:
+    """(19-AB) Entero ≥ 0 o None. `int(float("inf"))` lanza OverflowError
+    (no ValueError) y /topalertas inf reventaba sin capturar; nan pasaba
+    a int() como ValueError pero mejor decirlo aquí de una vez."""
+    import math
+    try:
+        v = float(str(txt).strip())
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v) or math.isinf(v) or v < 0:
+        return None
+    return int(v)
+
+
+def _entero_creditos(txt) -> int | None:
+    """(19-AB) Créditos escritos a mano: '1000000', '1.000.000' o
+    '1,000,000'. Antes se quitaban puntos y comas a ciegas: `/vaciarcola
+    si 1.5` daba un techo de **15** créditos, y 'inf' reventaba."""
+    import re as _re
+    t = str(txt or "").strip()
+    if not _re.fullmatch(r"\d+|\d{1,3}(?:[.,]\d{3})+", t):
+        return None
+    return int(t.replace(".", "").replace(",", ""))
+
+
+def _monto_backtest(txt, defecto: float = 0.5) -> float:
+    """(19-AB) `/backtest nan` daba 50 SOL: `max(0.05, min(50, nan))` no
+    es un número. Un valor ilegible devuelve el defecto."""
+    import math
+    try:
+        v = float(str(txt).strip())
+    except (TypeError, ValueError):
+        return defecto
+    if math.isnan(v) or math.isinf(v):
+        return defecto
+    return max(0.05, min(50.0, v))
+
+
+def _texto_resultado_accion(resultado) -> str:
+    """(19-AB) ✅ solo si de verdad se hizo; antes salía ✅ sobre
+    "Error ejecutando…" y "Valor inválido…"."""
+    from ai_agent import es_error_accion
+    return (f"⚠️ {resultado}" if es_error_accion(resultado)
+            else f"✅ {resultado}")
+
+
 def _marcar_consumida(uid: int, tok: str, estado: str):
     import time as _tt
     ahora = _tt.time()
@@ -1405,8 +1451,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # pulsación ya se llevó la acción. No decir "expiró" ni
             # invitar a repetirla — se ejecutaría dos veces.
             await q.answer({"curso": "Ya la estoy ejecutando",
-                            "cancelada": "Ya la cancelaste"}.get(
-                                _ya[0], "Ya se ejecutó"))
+                            "cancelada": "Ya la cancelaste",
+                            "fallida": "Falló al ejecutarla; pídela otra "
+                                       "vez"}.get(_ya[0], "Ya se ejecutó"))
             return
         if accion is None and data.startswith("agc:y"):
             # (Ola 16) El bot se reinició con la propuesta pendiente (vive
@@ -1444,15 +1491,22 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # primero que se hace tras quedarse con la accion.
         _marcar_consumida(q.from_user.id, _tok_msg, "curso")
         await q.answer("Ejecutando…")
-        from ai_agent import execute_action
+        from ai_agent import execute_action, es_error_accion
         try:
             resultado = await asyncio.to_thread(execute_action, accion)
-        finally:
-            _marcar_consumida(q.from_user.id, _tok_msg, "hecha")
+        except Exception as e:
+            # (19-AB) Antes una acción que reventaba subía hasta el
+            # manejador de errores y el doble toque decía "ya se
+            # ejecutó" (quedaba marcada "hecha" en el finally).
+            print(f"· Acción del agente reventó: {e}")
+            resultado = f"Error ejecutando la acción: {e}"
+        _fallo = es_error_accion(resultado)
+        _marcar_consumida(q.from_user.id, _tok_msg,
+                          "fallida" if _fallo else "hecha")
         try:
-            await q.edit_message_text(f"✅ {resultado}")
-        except Exception:
-            pass
+            await q.edit_message_text(_texto_resultado_accion(resultado))
+        except Exception as e:
+            print(f"· No pude editar el mensaje de la acción: {e}")
         # (21/8) Guardar el DESENLACE en la memoria del chat: sin esto,
         # el agente recordaba que propuso la acción pero no que se
         # ejecutó, y ante un "¿listo?" la volvía a proponer.
@@ -2009,11 +2063,8 @@ async def cmd_top_alertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from db import set_setting, get_setting, TOP_ALERTAS_DEFAULT
     args = ctx.args or []
     if args:
-        try:
-            n = int(float(args[0]))
-            if n < 0:
-                raise ValueError
-        except ValueError:
+        n = _entero_no_negativo(args[0])        # (19-AB)
+        if n is None:
             await update.message.reply_text(
                 "Uso: /topalertas <n>   (0 = sin límite)")
             return
@@ -2215,10 +2266,8 @@ async def cmd_vaciar_cola(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     techo = 0
     if len(args) > 1:
-        try:
-            techo = max(0, int(float(args[1].replace(".", "")
-                                     .replace(",", ""))))
-        except (TypeError, ValueError):
+        techo = _entero_creditos(args[1])          # (19-AB)
+        if techo is None:
             await _send_md(chat, f"No entiendo `{args[1]}` como número de "
                                  f"créditos. Ejemplo: "
                                  f"`/vaciarcola si 1000000`")
@@ -2883,10 +2932,7 @@ async def cmd_rendimiento(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     monto = 0.5
     if ctx.args:
-        try:
-            monto = max(0.05, min(50.0, float(ctx.args[0])))
-        except ValueError:
-            pass
+        monto = _monto_backtest(ctx.args[0])         # (19-AB)
     from rendimiento import backtest_text
     txt = await asyncio.to_thread(backtest_text, monto)
     await _send_md(update.message.chat, txt)      # (19-Z)

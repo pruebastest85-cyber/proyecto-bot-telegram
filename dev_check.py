@@ -10,13 +10,21 @@ cuando la extracción de compradores realmente corrió, así hereda el
 límite por hora y no se dispara el gasto.
 """
 
-from wallet_analyzer import fetch_earliest_txs, fetch_parsed_txs
+from wallet_analyzer import fetch_parsed_txs
 
 
 def find_creator(mint: str, earliest=None) -> str | None:
     """El feePayer de la 1ª transacción del token = creador/deployer."""
     try:
-        txs = earliest if earliest else fetch_earliest_txs(mint, max_pages=1)
+        if earliest:
+            txs = earliest
+        else:
+            # (19-AB, auditoria BAJO) `fetch_earliest_txs(max_pages=1)`
+            # ignoraba `max_pages` en la ruta RPC y bajaba
+            # EARLY_BUYER_WINDOW (2.000) transacciones —200 créditos—
+            # para leer el feePayer de la PRIMERA. Una sola cuesta 10.
+            from helius_rpc import primeras_txs
+            txs, _completo = primeras_txs(mint, max_txs=1)
         if not txs:
             return None
         return txs[0].get("feePayer")

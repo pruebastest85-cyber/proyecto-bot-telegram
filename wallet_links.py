@@ -48,35 +48,21 @@ def _txs(address: str, limit: int = TX_LIMIT):
 
 
 def _funder(address: str):
-    """Quién le envió el primer SOL conocido (mira hasta ~1000 txs
-    hacia atrás). Aproximación del origen de fondeo."""
-    txs, before = [], None
+    """Quién le envió el primer SOL conocido (origen de fondeo).
+
+    (19-AB, auditoria BAJO) Sale de `wallet_funding.fondeo`, que pregunta
+    a la API funded-by de Helius UNA vez (100 créditos) y lo guarda para
+    siempre — en la base del dueño las 178 ⭐ ya lo tenían cacheado.
+    Antes esto paginaba hasta 10 páginas del historial (1.000 créditos)
+    POR ⭐ en CADA pulsación de /vinculos, para deducir a mano lo mismo.
+    """
     try:
-        for _ in range(10):
-            params = {"api-key": config.HELIUS_API_KEY, "limit": 100}
-            if before:
-                params["before"] = before
-            r = requests.get(config.HELIUS_PARSED_TX.format(address=address),
-                             params=params, timeout=30)
-            r.raise_for_status()
-            _apuntar_creditos()          # (19-E) una pagina, 100 creditos
-            batch = r.json()
-            if not isinstance(batch, list) or not batch:
-                break
-            txs = batch  # nos quedamos con el lote más antiguo
-            before = batch[-1].get("signature")
-            time.sleep(config.HELIUS_DELAY)
-            if len(batch) < 100:
-                break
-    except Exception:
+        from wallet_funding import fondeo
+        d = fondeo(address)
+    except Exception as e:
+        print(f"· vinculos: no pude leer el fondeo de {address[:8]}: {e}")
         return None
-    for tx in reversed(txs):  # de la más vieja hacia adelante
-        for nt in tx.get("nativeTransfers") or []:
-            if nt.get("toUserAccount") == address and \
-               nt.get("fromUserAccount") not in (None, address) and \
-               (nt.get("amount") or 0) / 1e9 >= 0.05:
-                return nt.get("fromUserAccount")
-    return None
+    return (d or {}).get("funder") or None
 
 
 def find_links() -> str:
@@ -97,22 +83,23 @@ def find_links() -> str:
     if len(tracked) < 2:
         return "🔗 Hacen falta al menos 2 billeteras ⭐ para buscar vínculos."
 
-    # (19-E) FRENO DE PRESUPUESTO antes de empezar. Este comando es el
+    # (19-E) FRENO DE PRESUPUESTO antes de empezar. Este comando era el
     # más caro del bot con diferencia: hasta 11 llamadas de la Enhanced
-    # API (1.100 créditos) por cada ⭐. Con 130 ⭐ eran ~143.000 créditos
-    # en una sola pulsación, más que un día entero de operación normal
-    # (medido: 103.000-250.000/día). El radar y el perfilador ya
-    # consultan este freno; aquí no lo consultaba nadie.
+    # API (mil cien créditos) por cada ⭐. (19-AB) Ahora el fondeo sale de la
+    # caché de `wallet_funding` y queda 1 llamada (100 créditos) por ⭐
+    # para las transferencias directas, más el fondeo de las que aún no
+    # lo tengan (100, una vez en la vida).
     try:
         from helius_budget import puede_llamar
         if not puede_llamar():
             return ("🔗 No lo hago ahora: el freno de presupuesto de "
                     "Helius está activo. Este comando puede costar hasta "
-                    f"{len(tracked) * 1100:,} créditos y el consumo del "
+                    f"{len(tracked) * 200:,} créditos y el consumo del "
                     "ciclo ya va alto. Mira /salud y vuelve a intentarlo "
                     "cuando baje.")
-        print(f"· hermanas: {len(tracked)} ⭐ × hasta 1.100 créditos "
-              f"≈ {len(tracked) * 1100:,} créditos")
+        print(f"· hermanas: {len(tracked)} ⭐ × 100 créditos (+100 por "
+              f"cada fondeo aún no cacheado) ≈ {len(tracked) * 100:,}-"
+              f"{len(tracked) * 200:,} créditos")
     except ImportError:
         pass
 

@@ -11333,6 +11333,199 @@ def prueba_19aa():
     conn.close()
 
 
+def prueba_19ab():
+    bloque("19-AB - creditos (/vinculos, dev), agente pensante, argumentos "
+           "raros, ✅ sobre error")
+    import contextlib
+    import io
+    from db import get_conn, set_setting
+
+    # ── 1) /vinculos usa el fondeo CACHEADO, no 10 paginas por ⭐ ──────
+    import wallet_links as wl
+    import wallet_funding as wf
+    _get_prev = wl.requests.get
+    _fondeo_prev = wf.fondeo
+    peticiones = []
+
+    def _no_pedir(*a, **k):
+        peticiones.append(a)
+        raise RuntimeError("no debe pedir paginas")
+    wl.requests.get = _no_pedir
+    wf.fondeo = lambda addr: {"funder": "PAPA1", "nombre": None,
+                              "tipo": None, "monto": 1.0, "ts": 1}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            f = wl._funder("W1")
+        comprobar("_funder sale de la caché de fondeo (100 créditos una "
+                  "vez), no de 10 páginas de historial (1.000 por ⭐ cada "
+                  "vez)", f == "PAPA1" and peticiones == [],
+                  f"f={f} peticiones={len(peticiones)}")
+        wf.fondeo = lambda addr: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            comprobar("sin fondeo conocido → None", wl._funder("W1") is None)
+    finally:
+        wl.requests.get, wf.fondeo = _get_prev, _fondeo_prev
+    import inspect as _insp
+    _src_fl = _insp.getsource(wl.find_links)
+    comprobar("y la estimación del coste ya no promete 1.100 por ⭐",
+              "1100" not in _src_fl and "1.100" not in _src_fl)
+
+    # ── 2) find_creator pide UNA transacción, no 1.500 ─────────────────
+    import dev_check as dc
+    import helius_rpc as hr
+    _pt_prev = hr.primeras_txs
+    pedidos = []
+
+    def _primeras(mint, max_txs=1500):
+        pedidos.append(max_txs)
+        return ([{"feePayer": "DEV9", "signature": "s"}], False)
+    hr.primeras_txs = _primeras
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            c = dc.find_creator("MINTZ")
+        comprobar("find_creator: 1 tx (10 créditos) en vez de 1.500 (150) "
+                  "para leer un feePayer", c == "DEV9" and pedidos == [1],
+                  f"c={c} pedidos={pedidos}")
+        comprobar("y con `earliest` ya descargado no pide nada",
+                  dc.find_creator("MINTZ", earliest=[{"feePayer": "X"}])
+                  == "X" and pedidos == [1])
+    finally:
+        hr.primeras_txs = _pt_prev
+
+    # ── 3) El agente respeta modelo_pensante (no quema un intento) ────
+    import ai_agent as ag
+    import ia_puente as ip
+    import os as _os
+    conn = get_conn()
+    set_setting(conn, "modelo_pensante", "1")
+    conn.commit()
+    _pens_prev = ip._MODELO_PENSANTE
+    ip._MODELO_PENSANTE = None
+    _url_prev = _os.environ.get("LOCAL_AI_URL")
+    _os.environ["LOCAL_AI_URL"] = "http://127.0.0.1:1"
+    cuerpos = []
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "hola"},
+                                 "finish_reason": "stop"}]}
+    _post_prev = ag.requests.post
+    ag.requests.post = lambda url, json=None, timeout=0: (
+        cuerpos.append((json, timeout)) or _R())
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = ag._chat_local([{"role": "user", "content": "hola"}])
+        comprobar("con modelo_pensante=1 el PRIMER intento ya va sin tope "
+                  "(antes: 90 s perdidos por cada mensaje del chat)",
+                  r == ("hola", None) and cuerpos
+                  and "max_tokens" not in cuerpos[0][0]
+                  and cuerpos[0][1] == 150,
+                  f"r={r} cuerpo0={list((cuerpos[0][0] if cuerpos else {}).keys())}")
+        # Y cuando aprende (finish=length), lo anota para el puente.
+        ip._MODELO_PENSANTE = False
+        set_setting(conn, "modelo_pensante", "0")
+        conn.commit()
+        cuerpos.clear()
+        _vueltas = [0]
+
+        class _RL:
+            status_code = 200
+
+            def json(self):
+                _vueltas[0] += 1
+                if _vueltas[0] == 1:
+                    return {"choices": [{"message": {"content": ""},
+                                         "finish_reason": "length"}]}
+                return {"choices": [{"message": {"content": "ya"},
+                                     "finish_reason": "stop"}]}
+        ag.requests.post = lambda url, json=None, timeout=0: (
+            cuerpos.append((json, timeout)) or _RL())
+        with contextlib.redirect_stdout(io.StringIO()):
+            r2 = ag._chat_local([{"role": "user", "content": "hola"}])
+        from db import get_setting
+        comprobar("y si el razonamiento se come el tope, lo APRENDE para "
+                  "todos (settings modelo_pensante=1)",
+                  r2 == ("ya", None) and ip._pensante(conn)
+                  and str(get_setting(conn, "modelo_pensante", "0")) == "1",
+                  f"r2={r2} pensante={ip._pensante(conn)}")
+    finally:
+        ag.requests.post = _post_prev
+        ip._MODELO_PENSANTE = _pens_prev
+        set_setting(conn, "modelo_pensante", "1")
+        conn.commit()
+        if _url_prev is None:
+            _os.environ.pop("LOCAL_AI_URL", None)
+        else:
+            _os.environ["LOCAL_AI_URL"] = _url_prev
+
+    # ── 4) Argumentos raros ────────────────────────────────────────────
+    import telegram_bot as tb
+    comprobar("_entero_creditos: '1.000.000' → 1000000",
+              tb._entero_creditos("1.000.000") == 1000000)
+    comprobar("'1,000,000' → 1000000", tb._entero_creditos("1,000,000") == 1000000)
+    comprobar("'1.5' NO es 15 (antes: techo de 15 créditos)",
+              tb._entero_creditos("1.5") is None)
+    comprobar("'inf' y 'nan' no revientan: None",
+              tb._entero_creditos("inf") is None
+              and tb._entero_creditos("nan") is None)
+    comprobar("'-5' → None", tb._entero_creditos("-5") is None)
+    def _sin_reventar(fn, *a):
+        try:
+            return fn(*a)
+        except Exception as e:
+            return f"REVENTÓ: {e}"
+    comprobar("_entero_no_negativo('inf') → None (antes OverflowError sin "
+              "capturar en /topalertas)",
+              _sin_reventar(tb._entero_no_negativo, "inf") is None
+              and _sin_reventar(tb._entero_no_negativo, "nan") is None
+              and tb._entero_no_negativo("30") == 30
+              and tb._entero_no_negativo("-1") is None)
+    comprobar("_monto_backtest('nan') → el defecto, no 50 SOL",
+              tb._monto_backtest("nan") == 0.5
+              and tb._monto_backtest("inf") == 0.5
+              and tb._monto_backtest("2") == 2.0)
+
+    from db import get_setting as _gs2
+    set_setting(conn, "min_signal_score", "40")
+    set_setting(conn, "umbral_manual", "0")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        r_none = ag.execute_action({"tool": "cambiar_umbral_senal",
+                                    "args": {}})
+        r_abc = ag.execute_action({"tool": "cambiar_umbral_senal",
+                                   "args": {"valor": "abc"}})
+        r_nan = ag.execute_action({"tool": "cambiar_umbral_senal",
+                                   "args": {"valor": "nan"}})
+    comprobar("umbral sin valor / 'abc' / 'nan' → rechazado SIN tocar "
+              "settings (antes ejecutaba min_signal_score=0 + manual)",
+              all("inválido" in x.lower() or "invalido" in x.lower()
+                  for x in (r_none, r_abc, r_nan))
+              and str(_gs2(conn, "min_signal_score", "")) == "40"
+              and str(_gs2(conn, "umbral_manual", "")) == "0",
+              f"{r_none[:60]} | {r_abc[:60]} | {r_nan[:60]} | "
+              f"{_gs2(conn, 'min_signal_score', '')}")
+    comprobar("y la descripción del botón no pinta 'None/100'",
+              "None" not in ag.describe_action(
+                  {"tool": "cambiar_umbral_senal", "args": {}}))
+
+    # ── 5) Un resultado de error NO sale con ✅ ni queda como "hecha" ──
+    comprobar("execute_action marca sus errores de forma reconocible",
+              ag.es_error_accion("Error ejecutando la acción: boom")
+              and ag.es_error_accion(r_abc)
+              and not ag.es_error_accion("🎯 Umbral fijado en 40/100"))
+    comprobar("el botón de confirmar distingue error de éxito",
+              tb._texto_resultado_accion("Error ejecutando la acción: x")
+              .startswith("⚠️")
+              and tb._texto_resultado_accion("🎯 Umbral fijado").startswith("✅"),
+              "antes: ✅ sobre 'Error ejecutando'")
+    comprobar("y on_callback usa esa función (no el ✅ a pelo)",
+              "_texto_resultado_accion(resultado)" in
+              _insp.getsource(tb.on_callback))
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -11386,6 +11579,7 @@ def main():
     prueba_19y()
     prueba_19z()
     prueba_19aa()
+    prueba_19ab()
 
     print("\n" + "─" * 60)
     if _FALLOS:

@@ -547,7 +547,13 @@ def _chat_local(messages: list[dict]):
         # gasta el max_tokens pensando y el chat "no contesta" (18/8).
         msgs = [{"role": "system", "content": SYSTEM + "\n/no_think"}] \
             + messages
-        sin_tope = False   # se enciende si el razonamiento se come el tope
+        # (19-AB, auditoria BAJO) Se respeta lo que el puente YA aprendió
+        # (settings `modelo_pensante`): con Qwen pensante cada mensaje
+        # del chat quemaba un primer intento condenado de hasta 90 s
+        # antes de reintentar sin tope.
+        from ia_puente import _pensante, _aprender_pensante
+        sin_tope = bool(_pensante())   # o se enciende si el razonamiento
+        #                                 se come el tope (abajo)
         for _ in range(MAX_PASOS):
             cuerpo = {"model": modelo, "temperature": 0.3,
                       "messages": msgs,
@@ -577,6 +583,7 @@ def _chat_local(messages: list[dict]):
                         print("· Agente local: razonamiento comio el "
                               "tope; reintento SIN tope de tokens")
                         sin_tope = True
+                        _aprender_pensante()     # (19-AB) para todos
                         continue
                     # Vacio = fallo del modelo, no "no entendi":
                     # devolver None deja caer a la nube.
@@ -842,6 +849,28 @@ def _deshacer_ultimo(conn) -> str:
     return "↩️ Deshecho — " + " · ".join(partes) + "."
 
 
+def _umbral_valido(valor):
+    """(19-AB) float finito o None. -1 (negativo) significa automático."""
+    import math
+    try:
+        v = float(valor)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v) or math.isinf(v):
+        return None
+    return v
+
+
+def es_error_accion(resultado) -> bool:
+    """(19-AB) ¿`execute_action` devolvió un fallo, no un hecho? Antes el
+    botón de confirmar pintaba ✅ sobre "Error ejecutando…" y la acción
+    quedaba como hecha."""
+    r = str(resultado or "")
+    return r.startswith(("Error ejecutando", "Valor inválido",
+                         "Acción desconocida", "Falta el valor",
+                         "Fuera de rango", "Acción de paper no reconocida"))
+
+
 def describe_action(action: dict) -> str:
     tool, args = action["tool"], action.get("args", {})
     addr = (args.get("address") or "")[:12]
@@ -852,12 +881,12 @@ def describe_action(action: dict) -> str:
     if tool == "correr_ciclo":
         return "🔄 Correr el ciclo completo de descubrimiento y análisis"
     if tool == "cambiar_umbral_senal":
-        try:
-            if float(args.get("valor", 0)) < 0:
-                return "🎯 Volver el umbral de señal al modo AUTOMÁTICO"
-        except (TypeError, ValueError):
-            pass
-        return f"🎯 Fijar el umbral mínimo de señal en {args.get('valor')}/100"
+        v = _umbral_valido(args.get("valor"))
+        if v is None:
+            return "🎯 Cambiar el umbral de señal (valor inválido: no hará nada)"
+        if v < 0:
+            return "🎯 Volver el umbral de señal al modo AUTOMÁTICO"
+        return f"🎯 Fijar el umbral mínimo de señal en {v:g}/100"
     if tool == "cambiar_top_alertas":
         try:
             n = int(float(args.get("n", 0)))
@@ -996,7 +1025,15 @@ def _execute_action_serializado(action: dict) -> str:
                 conn.close()
         if tool == "cambiar_umbral_senal":
             from db import get_setting as _gs, set_setting
-            v_raw = float(args.get("valor", 0))
+            v_raw = _umbral_valido(args.get("valor"))
+            if v_raw is None:
+                # (19-AB) Sin valor, "abc" o nan: antes `float(None)`
+                # reventaba (y el botón decía "None/100"), y con nan
+                # `max(0, min(100, nan))` ejecutaba min_signal_score=0
+                # + umbral_manual=1 sin que nadie lo pidiera.
+                return ("Valor inválido para el umbral: usa un número de "
+                        "0 a 100, o -1 para volver al automático. No "
+                        "cambié nada.")
             if v_raw < 0:
                 # (Ola 15 - M1) Volver a AUTOMÁTICO también se registra:
                 # antes no era deshacible y un "deshacer" posterior
