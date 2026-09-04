@@ -325,11 +325,14 @@ def _exec_read(name: str, args: dict) -> str:
                     """SELECT address, alias, grade, wallet_score, ai_class,
                               is_tracked, winning_tokens_count
                        FROM wallets
-                       WHERE alias LIKE ? OR address LIKE ?
+                       WHERE LOWER(alias) LIKE LOWER(?) OR address LIKE ?
                        ORDER BY COALESCE(is_tracked,0) DESC,
                                 COALESCE(wallet_score,0) DESC
                        LIMIT 8""",
                     (f"%{texto}%", f"{texto}%")).fetchall()
+            # (19-AF) LOWER en los dos lados: en SQLite LIKE ya ignora
+            # mayusculas, en Postgres no. La direccion va tal cual
+            # (base58 distingue mayusculas).
             finally:
                 conn.close()
             if not rows:

@@ -12154,6 +12154,63 @@ def prueba_19ae():
                   encoding="utf-8").read())
 
 
+def prueba_19af():
+    bloque("19-AF - rama Postgres: secuencias reales, migracion completa, "
+           "busqueda por alias sin mayusculas")
+    import contextlib
+    import inspect as _insp
+    import io
+    from db import get_conn
+
+    conn = get_conn()
+    tablas = [r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%'").fetchall()]
+    con_id = set()
+    for t in tablas:
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({t})")]
+        if "id" in cols:
+            con_id.add(t)
+
+    # ── 1) restaurar_backup: solo tablas que tienen `id` ───────────────
+    import restaurar_backup as rb
+    _malas = [t for t, c in rb.SERIAL_TABLES if t not in con_id or c != "id"]
+    comprobar("SERIAL_TABLES del restaurador solo nombra tablas con columna "
+              "id (signals/errors/radar_tokens no la tienen)", not _malas,
+              f"sin id: {_malas}")
+    _faltan = sorted(t for t in con_id if t not in {x for x, _ in rb.SERIAL_TABLES}
+                     and t != "sqlite_sequence")
+    comprobar("y no le falta ninguna tabla con id", not _faltan, _faltan)
+
+    # ── 2) migrate_to_pg: migra TODAS las tablas del esquema ───────────
+    import migrate_to_pg as mp
+    _sin_migrar = sorted(t for t in tablas if t not in mp.TABLES
+                         and t != "sqlite_sequence")
+    comprobar("migrate_to_pg.TABLES cubre todas las tablas (antes faltaban "
+              "paper_fills y radar_tokens: el libro de idempotencia se "
+              "perderia)", not _sin_migrar, _sin_migrar)
+    _malas2 = [t for t, c in mp.SERIAL_TABLES if t not in con_id]
+    comprobar("y sus SERIAL_TABLES tienen id", not _malas2, _malas2)
+
+    # ── 3) buscar_billetera: alias sin distinguir mayusculas ───────────
+    import ai_agent as ag
+    conn.execute("DELETE FROM wallets")
+    conn.execute("INSERT INTO wallets (address, alias, is_tracked) VALUES "
+                 "('DIRECCIONLARGA1', 'BallenaAzul', 1)")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = ag._exec_read("buscar_billetera", {"texto": "ballena"})
+    comprobar("'ballena' encuentra 'BallenaAzul' (LOWER en los dos lados: "
+              "en Postgres LIKE distingue mayusculas)",
+              "DIRECCIONLARGA1" in r or "BallenaAzul" in r, r[:160])
+    _src = _insp.getsource(ag._exec_read)
+    comprobar("la consulta usa LOWER(alias) LIKE LOWER(?)",
+              "LOWER(alias) LIKE" in _src)
+    conn.execute("DELETE FROM wallets")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12211,6 +12268,7 @@ def main():
     prueba_19ac()
     prueba_19ad()
     prueba_19ae()
+    prueba_19af()
 
     print("\n" + "─" * 60)
     if _FALLOS:

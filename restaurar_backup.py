@@ -228,10 +228,12 @@ def _crear_tablas_perezosas(conn, tablas):
 
 
 # Tablas con `id` autonumerico en Postgres. Ver _resetear_secuencias.
-SERIAL_TABLES = [("appearances", "id"), ("signals", "id"),
-                 ("predictions", "id"), ("paper_trades", "id"),
-                 ("paper_fills", "id"), ("chat_history", "id"),
-                 ("errors", "id"), ("radar_tokens", "id")]
+# (19-AF) Solo tablas que TIENEN columna id: signals, errors y
+# radar_tokens no la tienen (firma, ts y mint son sus claves) y cada
+# restauracion imprimia tres "avisos" que no eran mas que este error.
+SERIAL_TABLES = [("appearances", "id"), ("predictions", "id"),
+                 ("paper_trades", "id"), ("paper_fills", "id"),
+                 ("chat_history", "id")]
 
 
 def _resetear_secuencias(conn):

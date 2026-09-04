@@ -29,9 +29,14 @@ TABLES = ["winning_tokens", "wallets", "appearances", "signals",
           # igual: 'trades' es el historial propio (lo más valioso) y
           # 'submitted_tokens' guarda tu feedback de qué tokens valen.
           "trades", "submitted_tokens", "wallet_identity",
-          "wallet_funding", "errors"]
+          "wallet_funding", "errors",
+          # (19-AF) Faltaban: paper_fills es el libro de idempotencia de
+          # las ventas del paper (sin el, tras migrar se volverian a
+          # aplicar) y radar_tokens el registro del radar.
+          "paper_fills", "radar_tokens"]
 SERIAL_TABLES = [("appearances", "id"), ("chat_history", "id"),
-                 ("paper_trades", "id"), ("predictions", "id")]
+                 ("paper_trades", "id"), ("predictions", "id"),
+                 ("paper_fills", "id")]
 
 TAG = "MIGRACION_DIAG"
 
