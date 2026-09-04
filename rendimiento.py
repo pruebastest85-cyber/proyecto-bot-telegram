@@ -16,13 +16,22 @@ def _pct(n, d):
 
 
 def _medidas(conn):
-    """Señales de compra con resultado medido."""
+    """Señales de compra ALERTADAS con resultado medido.
+
+    (19-V) Solo `alerted = 1`. `signals` guarda las compras de TODAS las
+    vigiladas (⭐ y candidatas 👁, y bots hasta que se marcan): medido el
+    4/9, en siete dias habia 82 compras de ⭐ frente a 3.475 de candidatas
+    y 393 de bots. El "win rate" y el "capital final" describian en un
+    98 % operaciones que ni alertaron ni entraron al paper — no lo que
+    el bot habria copiado. Lo que se aviso es lo que se mide.
+    """
     return [dict(r) for r in conn.execute(
         """SELECT s.wallet, s.mint, s.symbol, s.sol, s.ts,
                   s.chg_1h, s.chg_24h, s.signal_score,
                   w.alias, w.ai_class, w.is_tracked
            FROM signals s LEFT JOIN wallets w ON w.address = s.wallet
            WHERE s.side = 'compra'
+             AND COALESCE(s.alerted, 0) = 1
              AND (s.chg_24h IS NOT NULL OR s.chg_1h IS NOT NULL)
            ORDER BY s.ts DESC""").fetchall()]
 
@@ -53,7 +62,7 @@ def rendimiento_text() -> str:
     n, wr, media = _grupo(filas)
     # (Ola 8, 21/8) El agregado mezcla señales medidas a 24h con señales
     # que solo tienen 1h: se dice en la cabecera.
-    out = ["📊 *Rendimiento de señales* "
+    out = ["📊 *Rendimiento de señales ALERTADAS* "
            f"({n} medidas; 24h, o 1h si no hay)\n",
            f"Win rate: *{wr:.0f}%* · resultado medio: {media:+.1f}%\n"]
 
@@ -138,7 +147,7 @@ def backtest_text(monto: float = 0.5, tp: float = 50.0) -> str:
     wr = _pct(wins, len(filas))
     icono = "🟢" if gan >= 0 else "🔴"
     return ("🧪 *Backtest de señales*\n\n"
-            f"Señales copiadas: {len(filas)} × {monto} SOL\n"
+            f"Señales alertadas copiadas: {len(filas)} × {monto} SOL\n"
             f"Regla de salida: TP +{tp:.0f}% solo si el CIERRE de 24h "
             f"lo alcanza; si no, resultado a 24h (o 1h si no hay)\n\n"
             f"Invertido: {invertido:.2f} SOL\n"

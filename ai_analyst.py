@@ -641,7 +641,16 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
                 from grading import grade_wallet
                 from influence import influence as _inf
                 gg = grade_wallet(profile, _inf(addr))
-                follow = gg["tier"] in ("Elite", "Seguimiento")
+                # (19-V) LA MISMA regla que con IA. Antes: `tier in
+                # (Elite, Seguimiento)`, o sea el criterio de
+                # grado_vinculante=1 aunque el dueño tenga /nota off. Una
+                # ⭐ con nota Observacion la conservaba si la IA contestaba
+                # y la PERDIA si la IA no llegaba a tiempo (modelo pensante,
+                # 30-90 s por billetera). Medido el 4/9: 13 ex-estrellas con
+                # motivo "[sin IA] Observacion" y PnL de +236, +103, +90 SOL
+                # sin ⭐. Dos criterios distintos decidian la misma estrella
+                # segun si LM Studio respondia.
+                follow = not nota_bloquea(conn, gg["tier"])
                 verdict = {
                     "clasificacion": "trader" if follow else "indeterminado",
                     "seguir": follow,

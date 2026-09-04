@@ -2199,7 +2199,15 @@ async def cmd_vaciar_cola(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"· vaciarcola: aviso perdido ({e})")
 
-    if not vc.arrancar(techo_creditos=techo, avisar=_avisar):
+    # (19-V) En un HILO: `arrancar` escribe en settings (el contador de
+    # partida y la marca de 19-R) y `set_setting` pide el candado de
+    # escritura con busy_timeout=30000. Con el ciclo o la fase B de
+    # track_outcomes escribiendo, hacerlo aqui congelaba el bot entero
+    # hasta 30 s — la misma regla que 19-F cerro en cuatro comandos y
+    # que yo me salte en mi propio codigo (19-K/19-R). Cazado en la
+    # auditoria del 4/9.
+    if not await asyncio.to_thread(vc.arrancar, techo_creditos=techo,
+                                   avisar=_avisar):
         await _send_md(chat, "Ya hay un vaciado en marcha.")
         return
     await _send_md(chat, (
@@ -2695,7 +2703,10 @@ async def _post_init(app: Application):
             except Exception as _e:
                 print(f"· vaciarcola: aviso de arranque perdido ({_e})")
 
-        if _vc.reanudar_si_procede(avisar=_avisar_pi):
+        # (19-V) Tambien en hilo: `reanudar_si_procede` lee y escribe
+        # settings, y _post_init corre en el event loop.
+        if await asyncio.to_thread(_vc.reanudar_si_procede,
+                                   avisar=_avisar_pi):
             print("· vaciarcola: habia uno en curso; reanudado")
     except Exception as e:
         print(f"· vaciarcola: no pude comprobar si habia uno en curso: {e}")
@@ -3333,6 +3344,115 @@ def _saldos_text():
     return "\n".join(out)
 
 
+# (19-V) `_con_reloj` vivia anidada en `main()` sin usar nada de su
+# ambito. Se saca a nivel de modulo, SIN tocar su cuerpo, para poder
+# probar su comportamiento (CicloOmitido, relojes) ejecutandola.
+def _con_reloj(nombre: str, fn, intervalo: int | None = None):
+    # (Ola 17-B, auditoría 4) El reloj persistente calculaba bien
+    # cuánto FALTABA, pero lo metía en un único `first` de horas o
+    # días. El supervisor reinicia el bot con cada commit, y cada
+    # reinicio volvía a programar ese `first` desde cero: un job
+    # cuyo `first` es más largo que el tiempo entre reinicios NO
+    # CORRE JAMÁS. Medido en la base del dueño: `post_mortem` con
+    # `job_ts` de 140,8 h y SIN `job_intento` — o sea, ni un intento
+    # en 6 días, cuando debía correr cada 7.
+    # Ahora el job se registra con un sondeo corto y es este envoltorio
+    # el que decide si toca. Un reinicio ya no reinicia nada: el
+    # tiempo lo lleva la base, no el proceso.
+    def _leer_reloj(nom):
+        from db import get_setting
+        _c0 = get_conn()
+        try:
+            return max(
+                float(get_setting(_c0, f"job_ts:{nom}", 0) or 0),
+                float(get_setting(_c0, f"job_intento:{nom}", 0) or 0))
+        finally:
+            _c0.close()
+
+    async def _w(ctx):
+        if intervalo:
+            try:
+                # (Ola 17-E) En un HILO, igual que el marcado de tres
+                # lineas mas abajo: `get_conn()` en el bucle asincrono
+                # congela el bot mientras dura, y esto corre en cada
+                # tick de sondeo de los 7 jobs (con Postgres remoto,
+                # cada conexion son decenas de ms).
+                _last = await asyncio.to_thread(_leer_reloj, nombre)
+                if _last and (_t.time() - _last) < intervalo:
+                    return                     # aún no toca
+            except Exception:
+                pass       # si no se puede leer el reloj, se ejecuta
+        # (Ola 15 - B3, corregido en Ola 16) DOS relojes:
+        #   job_intento:<n>  → SIEMPRE, haya ido bien o mal.
+        #   job_ts:<n>       → solo cuando el job terminó BIEN.
+        # Con un solo reloj marcado en éxito, un auto_cycle que falla
+        # (429 de Helius, Gecko caído) dejaba el reloj viejo y CADA
+        # reinicio disparaba un ciclo completo a los 60 s — justo el
+        # bug de la Ola 5 que el reloj persistente vino a cerrar.
+        # `_reloj_first` usa el más reciente de los dos, así que un
+        # fallo ya no adelanta nada, y el éxito sigue siendo lo que
+        # marca el ritmo real.
+        # (Ola 17-B) Antes, 6 de los 7 jobs envueltos se tragaban su
+        # propia excepción, así que `_ok` era SIEMPRE True y `job_ts`
+        # se marcaba "terminó bien" aunque el backup o el aprendizaje
+        # hubieran reventado por dentro. Ahora esos jobs propagan el
+        # fallo (`raise`) y aquí se captura: el reloj de éxito no se
+        # marca, y la excepción no sale al job_queue.
+        _ok, _err, _omitido = False, None, False
+        try:
+            await fn(ctx)
+            _ok = True
+        except CicloOmitido as e:
+            # (19-V) Un ciclo OMITIDO por candado no es un fallo ni
+            # un exito: no se toca ningun reloj. Antes caia en el
+            # `except` generico, `_marcar(False)` sellaba
+            # `job_intento`, y como `_leer_reloj` usa el mas reciente
+            # de los dos relojes, el siguiente sondeo esperaba
+            # AUTO_CYCLE_HOURS enteras. Con /vaciarcola tomando y
+            # soltando el candado durante horas, el ciclo automatico
+            # —y con el `run_discovery`, la unica fuente de tokens
+            # nuevos— casi no corria; y cada choque se apuntaba en
+            # /errores como fallo. La docstring de CicloOmitido
+            # prometia "se reintenta en 30 min" y no era verdad.
+            _omitido = True
+            print(f"· {nombre}: {e} — reloj intacto, se reintenta "
+                  f"en el siguiente sondeo")
+        except Exception as e:
+            _err = e
+        finally:
+            # El marcado va a un HILO: `get_conn()` en el bucle
+            # asíncrono congela el bot entero mientras dura, y esto
+            # corre en cada tick de los 7 jobs, falle o no.
+            def _marcar(ok):
+                try:
+                    from db import set_setting
+                    _c = get_conn()
+                    try:
+                        set_setting(_c, f"job_intento:{nombre}",
+                                    _t.time())
+                        if ok:
+                            set_setting(_c, f"job_ts:{nombre}",
+                                        _t.time())
+                    finally:
+                        _c.close()
+                except Exception as e:
+                    # (19-V) Antes: `pass`. Un reloj que no se pudo
+                    # marcar hacia que el job (ciclo completo incluido)
+                    # se repitiera a los 30 min sin ninguna traza.
+                    print(f"· {nombre}: no pude marcar el reloj ({e})")
+            if not _omitido:            # omitido: ni intento ni exito
+                await asyncio.to_thread(_marcar, _ok)
+            if not _ok and not _omitido:
+                print(f"· {nombre}: falló ({_err}) — el reloj de éxito "
+                      f"no se marca; el ritmo lo fija el intento")
+                try:
+                    from errores import record as _rec
+                    await asyncio.to_thread(_rec, f"job:{nombre}", _err)
+                except Exception:
+                    pass
+    return _w
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN. Créalo con @BotFather.")
@@ -3479,94 +3599,6 @@ def main():
     # (Ola 17-B) Cada cuánto se COMPRUEBA si un job toca. Ver _con_reloj.
     _SONDEO_MAX = 1800
 
-    def _con_reloj(nombre: str, fn, intervalo: int | None = None):
-        # (Ola 17-B, auditoría 4) El reloj persistente calculaba bien
-        # cuánto FALTABA, pero lo metía en un único `first` de horas o
-        # días. El supervisor reinicia el bot con cada commit, y cada
-        # reinicio volvía a programar ese `first` desde cero: un job
-        # cuyo `first` es más largo que el tiempo entre reinicios NO
-        # CORRE JAMÁS. Medido en la base del dueño: `post_mortem` con
-        # `job_ts` de 140,8 h y SIN `job_intento` — o sea, ni un intento
-        # en 6 días, cuando debía correr cada 7.
-        # Ahora el job se registra con un sondeo corto y es este envoltorio
-        # el que decide si toca. Un reinicio ya no reinicia nada: el
-        # tiempo lo lleva la base, no el proceso.
-        def _leer_reloj(nom):
-            from db import get_setting
-            _c0 = get_conn()
-            try:
-                return max(
-                    float(get_setting(_c0, f"job_ts:{nom}", 0) or 0),
-                    float(get_setting(_c0, f"job_intento:{nom}", 0) or 0))
-            finally:
-                _c0.close()
-
-        async def _w(ctx):
-            if intervalo:
-                try:
-                    # (Ola 17-E) En un HILO, igual que el marcado de tres
-                    # lineas mas abajo: `get_conn()` en el bucle asincrono
-                    # congela el bot mientras dura, y esto corre en cada
-                    # tick de sondeo de los 7 jobs (con Postgres remoto,
-                    # cada conexion son decenas de ms).
-                    _last = await asyncio.to_thread(_leer_reloj, nombre)
-                    if _last and (_t.time() - _last) < intervalo:
-                        return                     # aún no toca
-                except Exception:
-                    pass       # si no se puede leer el reloj, se ejecuta
-            # (Ola 15 - B3, corregido en Ola 16) DOS relojes:
-            #   job_intento:<n>  → SIEMPRE, haya ido bien o mal.
-            #   job_ts:<n>       → solo cuando el job terminó BIEN.
-            # Con un solo reloj marcado en éxito, un auto_cycle que falla
-            # (429 de Helius, Gecko caído) dejaba el reloj viejo y CADA
-            # reinicio disparaba un ciclo completo a los 60 s — justo el
-            # bug de la Ola 5 que el reloj persistente vino a cerrar.
-            # `_reloj_first` usa el más reciente de los dos, así que un
-            # fallo ya no adelanta nada, y el éxito sigue siendo lo que
-            # marca el ritmo real.
-            # (Ola 17-B) Antes, 6 de los 7 jobs envueltos se tragaban su
-            # propia excepción, así que `_ok` era SIEMPRE True y `job_ts`
-            # se marcaba "terminó bien" aunque el backup o el aprendizaje
-            # hubieran reventado por dentro. Ahora esos jobs propagan el
-            # fallo (`raise`) y aquí se captura: el reloj de éxito no se
-            # marca, y la excepción no sale al job_queue.
-            _ok, _err = False, None
-            try:
-                await fn(ctx)
-                _ok = True
-            except Exception as e:
-                _err = e
-            finally:
-                # El marcado va a un HILO: `get_conn()` en el bucle
-                # asíncrono congela el bot entero mientras dura, y esto
-                # corre en cada tick de los 7 jobs, falle o no.
-                def _marcar(ok):
-                    try:
-                        from db import set_setting
-                        _c = get_conn()
-                        try:
-                            set_setting(_c, f"job_intento:{nombre}",
-                                        _t.time())
-                            if ok:
-                                set_setting(_c, f"job_ts:{nombre}",
-                                            _t.time())
-                        finally:
-                            _c.close()
-                    except Exception:
-                        pass
-                try:
-                    await asyncio.to_thread(_marcar, _ok)
-                except Exception:
-                    pass
-                if not _ok:
-                    print(f"· {nombre}: falló ({_err}) — el reloj de éxito "
-                          f"no se marca; el ritmo lo fija el intento")
-                    try:
-                        from errores import record as _rec
-                        await asyncio.to_thread(_rec, f"job:{nombre}", _err)
-                    except Exception:
-                        pass
-        return _w
 
     # Ciclo automático: cada N horas DE VERDAD (reloj persistente)
     _iv = int(AUTO_CYCLE_HOURS * 3600)

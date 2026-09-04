@@ -9324,10 +9324,18 @@ def prueba_19r():
                 _x = _p
             return False
 
+        def _es_reanudar(nodo):
+            return (getattr(nodo, "attr", None)
+                    or getattr(nodo, "id", "")) == "reanudar_si_procede"
+
+        # (19-V) La llamada ahora va EN HILO: `asyncio.to_thread(
+        # _vc.reanudar_si_procede, ...)`. Es la misma llamada, en el
+        # sitio correcto; se acepta la directa o la de to_thread.
         _llamadas = [n for n in _a19.walk(_pi or _arb)
                      if isinstance(n, _a19.Call)
-                     and getattr(n.func, "attr", getattr(n.func, "id", ""))
-                     == "reanudar_si_procede"]
+                     and (_es_reanudar(n.func)
+                          or (getattr(n.func, "attr", "") == "to_thread"
+                              and n.args and _es_reanudar(n.args[0])))]
         comprobar("_post_init llama a la reanudacion al arrancar el bot",
                   _pi is not None and len(_llamadas) >= 1,
                   f"_post_init={_pi is not None}, {len(_llamadas)} llamadas")
@@ -9835,6 +9843,296 @@ def prueba_19u():
         conn.close()
 
 
+def prueba_19v():
+    bloque("19-V - bloque 0 de la auditoria del 4/9: cinco arreglos")
+    import ast as _a
+    import asyncio as _aio
+    import contextlib
+    import inspect as _insp
+    import io as _io
+    import os as _os
+    import time as _t
+    import types as _ty
+    import telegram_bot as tb
+    from db import get_conn, get_setting, set_setting
+
+    conn = get_conn()
+
+    # ── 1) M1: ningun escritor conocido corre en el event loop ────────
+    # La prueba de 19-F solo miraba `set_setting` directo; `vc.arrancar`
+    # escribe a traves de el y se colo. Ahora se vigilan tambien las
+    # funciones que ESCRIBEN aunque no se llamen set_setting.
+    _arbol = _a.parse(_insp.getsource(tb))
+    _escritores = {"set_setting", "arrancar", "reanudar_si_procede"}
+    _culpables = []
+    for _n in _a.walk(_arbol):
+        if not isinstance(_n, _a.AsyncFunctionDef):
+            continue
+        _anidadas = {id(x) for d in _a.walk(_n)
+                     if isinstance(d, _a.FunctionDef)
+                     for x in _a.walk(d)}
+        for _c in _a.walk(_n):
+            if not isinstance(_c, _a.Call) or id(_c) in _anidadas:
+                continue
+            _f = _c.func
+            _nom = getattr(_f, "attr", None) or getattr(_f, "id", "")
+            if _nom in _escritores:
+                _culpables.append(f"{_n.name}:{_c.lineno}")
+    comprobar("ninguna corrutina llama a un escritor de settings "
+              "directamente (ni set_setting ni arrancar/reanudar)",
+              not _culpables, f"lo hacen: {_culpables}")
+    # Y la llamada correcta existe (no vale con borrarla).
+    _src_tb = _insp.getsource(tb)
+    comprobar("/vaciarcola arranca el vaciado EN HILO",
+              "to_thread(vc.arrancar" in _src_tb)
+    comprobar("y la reanudacion de _post_init tambien",
+              "to_thread(_vc.reanudar_si_procede" in _src_tb)
+
+    # ── 2) C1: el respaldo sin IA usa la MISMA regla que la IA ────────
+    import config as cfg
+    import ai_analyst as aa
+    import grading as _gr
+    import influence as _infl
+    ahora = int(_t.time())
+    _prev = {k: getattr(cfg, k, None) for k in
+             ("FILTRO_PUERTA_PROMOCION", "MIN_WINNING_TOKENS",
+              "MIN_BUY_SOL", "MIN_ENTRY_MULTIPLE", "MAX_EVAL_PER_CYCLE",
+              "EVAL_ADAPTATIVO")}
+    _reales = {"perfil": aa.profile_wallet, "ia": aa.ai_verdict,
+               "grade": _gr.grade_wallet, "inf": _infl.influence}
+    try:
+        cfg.FILTRO_PUERTA_PROMOCION = 1
+        cfg.MIN_WINNING_TOKENS = 1
+        cfg.MIN_BUY_SOL = 0.5
+        cfg.MIN_ENTRY_MULTIPLE = 3.0
+        cfg.EVAL_ADAPTATIVO = 0
+        cfg.MAX_EVAL_PER_CYCLE = 10
+        for t in ("wallets", "appearances", "signals"):
+            conn.execute(f"DELETE FROM {t}")
+        set_setting(conn, "grado_vinculante", "0")     # /nota off
+        conn.commit()
+
+        def _perfil(addr):
+            _tok = {f"MINT{i}": {"pnl_sol": 2.0, "buys": 2, "sells": 2}
+                    for i in range(10)}
+            return {"tx_sampled": 200, "tokens": _tok, "pnl_total_sol": 5.0,
+                    "net_pnl_sol": 5.0, "unrealized_sol": 0.0,
+                    "pnl_30d_sol": 5.0, "last_tx_ts": ahora - 3600,
+                    "tx_7d": 10, "possible_bot": False,
+                    "flips_1min_pct": 0, "active_hours_24": 5,
+                    "uniform_buys_pct": 0, "mm_tokens": 0,
+                    "held_tokens": 0, "closed_positions": 12,
+                    "win_rate_pct": 50, "hold_median_min": 60}
+
+        _tier = {"t": "Observación"}
+
+        def _grade(profile, inf=None):
+            return {"tier": _tier["t"], "score": 50,
+                    "reasons": ["PnL neto +100 SOL", "Profit Factor 3.0"]}
+
+        aa.profile_wallet = _perfil
+        aa.ai_verdict = lambda *a, **k: None          # la IA NO contesta
+        _gr.grade_wallet = _grade
+        _infl.influence = lambda *a, **k: {}
+
+        def _estrella(nombre):
+            conn.execute("DELETE FROM wallets")
+            conn.execute("DELETE FROM appearances")
+            conn.execute(
+                "INSERT INTO wallets (address, winning_tokens_count, is_bot, "
+                "is_tracked, confirmada, pnl_updated, turno_desde) "
+                "VALUES (?,3,0,1,1,'2020-01-01T00:00:00+00:00',?)",
+                (nombre, ahora - 30 * 86400))
+            conn.execute(
+                "INSERT INTO appearances (wallet, mint, reason, buy_sol, "
+                "entry_multiple) VALUES (?,?,'x',5.0,10.0)",
+                (nombre, f"AP{nombre}"))
+            conn.commit()
+
+        def _evaluar():
+            with contextlib.redirect_stdout(_io.StringIO()):
+                aa.evaluate_tracked(conn, limite=10)
+            r = conn.execute(
+                "SELECT is_tracked, ai_reason FROM wallets").fetchone()
+            return int(r["is_tracked"] or 0), (r["ai_reason"] or "")
+
+        # Observacion + /nota off + IA muda: la ⭐ SE CONSERVA (igual que
+        # con IA). Es el caso medido el 4/9: 13 ex-estrellas con +236,
+        # +103, +90 SOL perdidas por aqui.
+        _estrella("OBS")
+        tr, motivo = _evaluar()
+        comprobar("sin IA, una ⭐ 'Observación' CONSERVA la estrella con "
+                  "/nota off (misma regla que la IA)",
+                  tr == 1, f"is_tracked={tr} · {motivo[:80]}")
+        comprobar("y el motivo deja claro que decidio el respaldo",
+                  "[sin IA]" in motivo, motivo[:80])
+
+        # Con /nota on (grado_vinculante=1), Observacion NO lleva ⭐:
+        # el respaldo tambien lo respeta.
+        set_setting(conn, "grado_vinculante", "1")
+        conn.commit()
+        _estrella("OBS2")
+        tr, motivo = _evaluar()
+        comprobar("con /nota on, el respaldo SI le quita la ⭐ a "
+                  "'Observación' (respeta la nota)",
+                  tr == 0, f"is_tracked={tr} · {motivo[:80]}")
+        set_setting(conn, "grado_vinculante", "0")
+        conn.commit()
+
+        # Descartada: nunca lleva ⭐, con o sin IA, con o sin nota.
+        _tier["t"] = "Descartada"
+        _estrella("DESC")
+        tr, motivo = _evaluar()
+        comprobar("'Descartada' pierde la ⭐ tambien sin IA",
+                  tr == 0, f"is_tracked={tr} · {motivo[:80]}")
+        _tier["t"] = "Seguimiento"
+        _estrella("SEG")
+        tr, motivo = _evaluar()
+        comprobar("'Seguimiento' la conserva (lo que ya hacia)",
+                  tr == 1, f"is_tracked={tr} · {motivo[:80]}")
+    finally:
+        aa.profile_wallet = _reales["perfil"]
+        aa.ai_verdict = _reales["ia"]
+        _gr.grade_wallet = _reales["grade"]
+        _infl.influence = _reales["inf"]
+        for k, v in _prev.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        for t in ("wallets", "appearances", "signals"):
+            conn.execute(f"DELETE FROM {t}")
+        set_setting(conn, "grado_vinculante", "0")
+        conn.commit()
+
+    # ── 3) M2: un ciclo omitido no toca el reloj ni es un error ───────
+    for k in ("job_ts:prueba19v", "job_intento:prueba19v"):
+        conn.execute("DELETE FROM settings WHERE key=?", (k,))
+    conn.commit()
+    _errores_antes = conn.execute(
+        "SELECT COUNT(*) FROM errors").fetchone()[0]
+
+    async def _job_omitido(ctx):
+        raise tb.CicloOmitido("Ya hay un ciclo en curso; este intento se omitió.")
+
+    async def _job_roto(ctx):
+        raise RuntimeError("revento de verdad")
+
+    async def _job_bien(ctx):
+        return None
+
+    _ctx = _ty.SimpleNamespace()
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj("prueba19v", _job_omitido, 3600)(_ctx))
+    comprobar("un ciclo OMITIDO por candado NO sella 'job_intento' "
+              "(antes posponia el automatico 3 h enteras)",
+              get_setting(conn, "job_intento:prueba19v", None) is None,
+              get_setting(conn, "job_intento:prueba19v", None))
+    comprobar("ni 'job_ts'",
+              get_setting(conn, "job_ts:prueba19v", None) is None)
+    _errores_despues = conn.execute(
+        "SELECT COUNT(*) FROM errors").fetchone()[0]
+    comprobar("y NO se apunta en /errores (no es un fallo)",
+              _errores_despues == _errores_antes,
+              f"{_errores_antes} -> {_errores_despues}")
+    # Un fallo de verdad sigue sellando el intento y apuntandose.
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj("prueba19v", _job_roto, 3600)(_ctx))
+    comprobar("un fallo DE VERDAD sigue sellando 'job_intento'",
+              get_setting(conn, "job_intento:prueba19v", None) is not None)
+    comprobar("y sigue sin sellar 'job_ts'",
+              get_setting(conn, "job_ts:prueba19v", None) is None)
+    comprobar("y SI se apunta en /errores",
+              conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
+              == _errores_antes + 1)
+    # Y un exito sella los dos.
+    for k in ("job_ts:prueba19v", "job_intento:prueba19v"):
+        conn.execute("DELETE FROM settings WHERE key=?", (k,))
+    conn.commit()
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj("prueba19v", _job_bien, 3600)(_ctx))
+    comprobar("un exito sella los dos relojes",
+              get_setting(conn, "job_ts:prueba19v", None) is not None
+              and get_setting(conn, "job_intento:prueba19v", None) is not None)
+    for k in ("job_ts:prueba19v", "job_intento:prueba19v"):
+        conn.execute("DELETE FROM settings WHERE key=?", (k,))
+    conn.execute("DELETE FROM errors WHERE modulo LIKE 'job:prueba19v%'")
+    conn.commit()
+
+    # ── 4) M16: modelo descargado = CRIT si no hay nube ───────────────
+    import salud as _sa
+    import requests as _rq
+    _get_real = _rq.get
+    _key_prev = _os.environ.pop("ANTHROPIC_API_KEY", None)
+    set_setting(conn, "local_ai_url", "http://127.0.0.1:1")
+    set_setting(conn, "local_ai_model", "qwen-test")
+    conn.commit()
+    try:
+        class _R:
+            status_code = 200
+            def json(self):
+                return {"data": [{"id": "otro-modelo"}]}
+        _rq.get = lambda *a, **k: _R()
+        c = _sa._c_ia_local(conn)
+        comprobar("servidor vivo pero modelo DESCARGADO, sin nube: CRIT "
+                  "(antes WARN, y solo CRIT avisa por Telegram)",
+                  c["estado"] == _sa.CRIT, c)
+        class _R4(_R):
+            status_code = 500
+        _rq.get = lambda *a, **k: _R4()
+        c = _sa._c_ia_local(conn)
+        comprobar("HTTP 500 sin nube: tambien CRIT",
+                  c["estado"] == _sa.CRIT, c)
+        _os.environ["ANTHROPIC_API_KEY"] = "sk-prueba"
+        _rq.get = lambda *a, **k: _R()
+        c = _sa._c_ia_local(conn)
+        comprobar("con nube configurada se queda en WARN (hay respaldo)",
+                  c["estado"] == _sa.WARN, c)
+        class _ROK(_R):
+            def json(self):
+                return {"data": [{"id": "qwen-test"}]}
+        _rq.get = lambda *a, **k: _ROK()
+        c = _sa._c_ia_local(conn)
+        comprobar("y con el modelo cargado, OK",
+                  c["estado"] == _sa.OK, c)
+    finally:
+        _rq.get = _get_real
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+        if _key_prev is not None:
+            _os.environ["ANTHROPIC_API_KEY"] = _key_prev
+        for k in ("local_ai_url", "local_ai_model"):
+            conn.execute("DELETE FROM settings WHERE key=?", (k,))
+        conn.commit()
+
+    # ── 5) M3: /rendimiento y /backtest miden lo ALERTADO ─────────────
+    import rendimiento as _rd
+    conn.execute("DELETE FROM signals")
+    conn.execute("DELETE FROM wallets")
+    for i in range(6):
+        # 6 alertadas que GANAN, 40 silenciosas que PIERDEN
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, side, ts, "
+            "chg_24h, alerted) VALUES (?,?,?,?,?,?,1)",
+            (f"A{i}", "W1", f"M{i}", "compra", ahora - 3600 * i, 50.0))
+    for i in range(40):
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, side, ts, "
+            "chg_24h, alerted) VALUES (?,?,?,?,?,?,0)",
+            (f"S{i}", f"C{i}", f"N{i}", "compra", ahora - 60 * i, -30.0))
+    conn.commit()
+    txt = _rd.rendimiento_text()
+    comprobar("/rendimiento cuenta SOLO las alertadas (6, no 46)",
+              "(6 medidas" in txt, txt[:120])
+    comprobar("y lo dice en la cabecera",
+              "ALERTADAS" in txt, txt[:120])
+    comprobar("el win rate es el de lo alertado (100%), no el de la "
+              "mezcla (13%)", "Win rate: *100%*" in txt, txt[:200])
+    bt = _rd.backtest_text(1.0)
+    comprobar("/backtest copia solo las alertadas",
+              "copiadas: 6 ×" in bt and "alertadas" in bt, bt[:160])
+    conn.execute("DELETE FROM signals")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -9882,6 +10180,7 @@ def main():
     prueba_19s()
     prueba_19t()
     prueba_19u()
+    prueba_19v()
 
     print("\n" + "─" * 60)
     if _FALLOS:

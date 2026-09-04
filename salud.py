@@ -612,14 +612,21 @@ def _c_ia_local(conn):
             return _chk("IA local", WARN, "sin URL configurada",
                         "usa /ialocal <url>")
         import requests as _rq
+        # (19-V) La gravedad se decide UNA vez, para las tres formas de
+        # "sin IA". Antes solo la excepcion (servidor caido) era CRIT sin
+        # nube; el caso real del auto-unload —servidor vivo, modelo
+        # descargado— era WARN, y `revisar_y_avisar` solo avisa por
+        # Telegram con CRIT. La unica IA se apagaba y no llegaba ningun
+        # aviso; el analista y el A/B caian a reglas durante horas.
+        grave = CRIT if not os.getenv("ANTHROPIC_API_KEY") else WARN
         r = _rq.get(f"{url}/v1/models", timeout=4)
         if r.status_code >= 400:
-            return _chk("IA local", WARN,
+            return _chk("IA local", grave,
                         f"HTTP {r.status_code} en {_md_plano(url)}")
         modelos = [m.get("id") for m in r.json().get("data", [])]
         modelo = _modelo(conn)
         if modelo and modelos and modelo not in modelos:
-            return _chk("IA local", WARN,
+            return _chk("IA local", grave,
                         f"conectada pero sin el modelo {_md_plano(modelo)}",
                         "cárgalo en LM Studio (y revisa el auto-unload)")
         return _chk("IA local", OK,
