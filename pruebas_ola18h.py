@@ -7043,7 +7043,8 @@ def prueba_19d():
 
     # ── 1) La cola llena NO avanza el slot, y deja rastro ────────────
     import laserstream as ls
-    _put_real = ls._COLA.put_nowait
+    # (19-Y) Ahora hay una cola por worker: se tapan TODAS.
+    _put_real = [q.put_nowait for q in ls._COLAS]
     _guardado = []
     _gs_real = ls._guardar_slot
     _reg = []
@@ -7053,7 +7054,8 @@ def prueba_19d():
         def _cola_llena(t):
             raise Exception("Full")
 
-        ls._COLA.put_nowait = _cola_llena
+        for _q in ls._COLAS:
+            _q.put_nowait = _cola_llena
         ls._ULTIMO_AVISO_COLA[0] = 0.0
         import errores as _er
         _rec_real = _er.record
@@ -7088,14 +7090,16 @@ def prueba_19d():
         # normal, que es lo que de verdad importa proteger).
         _guardado.clear()
         _encolados = []
-        ls._COLA.put_nowait = lambda t: _encolados.append(t)
+        for _q in ls._COLAS:
+            _q.put_nowait = lambda t: _encolados.append(t)
         with contextlib.redirect_stdout(io.StringIO()):
             ls._procesar(__import__("json").dumps(_msg))
         comprobar("con la cola OK el slot sí avanza, como siempre",
                   _guardado == [999888777] and len(_encolados) == 1,
                   f"slot={_guardado} encolados={len(_encolados)}")
     finally:
-        ls._COLA.put_nowait = _put_real
+        for _q, _pn in zip(ls._COLAS, _put_real):
+            _q.put_nowait = _pn
         ls._guardar_slot = _gs_real
 
     # ── 2) tg_send_photo dice si Telegram aceptó ─────────────────────
@@ -10597,6 +10601,175 @@ def prueba_19x():
         conn.close()
 
 
+def prueba_19y():
+    bloque("19-Y - ingesta: orden por billetera, error del servidor, vaciado al salir, compra silenciada")
+    import contextlib
+    import io as _io
+    import json as _json
+    import random
+    import threading as _th
+    import time as _t
+    import laserstream as ls
+    import realtime as rt
+
+    # ── 1) Enrutado: misma billetera → mismo worker, y reparto ────────
+    t1 = {"feePayer": "Wallet_A", "signature": "s1"}
+    t2 = {"feePayer": "Wallet_A", "signature": "s2"}
+    comprobar("la misma billetera va SIEMPRE al mismo worker",
+              ls._indice_worker(t1) == ls._indice_worker(t2))
+    comprobar("y el indice esta dentro del pool",
+              0 <= ls._indice_worker(t1) < ls.N_WORKERS)
+    usados = {ls._indice_worker({"feePayer": f"W{i}"}) for i in range(300)}
+    comprobar("300 billeteras distintas usan TODOS los workers (no se "
+              "amontonan en uno)", len(usados) == ls.N_WORKERS, usados)
+    comprobar("sin feePayer cae a la firma, no revienta",
+              isinstance(ls._indice_worker({"signature": "x"}), int))
+
+    # ── 2) ORDEN real con hilos reales: compra antes que venta ─────────
+    # Se sustituye realtime.process_transactions por un registrador con
+    # esperas aleatorias (lo que hace que el desorden aparezca) y se
+    # mandan 40 pares compra/venta de 8 billeteras por el enrutado real.
+    _real_pt = rt.process_transactions
+    _colas_prev = ls._COLAS
+    _workers_prev = list(ls._WORKERS)
+    vistos = []
+    _mutex = _th.Lock()
+
+    def _registra(lote):
+        for t in lote:
+            _t.sleep(random.random() * 0.004)
+            with _mutex:
+                vistos.append((t["feePayer"], t["orden"]))
+    try:
+        rt.process_transactions = _registra
+        ls._COLAS = [ls._queue.Queue(maxsize=1000)
+                     for _ in range(ls.N_WORKERS)]
+        ls._WORKERS.clear()
+        with contextlib.redirect_stdout(_io.StringIO()):
+            ls._arrancar_workers()
+        orden = 0
+        for ronda in range(40):
+            for w in range(8):
+                for lado in ("compra", "venta"):
+                    orden += 1
+                    ls._COLAS[ls._indice_worker({"feePayer": f"B{w}"})].put(
+                        {"feePayer": f"B{w}", "signature": f"f{orden}",
+                         "orden": orden, "lado": lado})
+        fin = _t.time() + 20
+        while _t.time() < fin and any(q.qsize() or q.unfinished_tasks
+                                      for q in ls._COLAS):
+            _t.sleep(0.05)
+        por_wallet = {}
+        for w, o in vistos:
+            por_wallet.setdefault(w, []).append(o)
+        desorden = [w for w, lst in por_wallet.items()
+                    if lst != sorted(lst)]
+        comprobar("640 transacciones de 8 billeteras con 3 workers: "
+                  "NINGUNA billetera ve sus operaciones en desorden",
+                  len(vistos) == 640 and not desorden,
+                  f"{len(vistos)} vistas, desordenadas: {desorden}")
+    finally:
+        rt.process_transactions = _real_pt
+        ls._COLAS = _colas_prev
+        ls._WORKERS[:] = _workers_prev
+
+    # ── 3) ERROR del servidor → reconectar, y la siguiente sin fromSlot ─
+    ls._ESTADO["error_servidor"] = False
+    ls._OMITIR_SLOT[0] = False
+    with contextlib.redirect_stdout(_io.StringIO()):
+        ls._procesar(_json.dumps({"jsonrpc": "2.0", "id": 1,
+                                  "error": {"code": -32602,
+                                            "message": "fromSlot too old"}}))
+    comprobar("un ERROR del servidor pide reconectar (antes: seguia "
+              "'conectado' sin recibir nada hasta 10 min de silencio)",
+              ls._ESTADO.get("error_servidor") is True)
+    _cargar_prev = ls._cargar_slot
+    try:
+        ls._cargar_slot = lambda: 123456
+        with contextlib.redirect_stdout(_io.StringIO()):
+            desde = ls._slot_para_suscribir()
+        comprobar("la siguiente suscripcion va SIN fromSlot",
+                  desde is None, desde)
+        comprobar("y limpia la marca de error",
+                  ls._ESTADO.get("error_servidor") is False)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            desde2 = ls._slot_para_suscribir()
+        comprobar("solo UNA vez: la de despues vuelve a llevar el slot",
+                  desde2 == 123456, desde2)
+    finally:
+        ls._cargar_slot = _cargar_prev
+    import inspect as _insp
+    _src_b = _insp.getsource(ls._bucle)
+    comprobar("el bucle de recepcion rompe al ver la marca (no espera "
+              "10 min)", 'if _ESTADO.get("error_servidor"):' in _src_b
+              and "break" in _src_b.split('error_servidor")')[1][:400])
+
+    # ── 4) Al salir se vacian las colas (acotado) ────────────────────
+    _colas_prev = ls._COLAS
+    _workers_prev = list(ls._WORKERS)
+    try:
+        q = ls._queue.Queue()
+        ls._COLAS = [q]
+        for i in range(5):
+            q.put({"orden": i})
+        drenados = []
+
+        def _drena():
+            while True:
+                x = q.get()
+                _t.sleep(0.05)
+                drenados.append(x)
+                q.task_done()
+        w = _th.Thread(target=_drena, daemon=True, name="ls-worker-prueba")
+        ls._WORKERS[:] = [w]
+        w.start()
+        t0 = _t.time()
+        with contextlib.redirect_stdout(_io.StringIO()):
+            ls._vaciar_al_salir(limite_s=5)
+        comprobar("al salir espera a que los workers vacien la cola",
+                  len(drenados) == 5 and q.qsize() == 0,
+                  (len(drenados), q.qsize()))
+        comprobar("y no tarda mas de lo que hace falta",
+                  _t.time() - t0 < 3)
+        # Sin workers vivos no se queda colgado.
+        q2 = ls._queue.Queue()
+        q2.put({"x": 1})
+        ls._COLAS = [q2]
+        ls._WORKERS[:] = []
+        t0 = _t.time()
+        with contextlib.redirect_stdout(_io.StringIO()):
+            ls._vaciar_al_salir(limite_s=5)
+        comprobar("sin workers vivos vuelve enseguida (no bloquea el "
+                  "apagado)", _t.time() - t0 < 1.0)
+        comprobar("el atexit queda registrado al arrancar los workers",
+                  ls._ESTADO.get("_atexit") is True)
+    finally:
+        ls._COLAS = _colas_prev
+        ls._WORKERS[:] = _workers_prev
+
+    # ── 5) La compra silenciada TAMBIEN se copia ──────────────────────
+    import paper_trading as pt
+    _reales = (pt.open_trade, pt.close_on_wallet_sell)
+    llamadas = []
+    try:
+        pt.open_trade = lambda *a, **k: llamadas.append("open")
+        pt.close_on_wallet_sell = lambda *a, **k: llamadas.append("close")
+        trade = {"mint": "MINT_Y", "wallet": "W", "side": "compra"}
+        rt._copia_silenciada(None, trade, {}, 50, None, True, "silenciada")
+        rt._copia_silenciada(None, trade, {}, 50, None, False, "capada")
+        comprobar("una COMPRA silenciada abre el paper (antes: solo las "
+                  "ventas cerraban)", llamadas == ["open", "close"], llamadas)
+        import ast as _a
+        _fn = next(n for n in _a.walk(_a.parse(_insp.getsource(rt)))
+                   if isinstance(n, _a.FunctionDef) and n.name == "_proc")
+        _n = sum(1 for c in _a.walk(_fn) if isinstance(c, _a.Call)
+                 and getattr(c.func, "id", "") == "_copia_silenciada")
+        comprobar("las DOS ramas (umbral y tope anti-spam) la usan",
+                  _n == 2, f"{_n} llamadas")
+    finally:
+        pt.open_trade, pt.close_on_wallet_sell = _reales
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -10647,6 +10820,7 @@ def main():
     prueba_19v()
     prueba_19w()
     prueba_19x()
+    prueba_19y()
 
     print("\n" + "─" * 60)
     if _FALLOS:

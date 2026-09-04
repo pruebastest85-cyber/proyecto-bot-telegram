@@ -1229,12 +1229,8 @@ def _proc(txs: list[dict], conn):
             # (DexScreener transitorio) la posicion quedaba viva hasta
             # TP/SL/tiempo, corrompiendo lo que la simulacion mide. Es
             # idempotente via paper_fills: si ya se proceso, no-op.
-            if not es_compra:
-                try:
-                    import paper_trading
-                    paper_trading.close_on_wallet_sell(conn, trade, t, pos)
-                except Exception as e:
-                    print(f"· Paper (venta silenciada) falló: {e}")
+            _copia_silenciada(conn, trade, t, score_sig, pos, es_compra,
+                              "silenciada")
             continue
 
         # Máximo por señal: cap de alertas por billetera y por token en
@@ -1285,12 +1281,8 @@ def _proc(txs: list[dict], conn):
                 motivo = f"token ({n_t}/{max_t} en 1h)"
             print(f"🔇 Señal {t['symbol']} ({_side}) silenciada: "
                   f"máximo por {motivo} alcanzado")
-            if not es_compra:      # mismo criterio que el umbral (M2)
-                try:
-                    import paper_trading
-                    paper_trading.close_on_wallet_sell(conn, trade, t, pos)
-                except Exception as e:
-                    print(f"· Paper (venta capada) falló: {e}")
+            _copia_silenciada(conn, trade, t, score_sig, pos, es_compra,
+                              "capada")
             continue
 
         # ── Veredicto de IA: SOLO para señales que SÍ se alertan ──
@@ -1506,6 +1498,33 @@ def _proc(txs: list[dict], conn):
                     paper_trading.close_on_wallet_sell(conn, trade, t, pos)
         except Exception as e:
             print(f"· Paper trading falló: {e}")
+
+
+def _copia_silenciada(conn, trade, t, score_sig, pos, es_compra,
+                      etiqueta) -> None:
+    """(19-Y) El silencio es de la ALERTA, no de la copia — para compras
+    Y ventas.
+
+    La Ola 6 (M2) ya cerraba el paper cuando una VENTA quedaba silenciada
+    por umbral o tope. Las COMPRAS no: el `open_trade` de la via normal
+    esta despues de los dos `continue`, y el comentario del camino
+    caliente ("copia TODA operacion de una ⭐ del top; el umbral solo
+    gobierna las alertas") solo era verdad si el camino caliente habia
+    conseguido precio. Con un 429 de DexScreener y la 13ª señal de la
+    hora, la ⭐ compraba y el paper no. Idempotente: `open_trade` no abre
+    dos veces el mismo mint y `close_on_wallet_sell` mira `paper_fills`.
+    Mismo candado por mint que la via normal.
+    """
+    try:
+        import paper_trading
+        with _lock_mint(trade["mint"]):
+            if es_compra:
+                paper_trading.open_trade(conn, trade, t, score_sig)
+            else:
+                paper_trading.close_on_wallet_sell(conn, trade, t, pos)
+    except Exception as e:
+        print(f"· Paper ({'compra' if es_compra else 'venta'} {etiqueta}) "
+              f"falló: {e}")
 
 
 flask_app = Flask(__name__)

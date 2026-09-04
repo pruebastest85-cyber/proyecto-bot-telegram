@@ -61,32 +61,102 @@ N_WORKERS = 3              # hilos consumidores (Ola 5); la cola absorbe
 _COLA_MAX = 1000           # rafagas sin crear un hilo por mensaje
 
 import queue as _queue
-_COLA: "_queue.Queue" = _queue.Queue(maxsize=_COLA_MAX)
+# (19-Y) UNA COLA POR WORKER, y cada transaccion va a la cola que le toca
+# por BILLETERA (feePayer). Antes habia una sola cola y tres hilos sacando
+# de ella: la compra y la venta de una misma ⭐ (un sniper: segundos entre
+# una y otra) podian procesarse AL REVES — la venta llegaba "sin compra
+# vista" y no cerraba nada, y la compra dejaba `positions.tokens` positivo
+# para siempre y abria un paper de un token que la ⭐ ya habia soltado.
+# El candado por mint de realtime serializa, pero no ordena. Con todo lo
+# de una billetera en el mismo hilo, el orden de llegada se respeta.
+_COLAS: list = [_queue.Queue(maxsize=_COLA_MAX) for _ in range(N_WORKERS)]
 _WORKERS: list = []
+# (19-Y) Si el servidor rechazo la suscripcion, el siguiente intento va
+# SIN `fromSlot` (un slot demasiado viejo es el rechazo mas comun).
+_OMITIR_SLOT = [False]
+
+
+def _indice_worker(t: dict) -> int:
+    """(19-Y) A que worker va esta transaccion: siempre el mismo para la
+    misma billetera. CRC32 y no hash(): hash() cambia entre procesos."""
+    import zlib
+    clave = str(t.get("feePayer") or t.get("signature") or "")
+    return zlib.crc32(clave.encode("utf-8", "replace")) % N_WORKERS
+
+
+def _slot_para_suscribir():
+    """(19-Y) Desde que slot se pide la suscripcion: el guardado, salvo que
+    el servidor haya rechazado la anterior — entonces UNA vez sin slot
+    (si tambien falla, el error vuelve a encender la marca)."""
+    _ESTADO["error_servidor"] = False
+    if _OMITIR_SLOT[0]:
+        _OMITIR_SLOT[0] = False
+        print("· LaserStream: me suscribo SIN fromSlot (el servidor "
+              "rechazo la suscripcion anterior)")
+        return None
+    return _cargar_slot() or None
+
+
+def _vaciar_al_salir(limite_s: float = 8.0) -> None:
+    """(19-Y) Al apagarse, procesar lo que quede en las colas (acotado).
+
+    El slot se persiste al ENCOLAR. Con el apagado limpio de 19-W (CTRL_BREAK
+    → KeyboardInterrupt → atexit) hay ~10 s antes de que el supervisor
+    mate el proceso: se aprovechan para vaciar las colas, porque lo que
+    quede dentro al morir no vuelve (`fromSlot` reanuda DESPUES). Solo
+    espera; no bloquea si los workers ya no estan.
+    """
+    import time as _t
+    fin = _t.time() + limite_s
+    pendientes = sum(q.qsize() for q in _COLAS)
+    if not pendientes:
+        return
+    print(f"· LaserStream: vaciando {pendientes} transacciones en cola "
+          f"antes de salir (máx {limite_s:.0f} s)")
+    while _t.time() < fin and any(q.qsize() for q in _COLAS) \
+            and any(w.is_alive() for w in _WORKERS):
+        _t.sleep(0.1)
+    quedan = sum(q.qsize() for q in _COLAS)
+    if quedan:
+        print(f"· LaserStream: salgo con {quedan} sin procesar")
 # (19-D) Anti-ruido del aviso de cola llena: una tormenta descarta
 # cientos seguidas y no hace falta una fila de /errores por cada una.
 _ULTIMO_AVISO_COLA = [0.0]
 
 
-def _worker() -> None:
+def _worker(i: int) -> None:
     from realtime import process_transactions
+    cola = _COLAS[i]
     while True:
-        t = _COLA.get()
+        t = cola.get()
         try:
             process_transactions([t])
         except Exception as e:
             print(f"· LaserStream worker: {e}")
         finally:
-            _COLA.task_done()
+            cola.task_done()
 
 
 def _arrancar_workers() -> None:
-    vivos = [w for w in _WORKERS if w.is_alive()]
-    for i in range(N_WORKERS - len(vivos)):
-        w = threading.Thread(target=_worker, daemon=True,
-                             name=f"ls-worker-{i}")
+    # (19-Y) Un worker por cola, con su indice fijo: si el i-esimo murio,
+    # se relanza EL i-esimo (antes se relanzaban "los que faltaban" sin
+    # identidad, lo que con colas por worker dejaria una cola huerfana).
+    vivos = {w.name for w in _WORKERS if w.is_alive()}
+    for i in range(N_WORKERS):
+        nombre = f"ls-worker-{i}"
+        if nombre in vivos:
+            continue
+        w = threading.Thread(target=_worker, args=(i,), daemon=True,
+                             name=nombre)
         w.start()
         _WORKERS.append(w)
+    try:
+        import atexit
+        if not _ESTADO.get("_atexit"):
+            atexit.register(_vaciar_al_salir)
+            _ESTADO["_atexit"] = True
+    except Exception as e:
+        print(f"· LaserStream: sin vaciado al salir ({e})")
 
 
 def activo() -> bool:
@@ -178,6 +248,13 @@ def _procesar(mensaje: str) -> None:
             err = str(d.get("error") or "")[:200]
             print(f"· LaserStream: ERROR del servidor: {err}")
             _ESTADO["error"] = err[:120]
+            # (19-Y) Antes se registraba y se SEGUIA: el hilo quedaba
+            # "🟢 conectado" sin recibir nada, y a los 10 min de silencio
+            # re-suscribia con los MISMOS parametros (mismo fromSlot),
+            # que daban el mismo error. Ahora se pide reconectar YA y el
+            # siguiente intento va sin fromSlot.
+            _ESTADO["error_servidor"] = True
+            _OMITIR_SLOT[0] = True
             try:
                 from errores import record
                 record("laserstream", RuntimeError(err))
@@ -211,7 +288,7 @@ def _procesar(mensaje: str) -> None:
     # encola y N workers consumen: la concurrencia queda acotada y las
     # rafagas se absorben en la cola en vez de en hilos.
     try:
-        _COLA.put_nowait(t)
+        _COLAS[_indice_worker(t)].put_nowait(t)
     except Exception:
         # ── (19-D) EL DESCARTE NO AVANZA EL SLOT, Y NO ES MUDO ────────
         #
@@ -276,7 +353,7 @@ def _bucle() -> None:
         url = WS_URL.format(key=config.HELIUS_API_KEY)
         try:
             ws = websocket.create_connection(url, timeout=30)
-            ws.send(_suscripcion(direcciones, _cargar_slot() or None))
+            ws.send(_suscripcion(direcciones, _slot_para_suscribir()))
             huella = _huella(direcciones)
             _ESTADO.update({"conectado": True, "desde": time.time(),
                             "error": None})
@@ -294,6 +371,13 @@ def _bucle() -> None:
                 if mensaje:
                     ultimo_mensaje = time.time()
                     _procesar(mensaje)
+                    if _ESTADO.get("error_servidor"):
+                        # (19-Y) La suscripcion fue rechazada: reconectar
+                        # ahora, no a los 10 min.
+                        print("· LaserStream: reconecto tras el error del "
+                              "servidor")
+                        espera = 5
+                        break
                 ahora = time.time()
                 if ahora - ultimo_ping > 30:
                     try:
