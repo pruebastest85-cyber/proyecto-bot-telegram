@@ -618,9 +618,14 @@ def _check_streaks(conn):
     """Degrada ⭐ con racha perdedora: si sus últimas STREAK_N señales
     medidas a 24h cerraron todas en negativo, pierde la estrella.
     Se puede restaurar a mano con /rastrear <address>."""
+    # (19-AC, auditoria BAJO) Solo las ⭐ pueden degradarse: antes se
+    # recorrian TODAS las billeteras con señales medidas (miles) cada 15
+    # min, con una consulta por cada una, para descartar casi todas.
     ws = conn.execute(
-        "SELECT DISTINCT wallet FROM signals "
-        "WHERE side='compra' AND chg_24h IS NOT NULL").fetchall()
+        "SELECT DISTINCT s.wallet FROM signals s "
+        "JOIN wallets w ON w.address = s.wallet "
+        "WHERE s.side='compra' AND s.chg_24h IS NOT NULL "
+        "AND w.is_tracked = 1").fetchall()
     for row in ws:
         w = row["wallet"]
         info = conn.execute(

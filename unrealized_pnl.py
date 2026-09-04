@@ -90,6 +90,14 @@ def _sol_usd() -> float | None:
     """
     if _SOL_CACHE["px"] and time.time() - _SOL_CACHE["ts"] < 300:
         return _SOL_CACHE["px"]
+    # (19-AC, auditoria BAJO) Con DexScreener caida, CADA llamada volvia
+    # a pedir (15 s de timeout) porque el respaldo no refrescaba nada:
+    # un cierre con tres consultas de precio tardaba 45 s. Tras un fallo
+    # se usa el respaldo directamente durante 60 s.
+    if time.time() - _SOL_CACHE.get("reintento", 0) < 60:
+        px_r = _SOL_CACHE["px"]
+        if px_r and (time.time() - _SOL_CACHE["ts"]) / 3600.0 <= SOL_PX_MAX_H:
+            return px_r
     fallo = None
     try:
         r = requests.get(config.DEXSCREENER_TOKEN.format(address=WSOL),
@@ -107,6 +115,7 @@ def _sol_usd() -> float | None:
         fallo = f"{type(e).__name__}: {str(e)[:120]}"
 
     # No se pudo leer: respaldo con el ultimo precio conocido.
+    _SOL_CACHE["reintento"] = time.time()
     if _SOL_CACHE["px"]:
         edad_h = (time.time() - _SOL_CACHE["ts"]) / 3600.0
         if edad_h <= SOL_PX_MAX_H:

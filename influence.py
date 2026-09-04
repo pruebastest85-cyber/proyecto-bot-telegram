@@ -467,11 +467,16 @@ def influencia_ligera(address: str) -> dict | None:
             "avg_lag_s": w.get("avg_lag_s")}
 
 
-def influence(address: str, construir: bool = True) -> dict | None:
+def influence(address: str, construir: bool = True, g=None) -> dict | None:
     """`construir=False`: solo cache, nunca construye (ver `graph`). Con el
     cache frio devuelve None, que los llamadores del camino caliente ya
-    tratan como 'sin dato' (no como 'sin seguidores confirmado')."""
-    g = graph(construir=construir)
+    tratan como 'sin dato' (no como 'sin seguidores confirmado').
+
+    (19-AC) `g`: grafo ya en mano. `hidden_leaders` recorre cientos de
+    billeteras llamando aqui; si el TTL vencia a mitad del bucle, la
+    segunda mitad se calculaba sobre OTRO grafo."""
+    if g is None:
+        g = graph(construir=construir)
     if address not in g["wallets"]:
         return None
     salientes, entrantes = _indice_aristas(g)
@@ -567,7 +572,7 @@ def hidden_leaders(limit: int = 10) -> list[dict]:
         own = w.get("wallet_score") or 0
         if own >= 65:
             continue    # ya luce fuerte por sí sola; no es "oculta"
-        inf = influence(addr)
+        inf = influence(addr, g=g)
         top_followers = [f for f in inf["followers"]
                          if (g["wallets"].get(f["wallet"], {}).get("wallet_score") or 0) >= 65]
         if len(top_followers) >= 2:

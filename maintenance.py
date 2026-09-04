@@ -103,9 +103,17 @@ def send_db_backup():
             cap += "\n✅ Verificado (integrity_check ok)"
             # Comprimir para Telegram (50 MB por archivo).
             gz = path + ".gz"
-            with open(path, "rb") as fin, \
-                    gzip.open(gz, "wb", compresslevel=6) as fout:
-                shutil.copyfileobj(fin, fout)
+            try:
+                with open(path, "rb") as fin, \
+                        gzip.open(gz, "wb", compresslevel=6) as fout:
+                    shutil.copyfileobj(fin, fout)
+            except Exception:
+                # (19-AC) Un .gz a medias no vale y no debe quedar.
+                try:
+                    os.remove(gz)
+                except OSError:
+                    pass
+                raise
             os.remove(path)
             path, nombre = gz, nombre + ".gz"
 
@@ -184,9 +192,21 @@ def watchdog_check():
     """Alerta si no llegan transacciones de Helius hace >12h (máx 1/día)."""
     try:
         from realtime import LAST_HOOK_TS, tracked_addresses, tg_send
-        if not tracked_addresses() or LAST_HOOK_TS is None:
+        if not tracked_addresses():
             return
-        horas = (time.time() - LAST_HOOK_TS) / 3600
+        # (19-AC, auditoria BAJO) En local no hay webhook: LAST_HOOK_TS
+        # era None PARA SIEMPRE y el watchdog nunca miraba nada. La
+        # señal de vida real es la de LaserStream (`estado()["ultimo"]`);
+        # se toma la mas reciente de las dos.
+        _ultimo = float(LAST_HOOK_TS or 0)
+        try:
+            from laserstream import estado as _ls_estado
+            _ultimo = max(_ultimo, float(_ls_estado().get("ultimo") or 0))
+        except Exception as e:
+            print(f"· Watchdog: no pude leer LaserStream ({e})")
+        if not _ultimo:
+            return
+        horas = (time.time() - _ultimo) / 3600
         if horas < 12:
             return
         conn = get_conn()
@@ -198,8 +218,8 @@ def watchdog_check():
         conn.close()
         tg_send(f"⚠️ *Watchdog*: llevo {horas:.0f}h sin recibir "
                 "transacciones de Helius. Puede ser normal (billeteras "
-                "inactivas) o el webhook está caído — corre /ciclo para "
-                "resincronizarlo.")
+                "inactivas) o la conexión en tiempo real está caída — "
+                "mira /salud.")
     except Exception as e:
         print(f"· Watchdog falló: {e}")
 

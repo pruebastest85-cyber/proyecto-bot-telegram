@@ -134,6 +134,38 @@ def _monto_backtest(txt, defecto: float = 0.5) -> float:
     return max(0.05, min(50.0, v))
 
 
+def _ancla_diaria(ahora: float, hora_utc: int = 13) -> int:
+    """(19-AC) Epoch del ultimo `hora_utc`:00 UTC ya pasado (hoy, o ayer
+    si aun no llego)."""
+    import calendar as _cal
+    g = _t.gmtime(ahora)
+    ancla = _cal.timegm((g.tm_year, g.tm_mon, g.tm_mday, hora_utc, 0, 0,
+                         0, 0, 0))
+    if ancla > ahora:
+        ancla -= 86400
+    return int(ancla)
+
+
+def _toca_resumen_diario(conn=None, ahora=None,
+                         get_conn_cerrando: bool = False) -> bool:
+    """(19-AC) ¿Hay que mandar el resumen diario? Si el ultimo intento
+    (o exito) fue ANTES del ancla de hoy — o no hubo nunca — toca."""
+    from db import get_setting
+    ahora = _t.time() if ahora is None else ahora
+    ancla = _ancla_diaria(ahora)
+    _propia = None
+    if conn is None or get_conn_cerrando:
+        _propia = conn = get_conn()
+    try:
+        ultimo = max(
+            float(get_setting(conn, "job_ts:daily_summary", 0) or 0),
+            float(get_setting(conn, "job_intento:daily_summary", 0) or 0))
+    finally:
+        if _propia is not None:
+            _propia.close()
+    return ultimo < ancla
+
+
 def _texto_resultado_accion(resultado) -> str:
     """(19-AB) ✅ solo si de verdad se hizo; antes salía ✅ sobre
     "Error ejecutando…" y "Valor inválido…"."""
@@ -3102,6 +3134,7 @@ def _elite_text() -> str:
 async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💾 Preparando copia de la base de datos…")
     path = None
+    destino = None
     try:
         from backup import make_backup
         path, fname, caption = await asyncio.to_thread(make_backup)
@@ -3146,7 +3179,14 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 _c.close()
         await asyncio.to_thread(_marcar)
     except Exception as e:
-        await update.message.reply_text(f"No pude generar el backup: {e}")
+        # (19-AC) Si la copia YA esta en disco, lo que fallo fue el envio:
+        # decir "no pude generar" era falso y asustaba sin motivo.
+        if destino:
+            await update.message.reply_text(
+                f"La copia está guardada en el equipo ({destino}), pero "
+                f"no pude enviarla por Telegram: {e}")
+        else:
+            await update.message.reply_text(f"No pude generar el backup: {e}")
     finally:
         # (Ola 17-C) El borrado estaba dentro del try: si el envío fallaba
         # (base grande), el temporal se quedaba ahí para siempre.
@@ -3802,14 +3842,26 @@ def main():
     # Re-sincroniza el webhook con las ⭐ cada 30 min (nadie sin monitorear)
     app.job_queue.run_repeating(sync_webhook_job, interval=1800, first=300,
                                 name="sync_webhook")
-    # Resumen diario a las 13:00 UTC (~8am América)
-    import datetime as _dt
-    _now = _dt.datetime.now(_dt.timezone.utc)
-    _target = _now.replace(hour=13, minute=0, second=0, microsecond=0)
-    if _target <= _now:
-        _target += _dt.timedelta(days=1)
-    app.job_queue.run_repeating(daily_summary_job, interval=86400,
-                                first=(_target - _now).total_seconds(),
+    # Resumen diario a las 13:00 UTC (~8am América).
+    # (19-AC, auditoria BAJO) Antes: `first` calculado al arrancar y
+    # `interval=86400`. El supervisor reinicia el bot con cada commit
+    # (hoy, diez veces): un reinicio a las 12:59 volvia a programar el
+    # aviso para MAÑANA y el de hoy se perdia sin rastro. Ahora es un
+    # sondeo de 10 min que consulta el reloj persistente (`job_ts` /
+    # `job_intento`): toca si ya pasaron las 13:00 de hoy y el ultimo
+    # intento fue anterior a esa hora. Un reinicio ya no salta nada.
+    _daily_con_reloj = _con_reloj("daily_summary", daily_summary_job)
+
+    async def _daily_si_toca(ctx):
+        try:
+            _toca = await asyncio.to_thread(
+                lambda: _toca_resumen_diario(get_conn_cerrando=True))
+        except Exception as e:
+            print(f"· resumen diario: no pude leer el reloj ({e})")
+            return
+        if _toca:
+            await _daily_con_reloj(ctx)
+    app.job_queue.run_repeating(_daily_si_toca, interval=600, first=60,
                                 name="daily_summary")
 
     print(f"🤖 Bot corriendo. Ciclo automático cada {AUTO_CYCLE_HOURS:g} h.")

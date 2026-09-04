@@ -116,6 +116,23 @@ def make_backup() -> tuple[str, str, str]:
     finally:
         src.close()
     mb = os.path.getsize(path) / 1024 / 1024
+    # (19-AC, auditoria BAJO) integrity_check AQUI, sobre la copia, para
+    # que tambien la verifique el /backup manual (antes solo el job
+    # automatico lo hacia, en maintenance).
+    try:
+        chk_i = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            veredicto = chk_i.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            chk_i.close()
+    except sqlite3.Error as e:
+        veredicto = f"no se pudo comprobar ({e})"
+    if veredicto != "ok":
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ValueError(f"La copia no pasa integrity_check: {veredicto}")
     # (Ola 17-C) Y una copia con 0 filas en las tablas del historico
     # tampoco cuenta como copia, aunque el archivo exista y sea valido.
     filas = 0

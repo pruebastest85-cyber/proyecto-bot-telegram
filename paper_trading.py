@@ -89,6 +89,13 @@ def _f(conn, key: str, default: float) -> float:
         return default
 
 
+# (19-AC) Candado de proceso para el recuento final del tope de abiertas
+# + INSERT (ver open_trade). Cada worker tiene su conexion; el candado
+# solo cubre unos milisegundos.
+import threading as _threading_ap
+_APERTURA_LOCK = _threading_ap.Lock()
+
+
 def _enabled(conn) -> bool:
     return (get_setting(conn, "paper_enabled", "1") or "1").strip() != "0"
 
@@ -343,19 +350,32 @@ def open_trade(conn, trade: dict, token: dict, score,
     # ninguno de los dos. Cualquier otra excepción se vuelve a lanzar:
     # tragarlas sería esconder un fallo real de escritura.
     try:
-        conn.execute(
-            """INSERT INTO paper_trades
-               (signature, wallet, mint, symbol, stake_sol, stake_usd,
-                entry_price, entry_ts, signal_score, status,
-                tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
-                gestion, origen)
-               VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?)""",
-            (trade["signature"], trade["wallet"], trade["mint"], sym,
-             stake, stake_usd, price, trade["ts"], score,
-             str(cot["tokens_raw"]) if cot else None,
-             cot.get("slippage_pct") if cot else None,
-             costo_entrada, round(demora, 2), gestion, origen))
-        conn.commit()
+        # (19-AC, auditoria BAJO) El recuento del tope se hizo ANTES de
+        # hasta 30 s de red (simbolo + cotizacion): tres workers con tres
+        # tokens distintos lo pasaban a la vez y el tope se superaba.
+        # Se vuelve a contar aqui, bajo un candado de proceso, justo
+        # antes de escribir. El candado por mint no sirve: son mints
+        # distintos.
+        with _APERTURA_LOCK:
+            n2 = _abiertas_que_ocupan(conn)
+            if n2 >= max_abiertas:
+                print(f"· Paper: {n2} posiciones abiertas (máx "
+                      f"{max_abiertas}) al ir a escribir; no se abre "
+                      f"{sym}")
+                return False
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (signature, wallet, mint, symbol, stake_sol, stake_usd,
+                    entry_price, entry_ts, signal_score, status,
+                    tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
+                    gestion, origen)
+                   VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?)""",
+                (trade["signature"], trade["wallet"], trade["mint"], sym,
+                 stake, stake_usd, price, trade["ts"], score,
+                 str(cot["tokens_raw"]) if cot else None,
+                 cot.get("slippage_pct") if cot else None,
+                 costo_entrada, round(demora, 2), gestion, origen))
+            conn.commit()
     except Exception as e:
         _nombre = type(e).__name__
         if "Integrity" in _nombre or "Unique" in _nombre:
@@ -712,8 +732,13 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
         # no, `usd_salida` existe y se usa la formula clasica; mezclar
         # las dos fuentes contaria dos veces el mismo dinero, y preferir
         # una cifra incompleta a una inflada es la eleccion de la casa.
-        if usd_salida is None and realizado:
-            pnl_neto = realizado - stake_usd * frac - (costos or 0)
+        # (19-AC) La condicion era `realizado` (truthy): un parcial
+        # vendido EXACTAMENTE al precio de entrada deja realizado=0 y
+        # caia a la rama de abajo → perdida TOTAL del importe aunque la
+        # mitad se hubiera recuperado. Lo que dice si hubo parciales es
+        # `frac < 1`, no el signo de lo realizado.
+        if usd_salida is None and frac < 1:
+            pnl_neto = (realizado or 0) - stake_usd * frac - (costos or 0)
         else:
             pnl_neto = (usd_salida or 0) - stake_usd - (costos or 0)
 
@@ -2008,6 +2033,7 @@ def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
         corte = _desde
     r = conn.execute(
         "SELECT COUNT(*) n, SUM(pnl_usd) pnl, SUM(pnl_usd_neto) neto, "
+        "SUM(CASE WHEN pnl_usd_neto IS NOT NULL THEN 1 ELSE 0 END) n_neto, "
         "SUM(stake_usd) inv, "
         "SUM(CASE WHEN pnl_usd IS NULL AND pnl_sol IS NULL "
         "THEN 1 ELSE 0 END) sin_pnl, "
@@ -2038,7 +2064,11 @@ def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
         out.append(f"   Invertido {_usd(r['inv'])} → "
                    f"ROI *{100.0 * (pnl or 0) / r['inv']:+.1f}%*")
     if r["neto"] is not None:
-        out.append(f"   Con costos reales: *{_usd_firmado(r['neto'])}*")
+        # (19-AC) Se dice sobre cuantas: el neto solo existe en las que
+        # Jupiter cotizo, y sin la cifra parecia el neto de las n.
+        _nn = r["n_neto"] or 0
+        out.append(f"   Con costos reales: *{_usd_firmado(r['neto'])}*"
+                   + (f" (sobre {_nn} de {n})" if _nn != n else ""))
     for m in conn.execute(
             "SELECT exit_reason r, COUNT(*) n, SUM(pnl_usd) pnl_usd, "
             "SUM(pnl_sol) pnl FROM paper_trades "

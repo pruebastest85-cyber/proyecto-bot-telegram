@@ -11526,6 +11526,394 @@ def prueba_19ab():
     conn.close()
 
 
+def prueba_19ac():
+    bloque("19-AC - cotizacion en cero, neto de rug con parciales, tope de "
+           "abiertas, resumen diario con reloj, watchdog con LaserStream, "
+           "cache de RugCheck, estrella tocada a mitad, llegadas, "
+           "hidden_leaders, similarity con candado, backup verificado, "
+           "precio de SOL sin martillar, racha solo ⭐")
+    import contextlib
+    import io
+    import time as _t
+    import threading
+    from db import get_conn, set_setting
+
+    # ── 1) Jupiter con outAmount "0" NO es una cotización ──────────────
+    import ejecucion_simulada as es
+
+    class _R:
+        status_code = 200
+
+        def __init__(self, d):
+            self._d = d
+
+        def json(self):
+            return self._d
+    _get_prev = es.requests.get
+    try:
+        es.requests.get = lambda *a, **k: _R({"outAmount": "0",
+                                              "inAmount": "1000"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            q = es._quote("A", "B", 1000)
+            v = es.cotizar_venta("MINT", 1000, 100.0)
+            c = es.cotizar_compra("MINT", 10.0, 100.0)
+        comprobar("outAmount '0' → None (antes pasaba: 0 tokens y "
+                  "slippage 100 % falso)", q is None and v is None
+                  and c is None, f"q={q} v={v} c={c}")
+        es.requests.get = lambda *a, **k: _R({"outAmount": "5000",
+                                              "inAmount": "1000"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            q2 = es._quote("A", "B", 1000)
+        comprobar("y una cotización real sigue pasando",
+                  q2 and q2["outAmount"] == "5000")
+
+        def _explota(*a, **k):
+            raise RuntimeError("jupiter caido")
+        es.requests.get = _explota
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            es._quote("A", "B", 1000)
+        comprobar("un fallo de Jupiter se DICE", "jupiter caido" in _buf.getvalue())
+    finally:
+        es.requests.get = _get_prev
+
+    # ── 2) Rug con parciales vendidos A PRECIO DE ENTRADA ─────────────
+    import paper_trading as pt
+    conn = get_conn()
+    conn.execute("DELETE FROM paper_trades")
+    conn.execute("DELETE FROM paper_fills")
+    conn.commit()
+    ahora = int(_t.time())
+    conn.execute(
+        """INSERT INTO paper_trades (signature, wallet, mint, symbol,
+           stake_sol, stake_usd, entry_price, entry_ts, status,
+           fraccion_restante, pnl_realizado_usd, tokens_raw)
+           VALUES ('S1','W1','MRUG','RUG',1.0,100.0,0.01,?,'abierta',
+                   0.5, 0.0, NULL)""", (ahora - 3600,))
+    conn.commit()
+    _tg_prev, _px_prev = pt._tg, pt._sol_a_usd
+    pt._tg = lambda *a, **k: True
+    pt._sol_a_usd = lambda: 100.0
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, conn.execute(
+                "SELECT * FROM paper_trades WHERE signature='S1'").fetchone(),
+                0.0, "sin liquidez", "💀")
+        fila = conn.execute("SELECT pnl_usd_neto, pnl_usd FROM paper_trades "
+                            "WHERE signature='S1'").fetchone()
+        comprobar("la mitad vendida al precio de entrada (realizado 0) "
+                  "cuenta: neto ≈ -50 $, no -100 $ (pérdida total)",
+                  fila["pnl_usd_neto"] is not None
+                  and -55 <= fila["pnl_usd_neto"] <= -45,
+                  dict(fila))
+    finally:
+        pt._tg, pt._sol_a_usd = _tg_prev, _px_prev
+        conn.execute("DELETE FROM paper_trades")
+        conn.execute("DELETE FROM paper_fills")
+        conn.commit()
+
+    # ── 3) Tope de abiertas: recuento JUSTO antes de escribir ──────────
+    set_setting(conn, "paper_max_abiertas", "1")
+    set_setting(conn, "paper_enabled", "1")
+    conn.commit()
+    _sr_prev, _sh_prev, _sdb_prev = (pt._symbol_rapido, pt._symbol_helius,
+                                     pt._symbol_db)
+    pt._symbol_rapido = lambda m: "SYM"
+    pt._symbol_helius = lambda m: None
+    pt._symbol_db = lambda c, m: None
+    pt._tg = lambda *a, **k: True
+    pt._sol_a_usd = lambda: 100.0
+    import ejecucion_simulada as _es
+    _cc_prev = _es.cotizar_compra
+    barrera = threading.Barrier(2, timeout=10)
+
+    def _cot_lenta(mint, usd, su):
+        try:
+            barrera.wait()          # los dos hilos pasaron el recuento
+        except Exception:
+            pass
+        return None
+    _es.cotizar_compra = _cot_lenta
+    res = []
+
+    def _abrir(sig, mint):
+        # OJO: sin redirect_stdout dentro de hilos — al salir del
+        # contexto cada hilo "restaura" el stdout que vio al entrar, y
+        # el proceso entero se quedaba mudo (todo lo posterior se
+        # perdia en un StringIO). Lo que imprima, que se vea.
+        c = get_conn()
+        try:
+            res.append(pt.open_trade(
+                c, {"signature": sig, "wallet": "W1", "mint": mint,
+                    "sol": 0.5, "ts": ahora, "price_usd": 0.01},
+                {"symbol": "SYM", "price": 0.01, "liq": 5000.0}, 50))
+        finally:
+            c.close()
+    try:
+        h1 = threading.Thread(target=_abrir, args=("SA", "MINTA"))
+        h2 = threading.Thread(target=_abrir, args=("SB", "MINTB"))
+        h1.start(); h2.start(); h1.join(20); h2.join(20)
+        n_ab = conn.execute("SELECT COUNT(*) c FROM paper_trades "
+                            "WHERE status='abierta'").fetchone()["c"]
+        comprobar("dos hilos con dos tokens y tope 1: solo se abre UNA "
+                  "(antes: el recuento iba 30 s de red antes del INSERT)",
+                  n_ab == 1 and sorted(res) == [False, True],
+                  f"abiertas={n_ab} res={res}")
+    finally:
+        _es.cotizar_compra = _cc_prev
+        pt._symbol_rapido, pt._symbol_helius, pt._symbol_db = (
+            _sr_prev, _sh_prev, _sdb_prev)
+        pt._tg, pt._sol_a_usd = _tg_prev, _px_prev
+        conn.execute("DELETE FROM paper_trades")
+        conn.execute("DELETE FROM settings WHERE key IN "
+                     "('paper_max_abiertas','paper_enabled')")
+        conn.commit()
+
+    # ── 4) Resumen diario con reloj persistente ────────────────────────
+    import telegram_bot as tb
+    hoy13 = tb._ancla_diaria(ahora)
+    comprobar("_ancla_diaria: el 13:00 UTC de HOY (o de ayer si aún no "
+              "son las 13)", hoy13 <= ahora and ahora - hoy13 < 86400
+              and _t.gmtime(hoy13).tm_hour == 13
+              and _t.gmtime(hoy13).tm_min == 0)
+    conn.execute("DELETE FROM settings WHERE key LIKE 'job_%:daily_summary'")
+    conn.commit()
+    comprobar("sin marca: toca mandarlo", tb._toca_resumen_diario(conn, ahora))
+    set_setting(conn, "job_intento:daily_summary", str(hoy13 + 10))
+    conn.commit()
+    comprobar("ya mandado tras el ancla de hoy: NO toca",
+              not tb._toca_resumen_diario(conn, ahora))
+    set_setting(conn, "job_intento:daily_summary", str(hoy13 - 10))
+    conn.commit()
+    comprobar("mandado ANTES del ancla (un reinicio a las 12:59 lo "
+              "saltaba): SÍ toca", tb._toca_resumen_diario(conn, ahora))
+    conn.execute("DELETE FROM settings WHERE key LIKE 'job_%:daily_summary'")
+    conn.commit()
+    import inspect as _insp
+    _src_main = _insp.getsource(tb.main)
+    comprobar("main programa el resumen por sondeo con reloj, no por "
+              "`first` calculado al arrancar",
+              "_daily_si_toca" in _src_main
+              and "daily_summary_job, interval=86400" not in _src_main)
+
+    # ── 5) Watchdog con LaserStream ────────────────────────────────────
+    import maintenance as mt
+    import realtime as rt
+    import laserstream as ls
+    _hook_prev = rt.LAST_HOOK_TS
+    _ult_prev = ls._ESTADO.get("ultimo")
+    _ta_prev = rt.tracked_addresses
+    _tg2_prev = rt.tg_send
+    enviados = []
+    rt.tracked_addresses = lambda: ["W1"]
+    rt.tg_send = lambda txt, **k: enviados.append(txt) or True
+    try:
+        rt.LAST_HOOK_TS = None                  # sin webhook (local)
+        ls._ESTADO["ultimo"] = _t.time() - 13 * 3600
+        conn.execute("DELETE FROM settings WHERE key='last_watchdog_alert'")
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            mt.watchdog_check()
+        comprobar("watchdog: sin webhook pero con LaserStream mudo 13 h → "
+                  "AVISA (antes: LAST_HOOK_TS None = mudo para siempre)",
+                  len(enviados) == 1 and "13" in enviados[0], enviados)
+        comprobar("y el aviso ya no manda a 'resincronizar el webhook'",
+                  "webhook" not in enviados[0].lower()
+                  and "/salud" in enviados[0], enviados)
+        enviados.clear()
+        conn.execute("DELETE FROM settings WHERE key='last_watchdog_alert'")
+        conn.commit()
+        ls._ESTADO["ultimo"] = _t.time() - 60
+        with contextlib.redirect_stdout(io.StringIO()):
+            mt.watchdog_check()
+        comprobar("con LaserStream vivo no avisa", enviados == [])
+    finally:
+        rt.LAST_HOOK_TS = _hook_prev
+        ls._ESTADO["ultimo"] = _ult_prev
+        rt.tracked_addresses, rt.tg_send = _ta_prev, _tg2_prev
+        conn.execute("DELETE FROM settings WHERE key='last_watchdog_alert'")
+        conn.commit()
+
+    # ── 6) RugCheck: no se cachea un chequeo con summary=None ──────────
+    import token_check as tc
+    _tget_prev = tc._get
+    tc._rug_cache.clear()
+    tc._dex_cache.clear()
+
+    def _get_sin_summary(url, **k):
+        if "summary" in url:
+            return None
+        if "report" in url or "full" in url.lower():
+            return {"token": {"mintAuthority": None}}
+        return {"pairs": []}
+    try:
+        tc._get = _get_sin_summary
+        with contextlib.redirect_stdout(io.StringIO()):
+            tc.analyze_token("MINTQ")
+        comprobar("RugCheck con summary=None NO se cachea 30 min "
+                  "(rug_score sin dato)", "MINTQ" not in tc._rug_cache,
+                  list(tc._rug_cache.keys()))
+    finally:
+        tc._get = _tget_prev
+        tc._rug_cache.clear()
+        tc._dex_cache.clear()
+
+    # ── 7) ⭐ tocada A MITAD del análisis: no se pisa ──────────────────
+    import ai_analyst as aa
+    comprobar("_estrella_cambio_en_medio: quitada o dada durante la IA → "
+              "cambio", aa._estrella_cambio_en_medio(True, False)
+              and aa._estrella_cambio_en_medio(False, True)
+              and not aa._estrella_cambio_en_medio(True, True)
+              and not aa._estrella_cambio_en_medio(False, False))
+    _src_ev = _insp.getsource(aa.evaluate_tracked)
+    comprobar("evaluate_tracked relee is_tracked justo antes del UPDATE "
+              "y respeta el cambio",
+              "_estrella_cambio_en_medio(" in _src_ev
+              and "_es_estrella_ahora" in _src_ev)
+
+    # ── 8) Llegada de predicción solo si sigue 'abierta' ───────────────
+    import predictions as pr
+    _src_ob = _insp.getsource(pr.on_buy)
+    _trozos = _src_ob.split("UPDATE predictions SET arrived=")[1:]
+    _con_guarda = [("status='abierta'" in t.split("(json.dumps")[0])
+                   for t in _trozos]
+    comprobar("los dos UPDATE de llegada llevan AND status='abierta'",
+              len(_trozos) == 2 and all(_con_guarda),
+              f"upd={len(_trozos)} guardas={_con_guarda}")
+
+    # ── 9) hidden_leaders usa UN solo grafo ────────────────────────────
+    import influence as inf
+    _g_prev = inf.graph
+    llamadas = [0]
+    g_fijo = {"wallets": {}, "edges": {}}
+
+    def _graph_espia(construir=True):
+        llamadas[0] += 1
+        return g_fijo
+    try:
+        inf.graph = _graph_espia
+        with contextlib.redirect_stdout(io.StringIO()):
+            inf.influence("X", g=g_fijo)
+        comprobar("influence(g=...) no vuelve a pedir el grafo",
+                  llamadas[0] == 0, llamadas)
+        comprobar("hidden_leaders pasa su grafo a influence",
+                  "influence(addr, g=g)" in _insp.getsource(inf.hidden_leaders))
+    finally:
+        inf.graph = _g_prev
+
+    # ── 10) similarity: candado de construcción ────────────────────────
+    import similarity as sm
+    _vec_prev = sm._vectors
+    _cache_prev = dict(sm._CACHE)
+    construcciones = [0]
+    b2 = threading.Barrier(2, timeout=5)
+
+    def _vec_lenta():
+        construcciones[0] += 1
+        _t.sleep(0.3)
+        return ({}, {})
+    try:
+        sm._CACHE.update({"v": None, "ts": 0.0})
+        sm._vectors = _vec_lenta
+
+        def _pide():
+            try:
+                b2.wait()
+            except Exception:
+                pass
+            sm._graph()
+        t1 = threading.Thread(target=_pide); t2 = threading.Thread(target=_pide)
+        t1.start(); t2.start(); t1.join(5); t2.join(5)
+        comprobar("dos hilos con la caché vencida construyen UNA vez",
+                  construcciones[0] == 1, construcciones)
+    finally:
+        sm._vectors = _vec_prev
+        sm._CACHE.clear()
+        sm._CACHE.update(_cache_prev)
+
+    # ── 11) make_backup verifica la copia (también el /backup manual) ──
+    import backup as bk
+    _connect_real = bk.sqlite3.connect
+
+    class _ConnMal:
+        """La copia (abierta en modo lectura) dice que esta corrupta."""
+        def __init__(self, real):
+            self._r = real
+
+        def execute(self, sql, *a):
+            if "integrity_check" in sql:
+                class _C:
+                    def fetchone(self_):
+                        return ("*** corrupto (prueba)",)
+                return _C()
+            return self._r.execute(sql, *a)
+
+        def __getattr__(self, n):
+            return getattr(self._r, n)
+
+    def _connect_espia(*a, **k):
+        c = _connect_real(*a, **k)
+        return _ConnMal(c) if "mode=ro" in str(a[0]) else c
+    bk.sqlite3.connect = _connect_espia
+    try:
+        _err = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                bk.make_backup()
+            except Exception as e:
+                _err = e
+        comprobar("make_backup RECHAZA una copia que no pasa "
+                  "integrity_check (también el /backup manual)",
+                  isinstance(_err, ValueError)
+                  and "integrity_check" in str(_err), repr(_err)[:160])
+    finally:
+        bk.sqlite3.connect = _connect_real
+    _src_cb = _insp.getsource(tb.cmd_backup)
+    comprobar("/backup: si la copia YA está en disco y falla el envío, "
+              "no dice 'No pude generar'",
+              "guardada en el equipo" in _src_cb
+              and "no pude enviarla" in _src_cb.lower())
+
+    # ── 12) Precio de SOL: con DexScreener caída no se martilla la red ─
+    import unrealized_pnl as up
+    _sc_prev = dict(up._SOL_CACHE)
+    _rget_prev = up.requests.get
+    intentos = [0]
+
+    def _caida(*a, **k):
+        intentos[0] += 1
+        raise up.requests.RequestException("caida")
+    try:
+        up._SOL_CACHE.update({"px": 150.0, "ts": _t.time() - 600,
+                              "aviso": 0, "reintento": 0})
+        up.requests.get = _caida
+        with contextlib.redirect_stdout(io.StringIO()):
+            p1 = up._sol_usd()
+            p2 = up._sol_usd()
+            p3 = up._sol_usd()
+        comprobar("tres llamadas seguidas con la red caída = UNA petición "
+                  "(antes: 15 s de espera en cada una)",
+                  intentos[0] == 1 and p1 == p2 == p3 == 150.0,
+                  f"intentos={intentos[0]} p={p1},{p2},{p3}")
+    finally:
+        up.requests.get = _rget_prev
+        up._SOL_CACHE.clear()
+        up._SOL_CACHE.update(_sc_prev)
+
+    # ── 13) _check_streaks solo recorre ⭐ ─────────────────────────────
+    import signal_tracker as st
+    _src_cs = _insp.getsource(st._check_streaks)
+    comprobar("_check_streaks filtra is_tracked=1 en la consulta inicial",
+              "is_tracked" in _src_cs.split("for row in ws")[0]
+              and "JOIN wallets" in _src_cs.split("for row in ws")[0])
+
+    # ── 14) maintenance: .gz a medias no queda huérfano ───────────────
+    _src_bj = _insp.getsource(mt.send_db_backup)
+    comprobar("si la compresión falla se borra el .gz a medias",
+              "os.remove(gz)" in _src_bj)
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -11580,6 +11968,7 @@ def main():
     prueba_19z()
     prueba_19aa()
     prueba_19ab()
+    prueba_19ac()
 
     print("\n" + "─" * 60)
     if _FALLOS:

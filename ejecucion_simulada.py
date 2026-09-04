@@ -41,10 +41,18 @@ def _quote(input_mint: str, output_mint: str, amount_raw: int) -> dict | None:
         if r.status_code != 200:
             return None
         d = r.json()
-        if not d.get("outAmount"):
+        # (19-AC, auditoria BAJO) `outAmount` es TEXTO: "0" es verdadero
+        # y pasaba como cotizacion valida → 0 tokens al comprar
+        # (slippage "100 %") y 0 $ al vender (parecia un rug). Sin
+        # salida no hay cotizacion.
+        try:
+            if int(d.get("outAmount") or 0) <= 0:
+                return None
+        except (TypeError, ValueError):
             return None
         return d
-    except Exception:
+    except Exception as e:
+        print(f"· Jupiter: cotización falló ({e})")
         return None
 
 

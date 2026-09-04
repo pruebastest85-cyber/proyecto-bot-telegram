@@ -492,11 +492,14 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                         tier = _tier(conf, row["meta_score"] or 0, umbral,
                                      token_ctx.get("liq"),
                                      _risk_pct(token_ctx), u=_u_ef)
+                        # (19-AC) `AND status='abierta'`: el job de
+                        # vencidas puede evaluarla entre la relectura y
+                        # esta escritura.
                         conn.execute(
                             "UPDATE predictions SET arrived=?, stage=?, "
                             "confidence=?, tier=?, "
                             "first_confirm_s=COALESCE(first_confirm_s,?) "
-                            "WHERE id=?",
+                            "WHERE id=? AND status='abierta'",
                             (json.dumps(sorted(arrived)), stage, conf, tier,
                              first, row["id"]))
                     else:
@@ -508,7 +511,7 @@ def on_buy(conn, wallet: str, mint: str, ts: int, token_ctx: dict,
                         conn.execute(
                             "UPDATE predictions SET arrived=?, stage=?, "
                             "first_confirm_s=COALESCE(first_confirm_s,?) "
-                            "WHERE id=?",
+                            "WHERE id=? AND status='abierta'",
                             (json.dumps(sorted(arrived)), stage,
                              first, row["id"]))
                     conn.commit()

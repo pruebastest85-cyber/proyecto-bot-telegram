@@ -187,7 +187,9 @@ def analyze_token(mint: str) -> dict:
         _api_rec("rugcheck")
         f = _get(RUG_FULL.format(mint=mint), timeout=25)
         _api_rec("rugcheck")
-        if f:                         # solo se cachea un chequeo COMPLETO
+        # (19-AC) COMPLETO = las dos respuestas. Con `s` a None se
+        # cacheaba 30 min un chequeo sin rug_score ni riesgos.
+        if f and s:
             _cache_put(_rug_cache, mint, {"s": s, "f": f})
     else:
         s, f = _rug.get("s"), _rug.get("f")

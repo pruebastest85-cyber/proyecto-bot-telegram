@@ -392,6 +392,11 @@ def _inicio_ciclo_iso(conn) -> str:
         return "0000-01-01T00:00:00+00:00"
 
 
+def _estrella_cambio_en_medio(antes: bool, ahora: bool) -> bool:
+    """(19-AC) ¿La ⭐ cambio entre la lectura previa a la IA y el UPDATE?"""
+    return bool(antes) != bool(ahora)
+
+
 def evaluate_tracked(conn, limite: int | None = None) -> int:
     """
     Perfila y clasifica las billeteras ⭐ sin veredicto, sin alias, o con
@@ -878,6 +883,28 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
             except Exception as e:
                 print(f"· guarda de hermanas omitida: {e}")
 
+        # (19-AC, auditoria BAJO) `_era_estrella` se leyo MINUTOS antes
+        # (la IA tarda 30-90 s por billetera). Si en medio el dueño hizo
+        # /descartar o /rastrear, o la racha la degrado, este UPDATE lo
+        # pisaba: devolvia una ⭐ recien quitada o quitaba una recien
+        # dada. Se relee justo antes de escribir y, si cambio, la
+        # estrella se deja como esta (el veredicto de la IA se guarda
+        # igual en ai_follow).
+        _es_estrella_ahora = _era_estrella
+        try:
+            _f_ahora = conn.execute(
+                "SELECT is_tracked FROM wallets WHERE address = ?",
+                (addr,)).fetchone()
+            _es_estrella_ahora = bool(_f_ahora and _f_ahora["is_tracked"])
+        except Exception as e:
+            print(f"· No pude releer la estrella de {addr[:8]} ({e})")
+        _is_tracked_final = seguir
+        if _estrella_cambio_en_medio(_era_estrella, _es_estrella_ahora):
+            print(f"· La ⭐ de «{alias or addr[:8]}» cambió mientras la "
+                  f"evaluaba ({int(_era_estrella)}→{int(_es_estrella_ahora)}"
+                  f"); respeto ese cambio y no la piso")
+            _is_tracked_final = _es_estrella_ahora
+            _era_estrella = _es_estrella_ahora
         conn.execute(
             """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
                alias=COALESCE(alias, ?),
@@ -898,7 +925,7 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
              profile.get("hold_median_min"),
              (profile.get("metrics") or {}).get("roi_median"),
              now_iso(), wscore,
-             seguir, verdict["clasificacion"], addr),
+             _is_tracked_final, verdict["clasificacion"], addr),
         )
         # (18-L) Fase de la estrella. Una promocion NUNCA confirma por si
         # sola: la nueva ⭐ entra EN PRUEBA (el reloj de la prueba arranca
@@ -912,7 +939,7 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         # reloj de la prueba (prueba_desde) lo reinicia la clasificacion
         # y mezclar los dos usos en una sola columna fue el fallo que
         # destaparon las auditorias de esta ola.
-        if seguir:
+        if _is_tracked_final:
             _ahora_t = int(_time_mod.time())
             conn.execute(
                 """UPDATE wallets SET prueba_desde = COALESCE(prueba_desde, ?)

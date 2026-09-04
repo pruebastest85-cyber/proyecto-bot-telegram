@@ -13,6 +13,7 @@ El vector combina rasgos ya disponibles (sin APIs nuevas):
 """
 
 import math
+import threading
 import time
 
 from db import get_conn
@@ -69,15 +70,24 @@ def _vectors():
     return vectors, meta
 
 
+_BUILD_LOCK = threading.Lock()
+
+
 def _graph():
     if _CACHE["v"] is not None and time.time() - _CACHE["ts"] < _TTL:
         return _CACHE["v"]
-    # Soltar el viejo ANTES de construir el nuevo (ver alpha.graph).
-    _CACHE["v"] = None
-    g = _vectors()
-    _CACHE["v"] = g
-    _CACHE["ts"] = time.time()
-    return g
+    # (19-AC) Candado como en alpha/entity_resolution: sin el, dos hilos
+    # con la cache vencida (un /adn y el job de hipotesis) construian los
+    # vectores dos veces a la vez.
+    with _BUILD_LOCK:
+        if _CACHE["v"] is not None and time.time() - _CACHE["ts"] < _TTL:
+            return _CACHE["v"]
+        # Soltar el viejo ANTES de construir el nuevo (ver alpha.graph).
+        _CACHE["v"] = None
+        g = _vectors()
+        _CACHE["v"] = g
+        _CACHE["ts"] = time.time()
+        return g
 
 
 def _cos(a, b):
