@@ -31,8 +31,16 @@ def _int_env(n, d):
         return d
 
 
-CUOTA_MENSUAL = _int_env("HELIUS_MONTHLY_CREDITS", 10_000_000)
-FRENO_PCT = _int_env("HELIUS_STOP_AT_PCT", 85)   # frenar al 85% de la cuota
+# (19-AD) Una sola fuente: `config` ya parsea estas dos variables (con
+# aviso si vienen mal escritas); aqui se volvian a leer del entorno por
+# separado y podian divergir en silencio.
+try:
+    from config import HELIUS_MONTHLY_CREDITS as CUOTA_MENSUAL
+    from config import HELIUS_STOP_AT_PCT as FRENO_PCT
+except Exception as _e_cfg:
+    print(f"· helius_budget: no pude leer config ({_e_cfg}); uso defectos")
+    CUOTA_MENSUAL = _int_env("HELIUS_MONTHLY_CREDITS_FALLBACK", 10_000_000)
+    FRENO_PCT = _int_env("HELIUS_STOP_AT_PCT_FALLBACK", 85)
 
 
 def _dia_corte(conn=None) -> int:

@@ -27,6 +27,21 @@ API_URL = "https://api.anthropic.com/v1/messages"
 MODEL_FAST = "claude-haiku-4-5-20251001"
 REEVAL_DAYS = 3           # caducidad del veredicto
 
+
+def _rechazo_dias_env() -> int:
+    try:
+        return int(float(os.getenv("REEVAL_RECHAZADAS_DIAS", "14")))
+    except (TypeError, ValueError):
+        print(f"· REEVAL_RECHAZADAS_DIAS={os.getenv('REEVAL_RECHAZADAS_DIAS')!r} "
+              f"no es un numero; se usan 14 dias")
+        return 14
+
+
+# (19-AD) Parseado UNA vez; vaciar_cola y salud lo importan de aqui en
+# vez de repetir la lectura del entorno (tres copias con tolerancias
+# distintas).
+RECHAZO_DIAS = _rechazo_dias_env()
+
 PROMPT = """Eres un analista experto en trading on-chain de Solana. Analiza esta billetera candidata y clasifícala.
 
 DATOS DEL PERFIL (últimas ~2000 transacciones):
@@ -452,10 +467,7 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
     # viejas. Ahora: primero las ⭐ con veredicto vencido (son las que
     # estas copiando), y las ya-rechazadas esperan RECHAZO_DIAS antes de
     # volver a gastar presupuesto.
-    try:
-        _rechazo_dias = int(float(os.getenv("REEVAL_RECHAZADAS_DIAS", "14")))
-    except (TypeError, ValueError):
-        _rechazo_dias = 14
+    _rechazo_dias = RECHAZO_DIAS            # (19-AD)
     cutoff_rechazo = (datetime.now(timezone.utc)
                       - timedelta(days=_rechazo_dias)
                       ).isoformat(timespec="seconds")

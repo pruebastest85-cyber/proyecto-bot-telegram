@@ -87,7 +87,6 @@ def en_cola(conn) -> int:
     camino caliente del ciclo, y hay una prueba que compara los dos
     números para que la copia no se separe en silencio.
     """
-    import os
     from datetime import datetime, timedelta, timezone
     try:
         import config as _c
@@ -97,13 +96,10 @@ def en_cola(conn) -> int:
     except Exception:
         _min, _s0, _m0 = 1, 1.0, 3.0
     try:
-        from ai_analyst import REEVAL_DAYS as _rd
-    except Exception:
-        _rd = 3
-    try:
-        _rechazo = int(float(os.getenv("REEVAL_RECHAZADAS_DIAS", "14")))
-    except (TypeError, ValueError):
-        _rechazo = 14
+        from ai_analyst import REEVAL_DAYS as _rd, RECHAZO_DIAS as _rechazo
+    except Exception as e:
+        print(f"· vaciar_cola: no pude leer los plazos de ai_analyst ({e})")
+        _rd, _rechazo = 3, 14
     ahora = datetime.now(timezone.utc)
     cutoff = (ahora - timedelta(days=_rd)).isoformat(timespec="seconds")
     cutoff_r = (ahora - timedelta(days=_rechazo)).isoformat(timespec="seconds")

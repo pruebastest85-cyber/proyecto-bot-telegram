@@ -525,7 +525,6 @@ def _c_embudo(conn):
             # Mismo patron que la 19-L (AUTO_CYCLE_HOURS) y la 19-O
             # (FILTRO_PF_MIN): un valor duplicado a mano que se separa de
             # su fuente sin que nada avise.
-            import os as _os
             try:
                 import config as _cfg_e
                 _min_gan = int(getattr(_cfg_e, "MIN_WINNING_TOKENS", 1))
@@ -534,13 +533,10 @@ def _c_embudo(conn):
             except Exception:
                 _min_gan, _min_sol, _min_mul = 1, 1.0, 3.0
             try:
-                from ai_analyst import REEVAL_DAYS as _rd
-            except Exception:
-                _rd = 3
-            try:
-                _rech = int(float(_os.getenv("REEVAL_RECHAZADAS_DIAS", "14")))
-            except (TypeError, ValueError):
-                _rech = 14
+                from ai_analyst import REEVAL_DAYS as _rd, RECHAZO_DIAS as _rech
+            except Exception as e:
+                print(f"· salud: no pude leer los plazos de ai_analyst ({e})")
+                _rd, _rech = 3, 14
             _c3 = (datetime.now(timezone.utc) - timedelta(days=_rd)
                    ).isoformat(timespec="seconds")
             _c14 = (datetime.now(timezone.utc) - timedelta(days=_rech)
@@ -1007,11 +1003,19 @@ def _c_laserstream():
             return _chk("LaserStream", OK,
                         f"conectado · {int(e.get('recibidas', 0) or 0)} "
                         f"transacciones")
+        # (19-AD) "El webhook sigue como respaldo" solo es verdad si hay
+        # PUBLIC_URL; en local no la hay y LaserStream caido = sin datos.
+        try:
+            from realtime import PUBLIC_URL as _pu
+        except Exception:
+            _pu = ""
         return _chk("LaserStream", WARN,
                     "desconectado"
                     + (" — " + _md_plano(e["error"])
                        if e.get("error") else ""),
-                    "el webhook sigue funcionando como respaldo")
+                    "el webhook sigue funcionando como respaldo" if _pu
+                    else "SIN respaldo (no hay webhook en local): no "
+                         "llegan transacciones hasta que reconecte")
     except Exception as e:
         return _chk("LaserStream", WARN,
                     f"no se pudo comprobar ({_md_plano(e)})")

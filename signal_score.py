@@ -8,7 +8,8 @@ Componentes:
   Momentum (0-10): edad, volumen, flujo de compras 5min
   Consenso (0-10): cuántas billeteras ⭐ hicieron lo mismo
   Patrón (±5): si el MC está dentro del rango habitual de la billetera
-  Adelanto (±6, Ola 10): líder de cluster suma; seguidora crónica resta
+  Adelanto (+3/−6, Ola 10): líder de cluster suma 3; seguidora crónica
+    resta 6
     — su señal es el eco de la compra de otra y llega tarde por diseño.
 
 El umbral mínimo para alertar se guarda en settings ('min_signal_score',

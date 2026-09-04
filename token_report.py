@@ -76,20 +76,26 @@ def risk_score(t: dict):
     return max(0, min(100, round(r)))
 
 
-def smart_money(mint: str) -> list:
-    """Billeteras de la propia red que compraron el token, con su grado."""
-    conn = get_conn()
+def smart_money(mint: str) -> list | None:
+    """Billeteras de la propia red que compraron el token, con su grado.
+    None si la consulta fallo (distinto de "ninguna")."""
+    conn = None
     try:
+        conn = get_conn()
         rows = conn.execute(
             """SELECT a.wallet, a.buy_rank, w.grade, w.alias
                FROM appearances a JOIN wallets w ON w.address = a.wallet
                WHERE a.mint = ? AND COALESCE(w.is_bot,0)=0
                ORDER BY a.buy_rank""", (mint,)).fetchall()
         return list(rows)
-    except Exception:
-        return []
+    except Exception as e:
+        # (19-AD) None = "no pude consultar"; [] era "ninguna consta" y
+        # el reporte lo afirmaba con la base bloqueada.
+        print(f"· smart_money: no pude consultar la base ({e})")
+        return None
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def dex_url(t: dict, mint: str) -> str:
@@ -137,6 +143,8 @@ def token_report(mint: str) -> dict:
         return {"found": False, "text": "", "url": None, "data": t}
 
     rows = smart_money(mint)
+    _sin_consulta = rows is None                   # (19-AD)
+    rows = rows or []
     smart = [r for r in rows if r["grade"] in ("Elite", "Seguimiento")]
     elite = [r for r in rows if r["grade"] == "Elite"]
 
@@ -194,6 +202,8 @@ def token_report(mint: str) -> dict:
         lines.append(f"🧠 Smart-money: {len(smart)} de tu red lo compró "
                      f"({len(elite)} ⭐ Elite)")
         lines.append(f"   _{quienes}_")
+    elif _sin_consulta:
+        lines.append("🧠 Smart-money: no pude consultar la base (reintenta)")
     else:
         # (Ola 8) Solo consulta compradores TEMPRANOS registrados
         # (appearances): una compra reciente de una ⭐ puede no constar.

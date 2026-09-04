@@ -143,13 +143,16 @@ def send_db_backup():
         else:
             try:
                 with open(path, "rb") as f:
-                    requests.post(
+                    _r = requests.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}"
                         f"/sendDocument",
                         data={"chat_id": int(ADMIN_ID),
                               "caption": cap[:1000]},
                         files={"document": (nombre, f)},
                         timeout=180)
+                # (19-AD) Antes se decia "enviado" sin mirar la respuesta:
+                # un 400/413 de Telegram pasaba por exito.
+                _r.raise_for_status()
                 print("📦 Backup también enviado por Telegram")
             except Exception as e:
                 # El backup YA está a salvo en disco: avisar, no fallar.

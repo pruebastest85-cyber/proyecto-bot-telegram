@@ -89,6 +89,10 @@ def _f(conn, key: str, default: float) -> float:
         return default
 
 
+# (19-AD) La fee de prioridad por defecto vive en UN sitio
+# (ejecucion_simulada): aqui estaba escrita tres veces a mano.
+from ejecucion_simulada import FEE_SOL_DEFECTO
+
 # (19-AC) Candado de proceso para el recuento final del tope de abiertas
 # + INSERT (ver open_trade). Cada worker tiene su conexion; el candado
 # solo cubre unos milisegundos.
@@ -318,7 +322,7 @@ def open_trade(conn, trade: dict, token: dict, score,
             cot = cotizar_compra(trade["mint"], stake_usd, su)
         except Exception as e:
             print(f"· Paper: cotización de entrada falló ({e})")
-    fee_sol = _f(conn, "paper_fee_sol", 0.0005)
+    fee_sol = _f(conn, "paper_fee_sol", FEE_SOL_DEFECTO)
     costo_entrada = fee_sol * su if su and su > 0 else None
 
     # Cuanto tardamos en copiar: desde que la ⭐ opero en la cadena
@@ -688,7 +692,7 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
             v = cotizar_venta(row["mint"], int(tokens_raw), su2) \
                 if su2 and su2 > 0 else None
             if v:
-                fee_sol = _f(conn, "paper_fee_sol", 0.0005)
+                fee_sol = _f(conn, "paper_fee_sol", FEE_SOL_DEFECTO)
                 costos = (costos or 0) + fee_sol * su2
                 usd_salida = (usd_salida or 0) + v["usd_salida"]
                 pnl_neto = usd_salida - stake_usd - costos
@@ -1129,7 +1133,7 @@ def _venta_parcial(conn, row, price: float, pct: float, firma=None,
                 if su and su > 0 and trozo > 0 else None
             if v:
                 usd_real = (usd_real or 0) + v["usd_salida"]
-                fee_sol = _f(conn, "paper_fee_sol", 0.0005)
+                fee_sol = _f(conn, "paper_fee_sol", FEE_SOL_DEFECTO)
                 costos = (costos or 0) + fee_sol * su
                 nuevos_tokens = str(int(tokens_raw) - trozo)
                 _usd_fill = v["usd_salida"]
@@ -2194,7 +2198,8 @@ def resumen_text() -> str:
     _sl_txt = "SL apagado" if sl >= 100_000 else f"SL -{sl:.0f}%"
     out = [f"🧪 *Paper trading*  ·  {estado}",
            f"Config: tope {max_sol:g} SOL/señal · {_tp_txt} · "
-           f"{_sl_txt} · máx {timeout:g}h",
+           f"{_sl_txt} · "
+           + ("reloj apagado" if timeout >= 100_000 else f"máx {timeout:g}h"),
            ""]
     out += ventana
     n_c = cer["n"] or 0

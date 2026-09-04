@@ -244,7 +244,8 @@ def confidence_score(inf: dict, followers: list, liq, health: dict,
     f_hist = min(1.0, (sum(shared) / len(shared)) / 8.0)      # ≥8 coincid. = tope
     f_stab = sum(probs) / len(probs)                           # prob media edges
     f_lead = (inf.get("leader_score") or 0) / 100
-    f_liq = 1.0 if (liq or 0) >= 20000 else max(0.0, (liq or 0) / 20000)
+    f_liq = (1.0 if (liq or 0) >= MIN_LIQ_USD
+             else max(0.0, (liq or 0) / MIN_LIQ_USD))   # (19-AD) una fuente
     f_health = _num(health.get("factor"), 0.6)
     if arrived > 0:
         f_stage = min(1.0, arrived / max(1, len(followers)))   # etapas
@@ -283,7 +284,8 @@ def meta_score(inf: dict, cluster: dict | None, health: dict,
     f_hist = _num(health.get("factor"), 0.6)
     probs = [_num(f.get("prob"), 0) / 100 for f in followers] or [0]
     f_prop = sum(probs) / len(probs)
-    f_liq = 1.0 if (liq or 0) >= 20000 else max(0.0, (liq or 0) / 20000)
+    f_liq = (1.0 if (liq or 0) >= MIN_LIQ_USD
+             else max(0.0, (liq or 0) / MIN_LIQ_USD))   # (19-AD) una fuente
     # (Ola 17-A) Este componente NUNCA se ha calculado: no existe rama que
     # lo mida. Son 6 de los 100 puntos que siempre valen lo mismo. Se deja
     # el neutro (quitarlo moveria todos los umbrales ya calibrados), pero

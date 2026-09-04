@@ -11914,6 +11914,165 @@ def prueba_19ac():
     conn.close()
 
 
+def prueba_19ad():
+    bloque("19-AD - mensajes que dicen lo que el codigo hace, y una sola "
+           "fuente para cada ajuste")
+    import contextlib
+    import inspect as _insp
+    import io
+    from db import get_conn, set_setting
+
+    # ── 1) Ajustes con UNA fuente ──────────────────────────────────────
+    import paper_trading as pt
+    import ejecucion_simulada as es
+    _src_pt = _insp.getsource(pt)
+    comprobar("paper: la fee por defecto NO va escrita 3 veces (0.0005): "
+              "sale de ejecucion_simulada.FEE_SOL_DEFECTO",
+              _src_pt.count('_f(conn, "paper_fee_sol", 0.0005)') == 0
+              and _src_pt.count('_f(conn, "paper_fee_sol", FEE_SOL_DEFECTO)') == 3
+              and pt.FEE_SOL_DEFECTO is es.FEE_SOL_DEFECTO,
+              "quedan literales 0.0005 en paper_trading")
+    import predictions as pr
+    _src_pr = _insp.getsource(pr)
+    comprobar("predicciones: el suelo de liquidez de confidence/meta es "
+              "MIN_LIQ_USD, no un 20000 escrito a mano",
+              ">= 20000" not in _src_pr and "/ 20000" not in _src_pr
+              and _src_pr.count("MIN_LIQ_USD") >= 4)
+    import helius_budget as hb
+    import config as cfg
+    comprobar("helius_budget lee la cuota y el freno de config (una fuente)",
+              hb.CUOTA_MENSUAL == cfg.HELIUS_MONTHLY_CREDITS
+              and hb.FRENO_PCT == cfg.HELIUS_STOP_AT_PCT
+              and "_int_env(\"HELIUS_MONTHLY_CREDITS\"" not in _insp.getsource(hb))
+    import ai_analyst as aa
+    import vaciar_cola as vc
+    import salud as sd
+    comprobar("REEVAL_RECHAZADAS_DIAS se parsea UNA vez (ai_analyst."
+              "RECHAZO_DIAS) y lo usan vaciar_cola y salud",
+              isinstance(aa.RECHAZO_DIAS, int)
+              and 'getenv("REEVAL_RECHAZADAS_DIAS"' not in _insp.getsource(vc)
+              and 'getenv("REEVAL_RECHAZADAS_DIAS"' not in _insp.getsource(sd)
+              and _insp.getsource(aa).count('getenv("REEVAL_RECHAZADAS_DIAS"') == 1)
+
+    # ── 2) Mensajes ────────────────────────────────────────────────────
+    conn = get_conn()
+    # /copiapura apagada: "la IA decide la mitad" solo si está activa
+    import telegram_bot as tb
+    conn.execute("DELETE FROM settings WHERE key IN "
+                 "('copia_pura_previo','ia_local_activa')")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt_off = tb._copia_pura_desc_apagada(conn)
+    comprobar("/copiapura: con la IA local APAGADA no dice que 'la IA "
+              "decide la mitad'", "IA decide" not in txt_off
+              and "sin ia" in txt_off.lower(), txt_off[-160:])
+    set_setting(conn, "ia_local_activa", "1")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt_on = tb._copia_pura_desc_apagada(conn)
+    comprobar("y con la IA activa sí lo dice", "IA decide" in txt_on,
+              txt_on[-160:])
+    conn.execute("DELETE FROM settings WHERE key='ia_local_activa'")
+    conn.commit()
+
+    # /ia e hipótesis: no mandan a configurar ANTHROPIC_API_KEY
+    comprobar("/ia sin veredicto no manda a 'ANTHROPIC_API_KEY'",
+              "ANTHROPIC_API_KEY" not in _insp.getsource(tb._ia_text)
+              and "/salud" in _insp.getsource(tb._ia_text))
+    import hypotheses as hy
+    import ia_puente as ip
+    _hay_prev = ip.hay_ia
+    ip.hay_ia = lambda: False
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            t = hy.hypotheses_text()
+        comprobar("hipótesis sin IA: habla de la IA local, no de la clave "
+                  "de la nube", "ANTHROPIC_API_KEY" not in t
+                  and "IA" in t, t)
+        _err = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                hy.generate_hypotheses()
+            except Exception as e:
+                _err = e
+        comprobar("el job de hipótesis SIN IA falla (no marca éxito con "
+                  "la IA caída)", isinstance(_err, RuntimeError)
+                  and "IA" in str(_err), repr(_err))
+    finally:
+        ip.hay_ia = _hay_prev
+
+    # /paper: "máx 999999h" → reloj apagado
+    conn.execute("DELETE FROM paper_trades")
+    set_setting(conn, "paper_timeout_h", "999999")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        rt_txt = pt.resumen_text()
+    comprobar("/paper: con el reloj en 999999 dice 'reloj apagado', no "
+              "'máx 999999h'", "999999" not in rt_txt
+              and "reloj apagado" in rt_txt, rt_txt[:300])
+    conn.execute("DELETE FROM settings WHERE key='paper_timeout_h'")
+    conn.commit()
+
+    # maintenance: "también enviado" solo si Telegram aceptó
+    import maintenance as mt
+    _src_sb = _insp.getsource(mt.send_db_backup)
+    comprobar("backup: se comprueba la respuesta de Telegram antes de "
+              "decir 'enviado' (raise_for_status)",
+              "raise_for_status()" in _src_sb.split("Backup también enviado")[0])
+
+    # salud: "el webhook sigue como respaldo" solo si hay PUBLIC_URL
+    import realtime as rtm
+    import laserstream as ls
+    _pu_prev = rtm.PUBLIC_URL
+    _act_prev, _est_prev = ls.activo, ls.estado
+    ls.activo = lambda: True
+    ls.estado = lambda: {"conectado": False, "error": "x"}
+    try:
+        rtm.PUBLIC_URL = ""
+        ch = sd._c_laserstream()
+        comprobar("salud: LaserStream caído SIN webhook no dice que 'el "
+                  "webhook sigue como respaldo'",
+                  "sigue funcionando como respaldo" not in str(ch.get("accion", ""))
+                  and "sin respaldo" in str(ch.get("accion", "")).lower()
+                  and ch["estado"] != "ok", str(ch))
+        rtm.PUBLIC_URL = "https://ejemplo"
+        ch2 = sd._c_laserstream()
+        comprobar("y con PUBLIC_URL sí",
+                  "sigue funcionando como respaldo" in str(ch2.get("accion", "")))
+    finally:
+        rtm.PUBLIC_URL = _pu_prev
+        ls.activo, ls.estado = _act_prev, _est_prev
+
+    # signal_score: la docstring dice lo que hace el código
+    import signal_score as ss
+    _d = ss.__doc__ or ""
+    comprobar("signal_score: la docstring dice +3/−6 (lo que hace), no ±6",
+              "±6" not in _d and "+3" in _d and ("−6" in _d or "-6" in _d))
+
+    # token_report: un fallo al consultar no es "ninguna consta"
+    import token_report as tr
+    _gc_prev = tr.get_conn
+
+    def _conn_rota():
+        raise RuntimeError("base bloqueada")
+    tr.get_conn = _conn_rota
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = tr.smart_money("MINTX")
+        comprobar("smart_money: fallo de base → None, no [] ('ninguna "
+                  "consta')", r is None)
+        comprobar("y el reporte lo dice como 'no pude consultar'",
+                  "no pude consultar" in _insp.getsource(tr).lower())
+    finally:
+        tr.get_conn = _gc_prev
+
+    # /rastrear: no promete una reevaluación que puede no llegar
+    import wallet_admin as wa
+    comprobar("/rastrear: dice que la IA la reevaluará SI entra en la cola",
+              "si entra en la cola" in _insp.getsource(wa.restore_wallet))
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -11969,6 +12128,7 @@ def main():
     prueba_19aa()
     prueba_19ab()
     prueba_19ac()
+    prueba_19ad()
 
     print("\n" + "─" * 60)
     if _FALLOS:

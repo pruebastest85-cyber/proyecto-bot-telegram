@@ -850,7 +850,10 @@ def _ia_text(address: str) -> str:
     conn.close()
     v = ai_verdict(p, [e["reason"] for e in ev])
     if not v:
-        return "La IA no devolvió veredicto (¿ANTHROPIC_API_KEY configurada?)."
+        # (19-AD) La titular es la IA local; mandar a configurar la
+        # clave de la nube era el mensaje de la era Railway.
+        return ("La IA no devolvió veredicto (¿está encendida y cargada la "
+                "IA local? Mira /salud).")
     icono = "✅ SEGUIR" if v["seguir"] else "❌ DESCARTAR"
     alias_txt = f"Alias: 👤 *{v['alias']}*\n" if v.get("alias") else ""
     return (f"🧠 *Veredicto IA para* `{address[:16]}…`\n\n"
@@ -1805,6 +1808,23 @@ def _mismo_ajuste(a, b) -> bool:
         return str(a).strip() == str(b).strip()
 
 
+def _copia_pura_desc_apagada(conn) -> str:
+    """(19-AD) Describe lo que el paper hace de verdad con la copia pura
+    apagada. Antes decia "la IA decide la mitad de las salidas" sin mirar
+    `ia_local_activa`: con la IA apagada (el estado real del dueño) es
+    falso — todas las salidas van por reglas."""
+    from db import get_setting
+    try:
+        _ia = bool(int(float(get_setting(conn, "ia_local_activa", "0") or 0)))
+    except (TypeError, ValueError):
+        _ia = False
+    _cola = ("y la IA decide la mitad de las salidas" if _ia
+             else "todas las salidas por reglas (sin IA: /ialocal)")
+    return ("🧬 *Copia pura: apagada*\nEl paper aplica sus "
+            "reglas propias (TP +100%, SL −50%, reloj de 48 h, "
+            f"hold extra, {_cola}).\nEncender: `/copiapura on`")
+
+
 @solo_admin
 async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Enciende o apaga el modo copia pura del paper trading.
@@ -1827,10 +1847,7 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             "cuando la ⭐ compra y vende cuando ella vende. "
                             "Sin TP, sin SL, sin reloj, sin hold extra.\n"
                             "Apagar: `/copiapura off`")
-                return ("🧬 *Copia pura: apagada*\nEl paper aplica sus "
-                        "reglas propias (TP +100%, SL −50%, reloj de 48 h, "
-                        "hold extra, y la IA decide la mitad de las "
-                        "salidas).\nEncender: `/copiapura on`")
+                return _copia_pura_desc_apagada(conn)     # (19-AD)
             if accion == "on":
                 if activo:
                     # ── (19-H) YA ENCENDIDA: RE-APLICAR LO DESVIADO ──

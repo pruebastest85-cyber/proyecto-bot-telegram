@@ -81,7 +81,10 @@ Formato de cada línea:
 
 def generate_hypotheses() -> str | None:
     if not __import__("ia_puente").hay_ia():
-        return None
+        # (19-AD) Se LANZA: antes devolvia None y el job de 12 h se
+        # marcaba como exito con la IA caida (/salud lo daba por sano).
+        raise RuntimeError("sin IA disponible (local apagada y sin nube): "
+                           "no se generan hipótesis")
     state = _gather_state()
     # Si no hay materia prima, no gastar IA
     if not any(state.get(k) for k in
@@ -125,8 +128,8 @@ def generate_hypotheses() -> str | None:
 
 def hypotheses_text() -> str:
     if not __import__("ia_puente").hay_ia():
-        return ("🧪 El motor de hipótesis necesita ANTHROPIC_API_KEY "
-                "configurada.")
+        return ("🧪 El motor de hipótesis necesita una IA disponible: la "
+                "local (LM Studio, ver /salud) o la nube.")
     fresh = generate_hypotheses()
     if fresh:
         return "🧪 *Hipótesis del sistema* (generadas ahora)\n\n" + fresh + \

@@ -221,7 +221,9 @@ def restore_wallet(address: str) -> str:
             + (": se le conservan " + _y(_conserva) if _conserva
                else " (no tenía confirmación, ni nota, ni retención)")
             + ". Sí se le borra la clasificación anterior de la IA para "
-              "que la vuelva a evaluar.")
+              "que la vuelva a evaluar (si entra en la cola del perfilado: "
+              "necesita al menos una entrada temprana registrada en un "
+              "token ganador).")
     if not _pasa:
         _que_pasa = ("Conserva la confirmación, así que de momento puede "
                      "alertar y copiarse, pero la próxima clasificación "
