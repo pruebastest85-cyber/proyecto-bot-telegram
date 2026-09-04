@@ -168,6 +168,7 @@ def _un_trozo(limite: int) -> int:
 def _bucle(techo_creditos: int, avisar) -> None:
     from db import get_conn
     motivo = "cola vacía"
+    vacios = 0          # (19-X) trozos seguidos que no perfilaron a nadie
     try:
         while True:
             with _lock:
@@ -175,13 +176,22 @@ def _bucle(techo_creditos: int, avisar) -> None:
                     motivo = "parado a mano"
                     break
             # Freno de presupuesto: el mismo que respeta el resto del bot.
+            # (19-X) Las dos guardas de presupuesto FALLAN CERRANDO. Antes
+            # eran `except Exception: pass`: si no se podia leer el
+            # presupuesto, el vaciado seguia gastando y el techo que puso
+            # el dueño dejaba de aplicarse sin ninguna linea en el log —
+            # lo contrario de la politica del puente ("si no puedo leer
+            # el presupuesto, no gasto"). Parar un vaciado es inofensivo:
+            # se relanza (o se reanuda solo tras un reinicio, 19-R).
             try:
                 from helius_budget import puede_llamar
                 if not puede_llamar():
                     motivo = "freno de presupuesto de Helius (85%)"
                     break
-            except Exception:
-                pass
+            except Exception as e:
+                motivo = f"no pude comprobar el freno de presupuesto ({e})"
+                print(f"· vaciarcola: {motivo}; paro por prudencia")
+                break
             if techo_creditos > 0:
                 try:
                     import helius_budget as hb
@@ -195,8 +205,10 @@ def _bucle(techo_creditos: int, avisar) -> None:
                         motivo = (f"alcanzado el techo que pusiste "
                                   f"({techo_creditos:,} créditos)")
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    motivo = f"no pude medir el gasto para el techo ({e})"
+                    print(f"· vaciarcola: {motivo}; paro por prudencia")
+                    break
             n = _un_trozo(TROZO)
             if n < 0:
                 # El ciclo automático tiene el candado: no es un error,
@@ -204,8 +216,34 @@ def _bucle(techo_creditos: int, avisar) -> None:
                 time.sleep(ESPERA_CANDADO)
                 continue
             if n == 0:
-                motivo = "cola vacía"
-                break
+                # (19-X) `evaluate_tracked` devuelve 0 tanto si no habia
+                # nadie como si habia 25 y ninguna dio datos (o el filtro
+                # de identidad las vacio). Antes cualquier 0 era "cola
+                # vacia" y el vaciado se daba por terminado con miles
+                # pendientes. Se mira la cola de verdad; si no esta vacia
+                # se insiste, y tras tres trozos seguidos en blanco se
+                # para diciendo por que.
+                pendientes = 0
+                try:
+                    from db import get_conn as _gcq
+                    _cq = _gcq()
+                    try:
+                        pendientes = en_cola(_cq)
+                    finally:
+                        _cq.close()
+                except Exception as e:
+                    print(f"· vaciarcola: no pude contar la cola ({e})")
+                if pendientes <= 0:
+                    motivo = "cola vacía"
+                    break
+                vacios += 1
+                if vacios >= 3:
+                    motivo = (f"tres trozos seguidos sin poder perfilar a "
+                              f"nadie ({pendientes:,} siguen en cola: sin "
+                              f"datos de Helius o filtradas por identidad)")
+                    break
+                continue
+            vacios = 0
             with _lock:
                 _estado["hechas"] += n
                 _estado["trozos"] += 1

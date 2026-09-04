@@ -197,6 +197,24 @@ def _sol_delta(tx: dict, wallet: str) -> float:
     return raw + fee + tip
 
 
+def huella_mm(tokens: dict) -> tuple:
+    """(19-X) (cuantos tokens "estilo market maker", % sobre los que opera
+    ida y vuelta).
+
+    Estilo MM = >= 3 compras, >= 3 ventas y posicion neta ~0 (|pnl| <= 5 %
+    del volumen). El NUMERO absoluto no distingue a un MM de un humano que
+    entra y sale tres veces en tres tokens y empata en ellos: el primero
+    tiene casi todos sus tokens asi; el segundo, tres de treinta. La
+    PROPORCION si los distingue, y es lo que usa `_hard_bot_reason`.
+    """
+    mm = sum(1 for i in tokens.values()
+             if i["buys"] >= 3 and i["sells"] >= 3
+             and abs(i["pnl_sol"]) <= 0.05 * (i["sol_in"] + i["sol_out"]))
+    ida_vuelta = sum(1 for i in tokens.values()
+                     if i["buys"] >= 1 and i["sells"] >= 1)
+    return mm, (round(100 * mm / ida_vuelta) if ida_vuelta else 0)
+
+
 def profile_wallet(address: str, with_holdings: bool = True) -> dict:
     txs, historial_entero = _fetch_txs(address)
     now = time.time()
@@ -425,10 +443,7 @@ def profile_wallet(address: str, with_holdings: bool = True) -> dict:
     else:
         result["uniform_buys_pct"] = None
     # Market maker: tokens operados en ambas direcciones con posición neta ~0
-    mm = sum(1 for i in tokens.values()
-             if i["buys"] >= 3 and i["sells"] >= 3
-             and abs(i["pnl_sol"]) <= 0.05 * (i["sol_in"] + i["sol_out"]))
-    result["mm_tokens"] = mm
+    result["mm_tokens"], result["mm_pct"] = huella_mm(tokens)
 
     result["net_pnl_sol"] = round(result["pnl_total_sol"], 2)
     result["tokens"] = dict(tokens)

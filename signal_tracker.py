@@ -651,10 +651,23 @@ def _check_streaks(conn):
         # (~25%), CUALQUIER billetera rentable encadena 4 rojas un
         # tercio del tiempo — una ganadora grande paga muchas perdidas
         # chicas. Si su mes va en POSITIVO, la racha no la degrada.
-        pnl30 = conn.execute(
-            "SELECT pnl_30d FROM wallets WHERE address=?",
-            (w,)).fetchone()
-        if pnl30 and (pnl30["pnl_30d"] or 0) > 0:
+        # (19-X) `pnl_30d` NO es beneficio: es FLUJO de caja (suma de
+        # deltas sin casar posiciones; `format_profile` lo llama "Flujo
+        # neto"). Vender a perdida bolsas de hace 40 dias da flujo
+        # POSITIVO (conservaba la ⭐); acumular ganadoras sin vender da
+        # flujo NEGATIVO (la perdia). Se usa el neto de posiciones
+        # CASADAS del historial (`filtro_calidad.historial`), que es lo
+        # que el resto del embudo llama "gana dinero". Solo corre para
+        # las pocas que llegan a 4 rojas: es barato.
+        neto = None
+        try:
+            from filtro_calidad import historial as _hist_r
+            _h = (_hist_r(conn, wallet=w) or {}).get(w)
+            neto = _h.get("neto") if _h else None
+        except Exception as e:
+            print(f"· racha: sin historial de {w[:8]}… ({e}); no se "
+                  f"perdona por beneficio")
+        if neto is not None and neto > 0:
             continue
         # (18-O) El motivo se antepone a la ficha en vez de borrarla, y
         # el UPDATE exige is_tracked=1 (si otro hilo ya se la quitó, no

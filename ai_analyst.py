@@ -257,8 +257,16 @@ def _hard_bot_reason(p: dict) -> str | None:
     if uni is not None and uni >= 80:
         return f"compras de tamaño idéntico ({uni}%): patrón de bot"
     mm = p.get("mm_tokens", 0)
-    if mm >= 3:
-        return f"market maker: {mm} tokens operados con posición neta ~0"
+    # (19-X) Antes bastaban 3 tokens en numero absoluto para marcar bot
+    # PARA SIEMPRE (is_bot=1 saca de la cola y nadie vuelve a mirar).
+    # Medido el 4/9: 3.905 billeteras marcadas asi (el 34 % de todos los
+    # bots), 511 con exactamente 3 tokens, 710 con mas de 50 SOL ganados.
+    # Un humano que prueba tres tokens y sale en tablas cumplia la regla.
+    # Ahora hace falta que sean la MAYORIA de lo que opera ida y vuelta.
+    mm_pct = p.get("mm_pct") or 0
+    if mm >= 3 and mm_pct >= 50:
+        return (f"market maker: {mm} tokens con posición neta ~0 "
+                f"({mm_pct}% de los que opera ida y vuelta)")
     return None
 
 
@@ -537,7 +545,26 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         print(f"\n🧠 IA evaluando {addr[:16]}…")
         profile = profile_wallet(addr)
         if not profile["tx_sampled"]:
-            print("  · Sin datos; se deja pendiente para el próximo ciclo")
+            # (19-X) Antes: `continue` sin escribir nada. La fila seguia
+            # cumpliendo la cola con el mismo score y volvia a salir en el
+            # trozo siguiente, DELANTE de las nunca perfiladas: la misma
+            # billetera sin datos se re-perfilaba cada ciclo (~110
+            # creditos y 1-2 min cada vez) y ninguna nueva entraba. Se le
+            # pone fecha para que espere el plazo de re-evaluacion como
+            # cualquier rechazada. `COALESCE`: a una ⭐ o a una ya
+            # clasificada no se le pisa la clase ni el motivo.
+            print("  · Sin datos; se marca y se vuelve a intentar dentro "
+                  "del plazo de re-evaluación")
+            try:
+                conn.execute(
+                    """UPDATE wallets SET pnl_updated=?,
+                       ai_class=COALESCE(ai_class,'sin_datos'),
+                       ai_reason=COALESCE(ai_reason,
+                           'Sin datos de Helius al perfilar')
+                       WHERE address=?""", (now_iso(), addr))
+                conn.commit()
+            except Exception as e:
+                print(f"· no pude marcar 'sin datos' ({e})")
             continue
 
         # Filtro duro: bots/MEV/MM flagrantes se descartan sin gastar IA

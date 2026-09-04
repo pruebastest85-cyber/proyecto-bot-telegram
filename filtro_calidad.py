@@ -749,8 +749,22 @@ def promocion(conn, ejecutar: bool = False) -> dict:
     notas = {r["address"]: r["grade"] for r in conn.execute(
         "SELECT address, grade FROM wallets").fetchall()}
     hist = historial(conn, todas=True)
+    # (19-X) Las MISMAS guardas de rendimiento medido que aplica
+    # `evaluate_tracked` antes de dar la ⭐. Sin ellas /promover subia a
+    # billeteras que la racha o la revision acababan de degradar, y a los
+    # 15 min volvian a bajar con aviso y resincronizacion del webhook —
+    # el bucle de 19-M por otra puerta.
+    try:
+        from performance_review import (perdedora_confirmada as _perd,
+                                        creadora_de_mercado as _cmm)
+    except Exception as e:
+        print(f"· promoción: sin guardas de rendimiento ({e})")
+        def _perd(_c, _w):
+            return None
+        _cmm = _perd
     suben = []
     frenadas_por_nota = 0
+    frenadas_por_guarda = 0
     for w, h in hist.items():
         if w in ya:
             continue
@@ -759,6 +773,14 @@ def promocion(conn, ejecutar: bool = False) -> dict:
             continue
         if _nota_bloquea(conn, notas.get(w)):
             frenadas_por_nota += 1
+            continue
+        try:
+            _g = _perd(conn, w) or _cmm(conn, w)
+        except Exception as e:
+            print(f"· promoción: guarda no evaluable para {w[:8]}… ({e})")
+            _g = None
+        if _g:
+            frenadas_por_guarda += 1
             continue
         suben.append((w, h))
     # Mejores primero: si el dueño corta la lista por donde sea, se
@@ -770,6 +792,7 @@ def promocion(conn, ejecutar: bool = False) -> dict:
         "SELECT address, alias FROM wallets").fetchall()}
     res = {"candidatas": len(suben), "estrellas_ahora": len(ya),
            "frenadas_por_nota": frenadas_por_nota,
+           "frenadas_por_guarda": frenadas_por_guarda,
            "detalle": [(w, alias.get(w), h["cerradas"], h["wr"],
                         h["tokens"], h["hold_min"], h.get("neto", 0.0))
                        for w, h in suben[:60]],
@@ -790,11 +813,11 @@ def promocion(conn, ejecutar: bool = False) -> dict:
             conn.execute(
                 """UPDATE wallets
                    SET is_tracked = 1, ai_follow = 1, confirmada = 0,
-                       prueba_desde = ?, turno_desde = NULL,
+                       prueba_desde = ?, turno_desde = ?,
                        ai_reason = SUBSTR(? || COALESCE(ai_reason,''),
                                           1, 500)
                    WHERE address = ? AND is_tracked = 0""",
-                (ahora, motivo, w))
+                (ahora, ahora, motivo, w))
         except Exception as _e:
             print(f"· promoción: {w[:8]}… omitida ({_e})")
     conn.commit()

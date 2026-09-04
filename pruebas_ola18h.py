@@ -8525,8 +8525,13 @@ def prueba_19k():
             # ── 6) en_cola() cuenta LO MISMO que evaluate_tracked mira ─
             # Las dos consultas estan escritas por separado; esta prueba
             # existe para que no se separen en silencio.
+            # (19-X) Eran 12: las 4 perfiladas "sin datos" seguian en la
+            # cola porque no se marcaban (ese era el bug). Ahora se
+            # marcan y salen de la cola hasta el plazo de re-evaluacion:
+            # quedan 8, y esas 8 son exactamente las que evaluate_tracked
+            # volveria a mirar.
             comprobar("vaciar_cola.en_cola() cuadra con la cola real",
-                      vc.en_cola(conn) == 12, vc.en_cola(conn))
+                      vc.en_cola(conn) == 8, vc.en_cola(conn))
         finally:
             aa.profile_wallet = _prof_real
 
@@ -8574,6 +8579,13 @@ def prueba_19k():
                       vc.estado()["motivo_fin"])
 
             # ── 11) Con la cola vacia termina solo ───────────────────
+            # (19-X) La cola tiene que estar vacia DE VERDAD: ahora un
+            # trozo con 0 perfiladas y billeteras pendientes ya no se
+            # toma por "cola vacia" (insiste tres veces y para diciendo
+            # por que). Se vacian las 8 que quedaban del bloque 5.
+            conn.execute("DELETE FROM wallets")
+            conn.execute("DELETE FROM appearances")
+            conn.commit()
             hb.puede_llamar = lambda conn=None: True
             trozos.clear()
             vc.arrancar(techo_creditos=0, avisar=avisos.append)
@@ -10295,6 +10307,296 @@ def prueba_19w():
               "_instalar_ctrl_break()" in _insp.getsource(tb.main))
 
 
+def prueba_19x():
+    bloque("19-X - embudo: regla MM por proporcion, sin datos, vaciado, racha, promocion")
+    import contextlib
+    import io as _io
+    import time as _t
+    import config as cfg
+    import ai_analyst as aa
+    import wallet_profiler as wp
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    ahora = int(_t.time())
+
+    # ── 1) La huella MM: numero Y proporcion ─────────────────────────
+    def tok(buys, sells, pnl, vol):
+        return {"buys": buys, "sells": sells, "pnl_sol": pnl,
+                "sol_in": vol / 2, "sol_out": vol / 2}
+    humano = {f"T{i}": tok(1, 1, 2.0, 10) for i in range(27)}
+    humano.update({f"E{i}": tok(3, 3, 0.1, 10) for i in range(3)})
+    # 20 tokens que SOLO compro (bolsas abiertas): no son "ida y vuelta"
+    # y no pueden diluir la proporcion. Con ellos, 3/30 = 10 %; si se
+    # dividiera entre TODOS los tokens saldria 3/50 = 6 %.
+    humano.update({f"H{i}": tok(1, 0, 0.0, 5) for i in range(20)})
+    mm, pct = wp.huella_mm(humano)
+    comprobar("un humano con 3 tokens empatados de 30 ida-y-vuelta (y 20 "
+              "solo compra) tiene mm=3 y 10 %",
+              mm == 3 and pct == 10, (mm, pct))
+    maker = {f"M{i}": tok(4, 4, 0.05, 20) for i in range(8)}
+    maker.update({"X": tok(1, 1, 3.0, 10)})
+    mm2, pct2 = wp.huella_mm(maker)
+    comprobar("un market maker con 8 de 9 tiene mm=8 y 89 %",
+              mm2 == 8 and pct2 == 89, (mm2, pct2))
+    comprobar("sin tokens ida-y-vuelta, 0 % sin dividir por cero",
+              wp.huella_mm({"S": tok(2, 0, 1.0, 5)}) == (0, 0))
+
+    def perfil(mm, pct):
+        return {"possible_bot": False, "flips_1min_pct": 0,
+                "closed_positions": 12, "active_hours_24": 5,
+                "tx_sampled": 200, "uniform_buys_pct": 0,
+                "mm_tokens": mm, "mm_pct": pct}
+    comprobar("3 tokens MM que son el 10 % NO es bot (antes: bot para "
+              "siempre; 3.905 marcadas asi el 4/9)",
+              aa._hard_bot_reason(perfil(3, 10)) is None)
+    comprobar("3 tokens MM que son el 60 % SI es bot",
+              "market maker" in (aa._hard_bot_reason(perfil(3, 60)) or ""))
+    comprobar("2 tokens MM al 100 % NO es bot (sigue el minimo de 3)",
+              aa._hard_bot_reason(perfil(2, 100)) is None)
+    comprobar("sin dato de proporcion no se marca (antes que un falso bot)",
+              aa._hard_bot_reason({**perfil(5, 0), "mm_pct": None}) is None)
+    comprobar("el motivo dice la proporcion, para poder discutirlo",
+              "%" in (aa._hard_bot_reason(perfil(4, 80)) or ""))
+
+    # ── 2) "sin datos" se marca y deja de taponar la cola ────────────
+    _prev = {k: getattr(cfg, k, None) for k in
+             ("MIN_WINNING_TOKENS", "MIN_BUY_SOL", "MIN_ENTRY_MULTIPLE",
+              "MAX_EVAL_PER_CYCLE", "EVAL_ADAPTATIVO")}
+    _perfil_real = aa.profile_wallet
+    try:
+        cfg.MIN_WINNING_TOKENS = 1
+        cfg.MIN_BUY_SOL = 0.5
+        cfg.MIN_ENTRY_MULTIPLE = 3.0
+        cfg.EVAL_ADAPTATIVO = 0
+        cfg.MAX_EVAL_PER_CYCLE = 10
+        for t in ("wallets", "appearances", "signals"):
+            conn.execute(f"DELETE FROM {t}")
+        for w, tracked, clase in (("SINDATO", 0, None),
+                                   ("ESTRELLA_SD", 1, "trader")):
+            conn.execute(
+                "INSERT INTO wallets (address, winning_tokens_count, is_bot, "
+                "is_tracked, ai_class, score) VALUES (?,3,0,?,?,70)",
+                (w, tracked, clase))
+            conn.execute(
+                "INSERT INTO appearances (wallet, mint, reason, buy_sol, "
+                "entry_multiple) VALUES (?,?,'x',5.0,10.0)", (w, f"AP{w}"))
+        conn.commit()
+        aa.profile_wallet = lambda addr: {"tx_sampled": 0, "tokens": {}}
+        llamadas = []
+        _real_pw = aa.profile_wallet
+        aa.profile_wallet = lambda a: (llamadas.append(a), _real_pw(a))[1]
+        with contextlib.redirect_stdout(_io.StringIO()):
+            aa.evaluate_tracked(conn, limite=10)
+        f = {r["address"]: r for r in conn.execute(
+            "SELECT address, ai_class, pnl_updated, is_tracked, ai_reason "
+            "FROM wallets").fetchall()}
+        comprobar("una billetera sin datos queda MARCADA (pnl_updated)",
+                  f["SINDATO"]["pnl_updated"] is not None)
+        comprobar("con clase 'sin_datos' y motivo",
+                  f["SINDATO"]["ai_class"] == "sin_datos"
+                  and "Sin datos" in (f["SINDATO"]["ai_reason"] or ""))
+        comprobar("a una ⭐ sin datos no se le pisa la clase ni la ⭐",
+                  f["ESTRELLA_SD"]["ai_class"] == "trader"
+                  and f["ESTRELLA_SD"]["is_tracked"] == 1)
+        llamadas.clear()
+        with contextlib.redirect_stdout(_io.StringIO()):
+            aa.evaluate_tracked(conn, limite=10)
+        comprobar("y en el ciclo siguiente NO se vuelve a perfilar (antes: "
+                  "cada ciclo, delante de las nunca perfiladas)",
+                  llamadas == [], llamadas)
+    finally:
+        aa.profile_wallet = _perfil_real
+        for k, v in _prev.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        for t in ("wallets", "appearances", "signals"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+
+    # ── 3) /vaciarcola: "cola vacia" solo si esta vacia; guardas cierran ─
+    import vaciar_cola as vc
+    import helius_budget as hb
+    _r = (vc._un_trozo, vc.en_cola, hb.puede_llamar, hb.creditos_usados)
+    try:
+        hb.puede_llamar = lambda conn=None: True
+        hb.creditos_usados = lambda c: 1000
+        vc._un_trozo = lambda lim: 0
+        vc.en_cola = lambda c: 0
+        vc.arrancar(techo_creditos=0, avisar=None)
+        for _ in range(100):
+            if not vc.corriendo():
+                break
+            _t.sleep(0.05)
+        comprobar("0 perfiladas y cola vacia de verdad: 'cola vacia'",
+                  vc.estado()["motivo_fin"] == "cola vacía",
+                  vc.estado()["motivo_fin"])
+        vc.en_cola = lambda c: 4321
+        trozos = []
+        vc._un_trozo = lambda lim: (trozos.append(1), 0)[1]
+        vc.arrancar(techo_creditos=0, avisar=None)
+        for _ in range(100):
+            if not vc.corriendo():
+                break
+            _t.sleep(0.05)
+        comprobar("0 perfiladas con 4.321 en cola: insiste 3 trozos y para "
+                  "DICIENDO por que (antes: 'cola vacia' con miles dentro)",
+                  len(trozos) == 3 and "4,321" in vc.estado()["motivo_fin"]
+                  and "cola vacía" not in vc.estado()["motivo_fin"],
+                  (len(trozos), vc.estado()["motivo_fin"]))
+        # Guardas de presupuesto: fallar = PARAR, no seguir gastando.
+        def _rev(*a, **k):
+            raise RuntimeError("base bloqueada")
+        hb.puede_llamar = _rev
+        vc._un_trozo = lambda lim: 5
+        vc.arrancar(techo_creditos=0, avisar=None)
+        for _ in range(100):
+            if not vc.corriendo():
+                break
+            _t.sleep(0.05)
+        comprobar("si no se puede leer el freno, el vaciado PARA (antes "
+                  "seguia gastando en silencio)",
+                  "no pude comprobar el freno" in vc.estado()["motivo_fin"],
+                  vc.estado()["motivo_fin"])
+        hb.puede_llamar = lambda conn=None: True
+        hb.creditos_usados = _rev
+        vc.arrancar(techo_creditos=50_000, avisar=None)
+        for _ in range(100):
+            if not vc.corriendo():
+                break
+            _t.sleep(0.05)
+        comprobar("si no se puede medir el gasto, el techo no se ignora: PARA",
+                  "no pude medir el gasto" in vc.estado()["motivo_fin"],
+                  vc.estado()["motivo_fin"])
+    finally:
+        vc._un_trozo, vc.en_cola, hb.puede_llamar, hb.creditos_usados = _r
+        for k in ("vaciarcola_activo", "vaciarcola_techo",
+                  "vaciarcola_cred_inicio", "vaciarcola_hechas"):
+            set_setting(conn, k, "0")
+        conn.commit()
+
+    # ── 4) La racha se perdona por BENEFICIO, no por flujo ───────────
+    import signal_tracker as st
+    from trades_store import _ensure
+    _ensure(conn)
+    for t in ("wallets", "signals", "trades"):
+        conn.execute(f"DELETE FROM {t}")
+
+    def op(w, m, side, sol, ts):
+        conn.execute(
+            "INSERT INTO trades (wallet, signature, mint, side, sol, "
+            "tokens, ts) VALUES (?,?,?,?,?,100,?)",
+            (w, f"{w}{m}{side}{ts}", m, side, sol, ts))
+
+    def rojas(w):
+        for i in range(4):
+            conn.execute(
+                "INSERT INTO signals (signature, wallet, mint, side, ts, "
+                "chg_24h) VALUES (?,?,?,?,?,?)",
+                (f"R{w}{i}", w, f"RM{i}", "compra", ahora - 3600 * (i + 1),
+                 -20.0))
+
+    # FLUJO_POS: pnl_30d positivo (flujo) pero posiciones casadas en
+    # PERDIDA -> antes conservaba la ⭐; ahora la pierde.
+    conn.execute("INSERT INTO wallets (address, is_tracked, pnl_30d, "
+                 "confirmada) VALUES ('FLUJO_POS', 1, 50.0, 1)")
+    rojas("FLUJO_POS")
+    for i in range(6):
+        t0 = ahora - (10 + i) * 86400
+        op("FLUJO_POS", f"FM{i}", "compra", 2.0, t0)
+        op("FLUJO_POS", f"FM{i}", "venta", 1.0, t0 + 3600)
+    # GANA: pnl_30d NEGATIVO (flujo: acumula) pero posiciones casadas en
+    # GANANCIA -> antes la perdia; ahora la conserva.
+    conn.execute("INSERT INTO wallets (address, is_tracked, pnl_30d, "
+                 "confirmada) VALUES ('GANA', 1, -80.0, 1)")
+    rojas("GANA")
+    for i in range(6):
+        t0 = ahora - (10 + i) * 86400
+        op("GANA", f"GM{i}", "compra", 1.0, t0)
+        op("GANA", f"GM{i}", "venta", 3.0, t0 + 3600)
+    conn.commit()
+    _inv = {}
+    try:
+        import db as _db
+        import realtime as _rt
+        _inv = {"a": _db.invalidar_copiables, "b": _rt.invalidar_vigiladas}
+        _db.invalidar_copiables = lambda: None
+        _rt.invalidar_vigiladas = lambda: None
+        with contextlib.redirect_stdout(_io.StringIO()):
+            st._check_streaks(conn)
+    finally:
+        if _inv:
+            _db.invalidar_copiables = _inv["a"]
+            _rt.invalidar_vigiladas = _inv["b"]
+    f = {r["address"]: r["is_tracked"] for r in conn.execute(
+        "SELECT address, is_tracked FROM wallets").fetchall()}
+    comprobar("4 rojas + flujo positivo pero posiciones en PERDIDA: pierde "
+              "la ⭐ (antes la conservaba por el flujo)",
+              f["FLUJO_POS"] == 0, f)
+    comprobar("4 rojas + flujo negativo pero posiciones en GANANCIA: "
+              "conserva la ⭐ (antes la perdia)",
+              f["GANA"] == 1, f)
+
+    # ── 5) /promover aplica las guardas y estrena el turno ───────────
+    import filtro_calidad as fc
+    import performance_review as pr
+    _prev2 = {k: getattr(cfg, k, None) for k in
+              ("FILTRO_TRES_PUERTAS", "FILTRO_PROVISIONAL", "FILTRO_WR_MIN",
+               "FILTRO_PF_MIN", "FILTRO_MIN_CERRADAS", "FILTRO_MIN_TOKENS",
+               "FILTRO_HOLD_MIN_MIN", "FILTRO_NETO_MIN")}
+    _pr_real = (pr.perdedora_confirmada, pr.creadora_de_mercado)
+    try:
+        cfg.FILTRO_TRES_PUERTAS = 1
+        cfg.FILTRO_PROVISIONAL = 1
+        cfg.FILTRO_WR_MIN = 0
+        cfg.FILTRO_PF_MIN = 0
+        cfg.FILTRO_MIN_CERRADAS = 5
+        cfg.FILTRO_MIN_TOKENS = 5
+        cfg.FILTRO_HOLD_MIN_MIN = 30
+        cfg.FILTRO_NETO_MIN = 0
+        for t in ("wallets", "signals", "trades"):
+            conn.execute(f"DELETE FROM {t}")
+        for w in ("LIMPIA", "PERDEDORA", "GIRADORA"):
+            conn.execute("INSERT INTO wallets (address, is_tracked, is_bot, "
+                         "confirmada, grade) VALUES (?,0,0,0,'Seguimiento')",
+                         (w,))
+            for i in range(8):
+                t0 = ahora - (10 + i) * 86400
+                op(w, f"{w}M{i}", "compra", 1.0, t0)
+                op(w, f"{w}M{i}", "venta", 2.0, t0 + 3600)
+        conn.commit()
+        pr.perdedora_confirmada = (
+            lambda c, w: "sus señales perdieron" if w == "PERDEDORA" else None)
+        pr.creadora_de_mercado = (
+            lambda c, w: "da vueltas al token" if w == "GIRADORA" else None)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            res = fc.promocion(conn, ejecutar=True)
+        subidas = {w for w, *_ in res["detalle"]}
+        comprobar("la perdedora medida NO sube (misma guarda que la IA)",
+                  "PERDEDORA" not in subidas, subidas)
+        comprobar("la creadora de mercado tampoco",
+                  "GIRADORA" not in subidas, subidas)
+        comprobar("la limpia si", "LIMPIA" in subidas, subidas)
+        comprobar("y el resultado cuenta las frenadas por guarda",
+                  res.get("frenadas_por_guarda") == 2, res.get("frenadas_por_guarda"))
+        _fila = conn.execute("SELECT is_tracked, turno_desde FROM wallets "
+                             "WHERE address='LIMPIA'").fetchone()
+        comprobar("la promovida estrena turno_desde (la racha la juzga "
+                  "desde HOY, no con el expediente viejo)",
+                  _fila["is_tracked"] == 1 and _fila["turno_desde"]
+                  and abs(int(_fila["turno_desde"]) - ahora) < 120,
+                  dict(_fila))
+    finally:
+        pr.perdedora_confirmada, pr.creadora_de_mercado = _pr_real
+        for k, v in _prev2.items():
+            if v is not None:
+                setattr(cfg, k, v)
+        for t in ("wallets", "signals", "trades"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -10344,6 +10646,7 @@ def main():
     prueba_19u()
     prueba_19v()
     prueba_19w()
+    prueba_19x()
 
     print("\n" + "─" * 60)
     if _FALLOS:
