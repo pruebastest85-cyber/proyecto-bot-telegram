@@ -690,6 +690,15 @@ def _preparar_pg(pg):
             ("wallets", "confirmada", "INTEGER"),
             ("wallets", "prueba_desde", "BIGINT"),
             ("wallets", "turno_desde", "BIGINT"),
+            # (19-AH) Puntuacion copiable; espejo de la lista SQLite.
+            ("wallets", "copi_score", "DOUBLE PRECISION"),
+            ("wallets", "copi_n", "INTEGER"),
+            ("wallets", "copi_n_real", "INTEGER"),
+            ("wallets", "copi_media", "DOUBLE PRECISION"),
+            ("wallets", "copi_pf", "DOUBLE PRECISION"),
+            ("wallets", "copi_dd", "DOUBLE PRECISION"),
+            ("wallets", "copi_brecha", "DOUBLE PRECISION"),
+            ("wallets", "copi_ts", "BIGINT"),
             ("appearances", "delay_s", "INTEGER"),
             ("appearances", "price_at_buy", "DOUBLE PRECISION"),
             ("appearances", "mc_at_buy", "DOUBLE PRECISION"),
@@ -869,7 +878,14 @@ def _preparar_sqlite(conn):
                      # (18-L) ver el comentario gemelo en _preparar_pg.
                      ("confirmada", "INTEGER"),
                      ("prueba_desde", "INTEGER"),
-                     ("turno_desde", "INTEGER")]:
+                     ("turno_desde", "INTEGER"),
+                     # (19-AH) Puntuacion COPIABLE (ver copiabilidad.py).
+                     # Va AL ARRANCAR por el mismo motivo que 18-L: el
+                     # ORDER BY del top la lee.
+                     ("copi_score", "REAL"), ("copi_n", "INTEGER"),
+                     ("copi_n_real", "INTEGER"), ("copi_media", "REAL"),
+                     ("copi_pf", "REAL"), ("copi_dd", "REAL"),
+                     ("copi_brecha", "REAL"), ("copi_ts", "INTEGER")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -1378,6 +1394,62 @@ def corte_actividad() -> int:
     return int(_t.time()) - int(_horas * 3600)
 
 
+def corte_medidas() -> int:
+    """(19-AH) Corte de actividad para las ⭐ MEDIDAS (con historial
+    copiable): 7 dias (TOP_MEDIDAS_HOURS). Las no medidas siguen con
+    `corte_actividad()` (48 h, decision del 19/8: a esas no las sostiene
+    ningun dato). Una ⭐ medida y buena que lleva 5 dias sin operar no
+    debe salir del top por eso — no cuesta nada tenerla (no genera
+    señales) y el 04/09 esa regla sacaba justo a la mejor de la base."""
+    import os as _os
+    import time as _t
+    _crudo = _os.getenv("TOP_MEDIDAS_HOURS", "168")
+    try:
+        _horas = float(str(_crudo).replace(",", "."))
+        if _horas <= 0:
+            raise ValueError("debe ser > 0")
+    except (TypeError, ValueError) as _e:
+        print(f"· TOP_MEDIDAS_HOURS={_crudo!r} no es un numero de horas "
+              f"valido ({_e}); se usa el defecto de 168 h")
+        _horas = 168.0
+    return int(_t.time()) - int(_horas * 3600)
+
+
+# (19-AH) EL ORDEN DEL TOP, EN UN SOLO SITIO. Antes estaba escrito tres
+# veces (top_wallets, _operativas, wallet_ident.posicion) con la obligacion
+# de mantenerlas iguales a mano. Ahora las tres piden esta cadena.
+# Parametros posicionales, en este orden: (corte_medidas, corte_actividad).
+MIN_N_MEDIDA = 5
+
+
+def orden_top() -> str:
+    return f"""w.is_tracked DESC,
+               COALESCE(w.confirmada, 0) DESC,
+               CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
+                    THEN 1 ELSE 0 END,
+               -- (19-AH) Bandas: 0 = medida y copiarla GANA, 1 = sin medir
+               -- (por wallet_score, como siempre), 2 = medida y copiarla
+               -- PIERDE (se sabe: va al final).
+               CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
+                         AND w.copi_score IS NOT NULL
+                    THEN (CASE WHEN w.copi_score > 0 THEN 0 ELSE 2 END)
+                    ELSE 1 END,
+               -- Dormidas al fondo de su banda: 7 dias si esta medida,
+               -- 48 h si no (ver corte_medidas / corte_actividad).
+               CASE WHEN COALESCE(actividad.ult, 0) <
+                         (CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
+                               THEN ? ELSE ? END)
+                    THEN 1 ELSE 0 END,
+               -- Dentro de las medidas: mejor score copiable primero.
+               CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
+                    THEN -COALESCE(w.copi_score, 0) ELSE 0 END,
+               CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
+               w.wallet_score DESC,
+               COALESCE(w.pnl_total, -1e9) DESC,
+               w.score DESC,
+               w.address"""
+
+
 def top_wallets(conn, limit=20):
     # Primero las ⭐ rastreadas, ordenadas por su calidad real (Wallet Score
     # 0-100 de la IA); luego el resto de candidatas por el score de
@@ -1399,43 +1471,21 @@ def top_wallets(conn, limit=20):
     # wallet_ident.posicion() y en _operativas(): los tres usan
     # `corte_actividad()` para que no puedan discrepar (19-A).
     corte = corte_actividad()
+    corte_m = corte_medidas()
     return conn.execute(
-        """SELECT w.address, w.winning_tokens_count, w.total_buys_sol,
+        f"""SELECT w.address, w.winning_tokens_count, w.total_buys_sol,
                   w.score, w.is_tracked, w.ai_class, w.alias, w.pnl_30d,
-                  w.pnl_total, w.wallet_score
+                  w.pnl_total, w.wallet_score,
+                  w.copi_score, w.copi_n, w.copi_n_real, w.copi_pf,
+                  w.copi_brecha
            FROM wallets w
            LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                       GROUP BY wallet) actividad
                 ON actividad.wallet = w.address
            WHERE w.is_bot = 0
-           ORDER BY w.is_tracked DESC,
-                    -- (18-L) Las CONFIRMADAS por las tres puertas van por
-                    -- delante de las que estan en prueba: sin esto, con
-                    -- casi toda la poblacion en prueba, las confirmadas
-                    -- podian caer fuera del corte del top y el bot
-                    -- quedarse mudo teniendo calidad disponible. El
-                    -- puesto sigue siendo POSICIONAL y /top, el conjunto
-                    -- operativo y las tarjetas siguen espejados.
-                    COALESCE(w.confirmada, 0) DESC,
-                    -- Una ⭐ que PIERDE dinero no puede ocupar sitio en el
-                    -- top que alimenta las alertas y el copytrading. El
-                    -- wallet_score solo da 30 de 100 puntos al PnL, asi que
-                    -- una billetera que acierta mucho pero pierde fuerte de
-                    -- vez en cuando adelantaba a otras que si ganan: habia
-                    -- 2 en perdidas dentro del top 15 (una a -33,6 SOL) y
-                    -- 2 con mas de +100 SOL fuera. Se usa pnl_total: solo
-                    -- lo REALIZADO, no lo que aun tiene en cartera.
-                    CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
-                         THEN 1 ELSE 0 END,
-                    CASE WHEN COALESCE(actividad.ult, 0) < ?
-                         THEN 1 ELSE 0 END,
-                    CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
-                    w.wallet_score DESC,
-                    COALESCE(w.pnl_total, -1e9) DESC,
-                    w.score DESC,
-                    w.address
+           ORDER BY {orden_top()}
            LIMIT ?""",
-        (corte, limit),
+        (corte_m, corte, limit),
     ).fetchall()
 
 
@@ -1482,34 +1532,19 @@ def _operativas(conn, limit: int) -> set:
     # (hoy 33 en vez de 35). Un cupo vacio no se rellena con una ⭐ del
     # puesto 148; copiar peor no es mejor que copiar menos.
     corte = corte_actividad()          # espejo de top_wallets (19-A)
+    corte_m = corte_medidas()
     rows = conn.execute(
-        """SELECT w.address, w.is_tracked, w.confirmada,
-                  COALESCE(actividad.ult, 0) AS ult
+        f"""SELECT w.address, w.is_tracked, w.confirmada,
+                  COALESCE(actividad.ult, 0) AS ult,
+                  COALESCE(w.copi_n, 0) AS copi_n
            FROM wallets w
            LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                       GROUP BY wallet) actividad
                 ON actividad.wallet = w.address
            WHERE w.is_bot = 0
-           ORDER BY w.is_tracked DESC,
-                    -- (18-L) Las CONFIRMADAS por las tres puertas van por
-                    -- delante de las que estan en prueba: sin esto, con
-                    -- casi toda la poblacion en prueba, las confirmadas
-                    -- podian caer fuera del corte del top y el bot
-                    -- quedarse mudo teniendo calidad disponible. El
-                    -- puesto sigue siendo POSICIONAL y /top, el conjunto
-                    -- operativo y las tarjetas siguen espejados.
-                    COALESCE(w.confirmada, 0) DESC,
-                    CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
-                         THEN 1 ELSE 0 END,
-                    CASE WHEN COALESCE(actividad.ult, 0) < ?
-                         THEN 1 ELSE 0 END,
-                    CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
-                    w.wallet_score DESC,
-                    COALESCE(w.pnl_total, -1e9) DESC,
-                    w.score DESC,
-                    w.address
+           ORDER BY {orden_top()}
            LIMIT ?""",
-        (corte, limit)).fetchall()
+        (corte_m, corte, limit)).fetchall()
     # Se comprueba por verdad y no por `== 1`: las columnas son INTEGER
     # en los dos motores, pero cualquier driver que devolviera booleano
     # romperia una comparacion estricta sin que ninguna prueba (que corren
@@ -1519,9 +1554,12 @@ def _operativas(conn, limit: int) -> set:
     # estan EN PRUEBA se miden en silencio — eleccion del dueño. Con el
     # interruptor FILTRO_TRES_PUERTAS apagado, la clasificacion marca a
     # todas como confirmadas, asi que este filtro no necesita leerlo.
+    # (19-AH) El corte de actividad es el de su banda: 7 dias si esta
+    # medida, 48 h si no — el mismo que uso el ORDER BY.
     return {r["address"] for r in rows
             if r["is_tracked"] and r["confirmada"]
-            and (r["ult"] or 0) >= corte}
+            and (r["ult"] or 0) >= (corte_m if (r["copi_n"] or 0) >= MIN_N_MEDIDA
+                                    else corte)}
 
 
 def invalidar_copiables() -> None:

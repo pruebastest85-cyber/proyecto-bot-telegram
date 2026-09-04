@@ -45,30 +45,18 @@ def posicion(conn, address: str, tope: int = 200):
         # esta escrito aqui: lo hace `db.corte_actividad()`, el mismo que
         # usan `top_wallets` y `_operativas`, asi que los tres espejos no
         # pueden discrepar aunque alguien cambie el defecto en un sitio.
-        from db import corte_actividad
+        from db import corte_actividad, corte_medidas, orden_top
         corte = corte_actividad()
+        corte_m = corte_medidas()
+        # (19-AH) El ORDER BY sale de db.orden_top(): un solo sitio.
         rows = conn.execute(
-            """SELECT w.address FROM wallets w
+            f"""SELECT w.address FROM wallets w
                LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                           GROUP BY wallet) actividad
                     ON actividad.wallet = w.address
                WHERE w.is_bot = 0
-               ORDER BY w.is_tracked DESC,
-                        COALESCE(w.confirmada, 0) DESC,
-                        -- Debe ser IDENTICO al de db.top_wallets (ver alli
-                        -- el porque): si divergen, /top y la posicion que
-                        -- se muestra en las tarjetas dejan de coincidir.
-                        CASE WHEN w.pnl_total IS NOT NULL
-                                  AND w.pnl_total < 0
-                             THEN 1 ELSE 0 END,
-                        CASE WHEN COALESCE(actividad.ult, 0) < ?
-                             THEN 1 ELSE 0 END,
-                        CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
-                        w.wallet_score DESC,
-                        COALESCE(w.pnl_total, -1e9) DESC,
-                        w.score DESC,
-                        w.address
-               LIMIT ?""", (corte, tope)).fetchall()
+               ORDER BY {orden_top()}
+               LIMIT ?""", (corte_m, corte, tope)).fetchall()
         for i, r in enumerate(rows, 1):
             if r["address"] == address:
                 return i

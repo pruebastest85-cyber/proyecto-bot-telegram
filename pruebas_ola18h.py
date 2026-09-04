@@ -2500,20 +2500,21 @@ def prueba_top50():
         # pasaria tambien sin el desempate.
         import inspect
         import wallet_ident
+        # (19-AH) El ORDER BY vive en UN sitio: db.orden_top(). Se
+        # comprueba esa cadena una vez y que los tres la usen.
+        _orden = db.orden_top()
+        comprobar("orden_top: el ORDER BY desempata por address al final",
+                  _orden.rstrip().endswith("w.address"), _orden[-80:])
+        comprobar("orden_top: las confirmadas van primero en el orden",
+                  "confirmada" in _orden
+                  and _orden.find("confirmada") < _orden.find("wallet_score"))
         for fn, dueno in ((db.top_wallets, "top_wallets"),
                           (db._operativas, "_operativas"),
                           (wallet_ident.posicion, "wallet_ident.posicion")):
             fuente = inspect.getsource(fn)
-            i_orden = fuente.find("ORDER BY")
-            i_addr = fuente.find("w.address", i_orden)
-            i_limit = fuente.find("LIMIT", i_orden)
-            comprobar(f"{dueno}: el ORDER BY desempata por address",
-                      0 <= i_orden < i_addr < i_limit,
-                      "no hay w.address entre ORDER BY y LIMIT")
-            i_conf = fuente.find("confirmada", i_orden)
-            comprobar(f"{dueno}: las confirmadas van primero en el orden",
-                      0 <= i_orden < i_conf < i_limit,
-                      "no hay confirmada entre ORDER BY y LIMIT")
+            comprobar(f"{dueno}: usa db.orden_top() (no una copia del ORDER BY)",
+                      "orden_top()" in fuente
+                      and "wallet_score DESC" not in fuente)
 
         # El contrato, en el unico sitio donde se decide.
         comprobar("en_top(None, x) deja pasar (sin filtro)",
@@ -12371,6 +12372,225 @@ def prueba_19ag():
     conn.close()
 
 
+def prueba_19ah():
+    bloque("19-AH - el top ordena por lo MEDIDO al copiar (puntuacion "
+           "copiable), en un solo ORDER BY para los tres espejos")
+    import contextlib
+    import inspect as _insp
+    import io
+    import time as _t
+    from db import get_conn
+    import db as _db
+    import copiabilidad as cp
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    for t in ("wallets", "signals", "paper_trades", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+
+    # ── 0) Migraciones: columnas copi_* en las DOS listas ─────────────
+    _src_db = _insp.getsource(_db)
+    comprobar("copi_score y copi_n estan en la lista SQLite y en la de "
+              "Postgres de db.py",
+              _src_db.count('"copi_score"') >= 2 and _src_db.count('"copi_n"') >= 2)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(wallets)")]
+    comprobar("y la base de pruebas ya tiene las columnas",
+              all(c in cols for c in cp.COLUMNAS), [c for c in cp.COLUMNAS if c not in cols])
+
+    # ── 1) calcular(): observaciones, recorte, encogimiento, brecha ───
+    def star(addr, alias, ws, pnl=10.0, tracked=1, conf=1, ult=None):
+        conn.execute(
+            "INSERT INTO wallets (address, alias, is_tracked, confirmada, "
+            "wallet_score, pnl_total, is_bot, score, winning_tokens_count) "
+            "VALUES (?,?,?,?,?,?,0,1.0,1)", (addr, alias, tracked, conf, ws, pnl))
+        conn.execute("INSERT INTO positions (wallet, mint, last_ts) VALUES (?,?,?)",
+                     (addr, "M" + addr, ult if ult is not None else ahora))
+
+    def senal(addr, sig, chg, ts=None, side="compra"):
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, sol, ts, side, "
+            "price_usd, chg_24h) VALUES (?,?,?,1.0,?,?,0.01,?)",
+            (sig, addr, "MX" + sig, ts if ts is not None else ahora - 3600,
+             side, chg))
+
+    def copia(addr, sig, stake, papel, neto):
+        conn.execute(
+            "INSERT INTO paper_trades (signature, wallet, mint, symbol, "
+            "stake_sol, stake_usd, entry_price, entry_ts, exit_ts, status, "
+            "pnl_usd, pnl_usd_neto) VALUES (?,?,?,?,1.0,?,0.01,?,?,'cerrada',?,?)",
+            (sig, addr, "MX" + sig, "S", stake, ahora - 7200, ahora - 3600,
+             papel, neto))
+
+    # BUENA: 8 señales, 6 en verde, 3 copiadas con neto real
+    star("BUENA", "Buena", 60.0)
+    for i, chg in enumerate([40, 25, -10, 60, 15, -20, 30, 20]):
+        senal("BUENA", f"sb{i}", chg)
+    copia("BUENA", "sb0", 100.0, 40.0, 35.0)     # brecha 5 %
+    copia("BUENA", "sb1", 100.0, 25.0, 22.0)
+    copia("BUENA", "sb3", 100.0, 60.0, 50.0)
+    senal("BUENA", "sbv", 500, side="venta")     # una VENTA no es observación
+    # PESADA: gana al copiarla, pero brecha 20 % (> 15): score a la mitad.
+    # Perfil ws 95 > BUENA: dentro de la banda manda el score, no el perfil.
+    star("PESADA", "Pesada", 95.0)
+    for i, chg in enumerate([60, 60, 60, 30, 30, 30]):
+        senal("PESADA", f"sp{i}", chg)
+    for i in range(3):
+        copia("PESADA", f"sp{i}", 100.0, 60.0, 40.0)    # brecha 20 %
+    # POCAS: una sola copia (brecha 40 %): NO basta para brecha propia,
+    # sus estimadas usan la brecha de la población.
+    star("POCAS", "Pocas", 70.0)
+    for i, chg in enumerate([-10, -10, -10, -10, -10, -10]):
+        senal("POCAS", f"sq{i}", chg)
+    copia("POCAS", "sq0", 100.0, 50.0, 10.0)
+    # BALLENA: perfil brillante (ws 90) pero copiarla PIERDE (mueve el pool)
+    star("BALLENA", "Ballena", 90.0, pnl=500.0)
+    for i, chg in enumerate([30, 20, 25, 15, 10, 20]):
+        senal("BALLENA", f"sw{i}", chg)
+    for i in range(4):
+        copia("BALLENA", f"sw{i}", 100.0, 25.0, -20.0)   # brecha 45 %
+    # SUERTE: una sola señal x68 (recorte + encogimiento)
+    star("SUERTE", "Suerte", 50.0)
+    senal("SUERTE", "ss0", 6800)
+    # SINMEDIR: sin señales, perfil alto
+    star("SINMEDIR", "Sinmedir", 80.0)
+    # VIEJA: señales fuera de la ventana de 60 dias
+    star("VIEJA", "Vieja", 55.0)
+    for i in range(6):
+        senal("VIEJA", f"sv{i}", 50, ts=ahora - 70 * 86400)
+    conn.commit()
+
+    res = cp.calcular(conn, ahora=ahora)
+    b = res["BUENA"]
+    comprobar("BUENA: n=8, 3 reales; las copiadas usan el neto REAL "
+              "(35, 22, 50) y no chg_24h",
+              b["n"] == 8 and b["n_real"] == 3, b)
+    # media: reales 35,22,50 + estimadas (chg - brecha propia 5): -15,10,-25,25,15
+    _media_esp = (35 + 22 + 50 + (-10 - 5) + (15 - 5) + (-20 - 5) + (30 - 5) + (20 - 5)) / 8
+    comprobar("BUENA: la media resta la brecha PROPIA (5 %) a las no "
+              "copiadas", abs(b["media"] - _media_esp) < 0.05,
+              f"{b['media']} vs {_media_esp:.2f}")
+    comprobar("BUENA: pf > 1 y dd medido", b["pf"] > 1 and b["dd"] >= 0, b)
+    pob = res["_pob"]["media"]
+    pe = res["PESADA"]
+    _score_sin_mitad = (6 * 25.0 + cp.K_ENCOGIMIENTO * pob) / (6 + cp.K_ENCOGIMIENTO)
+    comprobar("PESADA: media +25 (3 reales de 40, 3 estimadas 30-20); brecha "
+              "20 % > 15 → score = la MITAD del encogido",
+              pe["n"] == 6 and pe["n_real"] == 3 and abs(pe["media"] - 25.0) < 0.05
+              and pe["brecha"] == 20.0
+              and abs(pe["score"] - 0.5 * _score_sin_mitad) < 0.05,
+              (pe, _score_sin_mitad))
+    po = res["POCAS"]
+    _brecha_pob = res["_pob"]["brecha"]
+    _media_pocas = (10 + 5 * (-10 - _brecha_pob)) / 6
+    comprobar("POCAS: con UNA sola copia (brecha 40 %) no hay brecha propia: "
+              "las estimadas restan la de la población",
+              _brecha_pob != 40.0 and po["brecha"] is None
+              and abs(po["media"] - _media_pocas) < 0.05,
+              (po, _brecha_pob, _media_pocas))
+    w = res["BALLENA"]
+    comprobar("BALLENA: brecha mediana 45 %, copiarla pierde: score <= 0",
+              w["brecha"] == 45.0 and w["score"] <= 0, w)
+    su = res["SUERTE"]
+    comprobar("SUERTE: el x68 se recorta a +300 y con n=1 se encoge hacia "
+              "la población: score muy por debajo de 300",
+              su["n"] == 1 and su["media"] == 300.0 and su["score"] < 80, su)
+    comprobar("VIEJA: fuera de la ventana de 60 días no cuenta",
+              "VIEJA" not in res)
+    comprobar("SINMEDIR: sin observaciones", "SINMEDIR" not in res)
+
+    # ── 2) actualizar() escribe las columnas ───────────────────────────
+    # SINMEDIR arrastra medidas VIEJAS (de una pasada anterior): tienen
+    # que quedar en NULL, no sobrevivir.
+    conn.execute("UPDATE wallets SET copi_n=99, copi_score=50 WHERE address='SINMEDIR'")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        n_med = cp.actualizar(conn)
+    filas = {r["address"]: dict(r) for r in conn.execute(
+        "SELECT address, copi_score, copi_n, copi_n_real, copi_pf, copi_brecha, copi_ts "
+        "FROM wallets").fetchall()}
+    comprobar("actualizar: BUENA, PESADA, POCAS y BALLENA medidas (n≥5), "
+              "SUERTE con n=1, SINMEDIR (medidas viejas) y VIEJA en NULL",
+              n_med == 4 and filas["BUENA"]["copi_n"] == 8
+              and filas["BALLENA"]["copi_n"] == 6 and filas["SUERTE"]["copi_n"] == 1
+              and filas["SINMEDIR"]["copi_n"] is None and filas["SINMEDIR"]["copi_score"] is None
+              and filas["VIEJA"]["copi_n"] is None,
+              {k: (v["copi_n"], v["copi_score"]) for k, v in filas.items()})
+
+    # ── 3) El orden del top: bandas y dormidas ─────────────────────────
+    # Las medidas que PIERDEN van al final, y entre ellas también por score.
+    conn.execute("UPDATE wallets SET copi_score=-8 WHERE address='BALLENA'")
+    conn.execute("UPDATE wallets SET copi_score=-30 WHERE address='POCAS'")
+    conn.commit()
+    orden = [r["address"] for r in _db.top_wallets(conn, 10)]
+    comprobar("orden: BUENA (medida, gana más) antes que PESADA (gana menos, "
+              "aunque ws 95 > 60); luego las sin medir por wallet_score "
+              "(SINMEDIR 80 > VIEJA 55 > SUERTE 50); al final las medidas que "
+              "pierden, BALLENA (-8) antes que POCAS (-30)",
+              orden == ["BUENA", "PESADA", "SINMEDIR", "VIEJA", "SUERTE",
+                        "BALLENA", "POCAS"], orden)
+    # BUENA dormida 5 dias sigue arriba (7 dias para medidas)
+    conn.execute("UPDATE positions SET last_ts=? WHERE wallet='BUENA'", (ahora - 5 * 86400,))
+    conn.execute("UPDATE positions SET last_ts=? WHERE wallet='SINMEDIR'", (ahora - 3 * 86400,))
+    conn.commit()
+    orden2 = [r["address"] for r in _db.top_wallets(conn, 10)]
+    comprobar("BUENA 5 días sin operar sigue primera (medida: corte 7 d); "
+              "SINMEDIR 3 días sin operar cae al fondo de su banda (48 h)",
+              orden2[0] == "BUENA" and orden2.index("SINMEDIR") > orden2.index("SUERTE"),
+              orden2)
+    import wallet_ident as wi
+    comprobar("_operativas(10) sigue contando a BUENA (5 d < 7 d) y "
+              "posicion() da el mismo orden que /top también con dormidas",
+              "BUENA" in _db._operativas(conn, 10)
+              and [wi.posicion(conn, a, 10) for a in orden2] == list(range(1, len(orden2) + 1)),
+              (_db._operativas(conn, 10), [wi.posicion(conn, a, 10) for a in orden2]))
+    conn.execute("UPDATE positions SET last_ts=? WHERE wallet='BUENA'", (ahora - 8 * 86400,))
+    conn.commit()
+    orden3 = [r["address"] for r in _db.top_wallets(conn, 10)]
+    comprobar("BUENA 8 días dormida: al fondo de su banda (tras PESADA) pero "
+              "SIGUE por delante de las no medidas; y sale de _operativas",
+              orden3[:2] == ["PESADA", "BUENA"] and "BUENA" not in _db._operativas(conn, 10),
+              (orden3, _db._operativas(conn, 10)))
+    conn.execute("UPDATE positions SET last_ts=? WHERE wallet='BUENA'", (ahora,))
+    conn.execute("UPDATE positions SET last_ts=? WHERE wallet='SINMEDIR'", (ahora,))
+    conn.commit()
+
+    # ── 4) Los tres espejos coinciden (comportamiento, no solo texto) ──
+    orden = [r["address"] for r in _db.top_wallets(conn, 10)]
+    posiciones = [wi.posicion(conn, a, 10) for a in orden]
+    comprobar("wallet_ident.posicion da el mismo puesto que /top para cada "
+              "una", posiciones == list(range(1, len(orden) + 1)), posiciones)
+    oper = _db._operativas(conn, 3)
+    comprobar("_operativas(3) = las 3 primeras de /top que son ⭐ "
+              "confirmadas y activas", oper == set(orden[:3]), (oper, orden[:3]))
+    for fn, nombre in ((_db.top_wallets, "db.top_wallets"),
+                       (_db._operativas, "db._operativas"),
+                       (wi.posicion, "wallet_ident.posicion")):
+        comprobar(f"{nombre} pide el ORDER BY a db.orden_top() (un solo sitio)",
+                  "orden_top()" in _insp.getsource(fn)
+                  and "wallet_score DESC" not in _insp.getsource(fn))
+
+    # ── 5) /top enseña lo medido; el job lo recalcula ─────────────────
+    import wallet_admin as wa
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt, _kb = wa.build_top_message(5)
+    comprobar("/top muestra la línea 📐 copiable con n y PF para BUENA y "
+              "'sin medidas (en prueba)' para SINMEDIR",
+              "📐 copiable: +" in txt and "n 8 (3 reales)" in txt
+              and "sin medidas (en prueba)" in txt and "mueve el pool" in txt,
+              txt[:600])
+    import signal_tracker as st
+    comprobar("track_outcomes recalcula la copiabilidad cada pasada",
+              "from copiabilidad import actualizar" in _insp.getsource(st._track_outcomes))
+    comprobar("corte_medidas: 168 h por defecto y protegido contra erratas",
+              ahora - _db.corte_medidas() >= 167 * 3600)
+
+    for t in ("wallets", "signals", "paper_trades", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12430,6 +12650,7 @@ def main():
     prueba_19ae()
     prueba_19af()
     prueba_19ag()
+    prueba_19ah()
 
     print("\n" + "─" * 60)
     if _FALLOS:

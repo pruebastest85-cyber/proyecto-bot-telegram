@@ -278,7 +278,10 @@ def build_top_message(limit: int = 10):
     if not rows:
         return ("Aún no hay billeteras. Espera el próximo ciclo o corre /ciclo.",
                 None)
-    lines = [f"🏆 *Top {len(rows)} billeteras candidatas:*\n"]
+    lines = [f"🏆 *Top {len(rows)} billeteras candidatas:*\n"
+             "_Orden: primero las ⭐ cuyo historial de COPIA gana "
+             "(📐 copiable), luego las aún sin medir, al final las que "
+             "copiarlas pierde._\n"]
     buttons, row_btns = [], []
     for i, w in enumerate(rows, 1):
         flag = " ⭐" if w["is_tracked"] else ""
@@ -298,10 +301,17 @@ def build_top_message(limit: int = 10):
         # de la billetera (se refrescan cada 3-14 dias), no de hoy.
         pnl = ("\n   💰 PnL (SOL, últ. evaluación) "
                + " · ".join(partes)) if partes else ""
+        # (19-AH) Lo MEDIDO al copiarla: es lo que ordena el top.
+        try:
+            from copiabilidad import linea_top
+            copi = "\n" + linea_top(w) if w["is_tracked"] else ""
+        except Exception as e:
+            print(f"· /top: sin línea copiable ({e})")
+            copi = ""
         lines.append(
             f"{i}. {nombre}`{w['address']}`\n"
             f"   ganadores: {w['winning_tokens_count']} · "
-            f"score: {w['score']:.1f}{flag}{ai}{pnl}\n")
+            f"score: {w['score']:.1f}{flag}{ai}{pnl}{copi}\n")
         row_btns.append(InlineKeyboardButton(
             f"❌ {i}", callback_data=f"d:{limit}:{w['address']}"))
         if len(row_btns) == 5:

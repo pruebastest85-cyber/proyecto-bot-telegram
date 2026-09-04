@@ -1003,6 +1003,14 @@ def _track_outcomes(conn) -> int:
         conn.commit()
     _check_streaks(conn)
     _auto_threshold(conn)
+    # (19-AH) La puntuacion copiable se recalcula aqui, cada 15 min, con
+    # las mediciones recien hechas: es la que ordena el top.
+    try:
+        from copiabilidad import actualizar as _copi
+        _copi(conn)
+    except Exception as e:
+        print(f"· Copiabilidad: no pude recalcular ({e}); el top sigue "
+              f"con la puntuación anterior")
     if updated:
         print(f"📈 Track record: {updated} mediciones de señales actualizadas")
     return updated
