@@ -30,13 +30,24 @@ if sys.platform == "win32":
 RAIZ = os.path.dirname(os.path.abspath(__file__))
 FILES = [f for f in sorted(os.listdir(RAIZ)) if f.endswith(".py")
          and f != "auditoria.py"]
-SQLRE = re.compile(r"(SELECT|INSERT|UPDATE|DELETE)\s", re.I)
+# (19-Z) `WITH …` (CTEs) también es SQL: antes se saltaba entero. Y se
+# exige FORMA de consulta (FROM/INTO/SET/WHERE/AS) para no confundir un
+# docstring en inglés que empiece por "Select" o "Update" con una consulta.
+SQLRE = re.compile(r"(SELECT|INSERT|UPDATE|DELETE|WITH)\s", re.I)
+SQLFORMA = re.compile(r"\b(FROM|INTO|SET|WHERE|VALUES|AS)\b", re.I)
+# Errores de EXPLAIN que NO son un bug de la consulta.
+ERRORES_BENIGNOS = ("incomplete input",)
 fallos = []
 
 
 def _base():
     """Base temporal con el esquema real para validar las consultas."""
-    os.environ.setdefault("DB_PATH", tempfile.mktemp(suffix=".db"))
+    # (19-Z) ASIGNACION, no setdefault: con DB_PATH exportado en el entorno
+    # (el .bat lo exporta), `get_conn()` abria la base VIVA y corria sobre
+    # ella las migraciones de arranque y cada CREATE TABLE del fuente —
+    # escrituras y candado sobre wallets.db desde una herramienta que se
+    # presenta como de solo lectura.
+    os.environ["DB_PATH"] = tempfile.mktemp(suffix=".db")
     sys.path.insert(0, RAIZ)
     import db as dbmod
     c = dbmod.get_conn()
@@ -126,12 +137,21 @@ def clase1_sql(raw):
             s = node.value.strip()
             if not SQLRE.match(s) or "{" in s or "%s" in s:
                 continue
+            if not SQLFORMA.search(s):
+                continue
             try:
                 raw.execute("EXPLAIN " + re.sub(r"\?", "NULL", s))
                 n += 1
             except sqlite3.Error as e:
-                if "no such table" in str(e) or "no such column" in str(e):
-                    fallos.append(f"{fn}:{node.lineno} SQL inválido — {e}")
+                # (19-Z) Antes solo se denunciaban "no such table/column";
+                # un error de sintaxis, una aridad de INSERT mal, una
+                # columna ambigua o una CTE rota pasaban en silencio y
+                # el auditor decia "Sin hallazgos". Se probo con 9 bugs
+                # SQL deliberados: los 9 pasaron. Ahora TODO error cuenta,
+                # salvo los benignos de la lista blanca.
+                if any(b in str(e) for b in ERRORES_BENIGNOS):
+                    continue
+                fallos.append(f"{fn}:{node.lineno} SQL inválido — {e}")
     return n
 
 
@@ -140,6 +160,24 @@ def clase2_params():
     n = 0
     for fn, tree in _arboles():
         for node in ast.walk(tree):
+            # (19-Z) `execute(sql)` de UN argumento cuyo literal lleva `?`:
+            # SQLite lo acepta y enlaza NULL en cada hueco, asi que un
+            # `WHERE address=?` sin parametros no falla — devuelve cero
+            # filas para siempre. Antes esta clase exigia dos argumentos y
+            # no lo veia.
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "execute" and len(node.args) == 1
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                    and SQLRE.match(node.args[0].value.strip())
+                    and "?" in node.args[0].value):
+                n += 1
+                fallos.append(
+                    f"{fn}:{node.lineno} la consulta lleva "
+                    f"{node.args[0].value.count('?')} placeholder(s) y se "
+                    f"ejecuta SIN parámetros (enlaza NULL en silencio)")
+                continue
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "execute" and len(node.args) == 2):
@@ -203,6 +241,52 @@ def clase3_campos(raw):
                 cs = cols(sql)
                 if cs:
                     asign[node.targets[0].id] = (cs, node.lineno)
+            # (19-Z) Bucles `for r in conn.execute(SQL).fetchall():` (o
+            # sin fetchall): la forma MAS comun de leer filas, y la clase
+            # 3 solo miraba `x = ....fetchone()`. Se comprueba SOLO dentro
+            # del cuerpo del bucle, porque `r` se reutiliza en cada bucle
+            # de una misma funcion y mirarlo en toda la funcion daria
+            # falsos positivos (cazado con una prueba de la 19-X).
+            for bucle in ast.walk(func):
+                if not (isinstance(bucle, ast.For)
+                        and isinstance(bucle.target, ast.Name)):
+                    continue
+                it = bucle.iter
+                if (isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute)
+                        and it.func.attr == "fetchall"):
+                    it = it.func.value
+                if not (isinstance(it, ast.Call)
+                        and isinstance(it.func, ast.Attribute)
+                        and it.func.attr == "execute" and it.args):
+                    continue
+                q = it.args[0]
+                if not (isinstance(q, ast.Constant)
+                        and isinstance(q.value, str)):
+                    continue
+                sql = q.value
+                if "{" in sql or "%s" in sql or "*" in sql:
+                    continue
+                if not sql.strip().upper().startswith("SELECT"):
+                    continue
+                cs = cols(sql)
+                if not cs:
+                    continue
+                var = bucle.target.id
+                for cuerpo in bucle.body:
+                    for node in ast.walk(cuerpo):
+                        if (isinstance(node, ast.Subscript)
+                                and isinstance(node.value, ast.Name)
+                                and node.value.id == var
+                                and isinstance(node.slice, ast.Constant)
+                                and isinstance(node.slice.value, str)):
+                            n += 1
+                            if node.slice.value not in cs:
+                                fallos.append(
+                                    f"{fn}:{node.lineno} lee "
+                                    f"{var}[{node.slice.value!r}] en el bucle "
+                                    f"pero el SELECT de la línea "
+                                    f"{bucle.lineno} no lo devuelve "
+                                    f"(fallo SILENCIOSO)")
             if not asign:
                 continue
             for node in ast.walk(func):

@@ -248,6 +248,9 @@ def _exec_read(name: str, args: dict) -> str:
             from wallet_score import compute_score
             from signal_tracker import wallet_track_record
             addr = (args.get("address") or "").strip()
+            _mal = _direccion_valida(addr)
+            if _mal:
+                return _mal
             p = profile_wallet(addr)
             if not p["tx_sampled"]:
                 # (Ola 18-H) "no pude bajarlo" NO es "no tiene actividad".
@@ -334,6 +337,9 @@ def _exec_read(name: str, args: dict) -> str:
         if name == "senales_de_billetera":
             import time as _t
             addr = (args.get("address") or "").strip()
+            _mal = _direccion_valida(addr)
+            if _mal:
+                return _mal
             try:
                 n = max(1, min(20, int(float(args.get("n") or 10))))
             except (TypeError, ValueError):
@@ -375,6 +381,9 @@ def _exec_read(name: str, args: dict) -> str:
         if name == "evidencia_billetera":
             from db import wallet_evidence
             addr = (args.get("address") or "").strip()
+            _mal = _direccion_valida(addr)
+            if _mal:
+                return _mal
             conn = get_conn()
             try:
                 rows = wallet_evidence(conn, addr)
@@ -486,8 +495,38 @@ def _exec_read(name: str, args: dict) -> str:
 
 
 def _sin_think(texto: str) -> str:
-    """Quita bloques <think> que algunos modelos locales incluyen."""
-    return re.sub(r"<think>.*?</think>", "", texto or "", flags=re.S).strip()
+    """Quita bloques <think> que algunos modelos locales incluyen.
+
+    (19-Z) Es la de `ia_puente`, no una copia: aquella ya trata el
+    `<think>` SIN CERRAR (el modelo agoto los tokens a mitad del
+    razonamiento) como vacio. La copia de aqui no lo hacia, asi que ese
+    razonamiento crudo salia como respuesta y `_save_turn` lo guardaba,
+    contaminando los turnos siguientes.
+    """
+    from ia_puente import _sin_think as _st
+    return _st(texto)
+
+
+_RE_DIRECCION = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+
+def _direccion_valida(addr: str):
+    """(19-Z) None si es una direccion Solana completa; si no, el texto
+    que la herramienta debe devolver.
+
+    El SYSTEM manda abreviar direcciones a 8 caracteres y los resultados
+    de las herramientas NO se guardan en el historial: en el turno
+    siguiente lo unico que el modelo tiene es la abreviatura, la pasa tal
+    cual, y la herramienta contestaba con una afirmacion categorica y
+    falsa ("esa billetera no tiene señales", "Helius se corto"). Ahora
+    devuelve una instruccion que el modelo sabe seguir.
+    """
+    a = (addr or "").strip()
+    if _RE_DIRECCION.match(a):
+        return None
+    return ("Dirección incompleta o inválida (necesito la dirección "
+            "completa de 32-44 caracteres). Resuélvela primero con "
+            "buscar_billetera usando el trozo que tienes.")
 
 
 def _chat_local(messages: list[dict]):

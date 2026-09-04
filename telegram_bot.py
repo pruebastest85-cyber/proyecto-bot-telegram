@@ -282,6 +282,33 @@ def _recortar_tg(text: str, tope: int | None = None) -> str:
     return cuerpo.rstrip() + "…" + aviso
 
 
+def _podar_botones(text: str, kb):
+    """(19-Z) Tras un recorte, fuera los botones `d:<n>:<address>` cuya
+    billetera ya no aparece en el texto.
+
+    `/top 30` se recorta a ~21 filas, pero el teclado traia los 30
+    botones `❌ n`: las filas 22-30 no se veian y sus botones si, y `d:`
+    descarta de UN toque (is_bot=1, sin confirmacion). Con 186 ⭐ ya no
+    era teorico: un dedo en "❌ 26" descartaba una billetera que el dueño
+    nunca vio. La direccion completa va en cada fila del texto, asi que
+    "esta en el texto" es exactamente "se ve".
+    """
+    filas_kb = getattr(kb, "inline_keyboard", None)
+    if not filas_kb:
+        return kb
+    nuevas = []
+    for fila in filas_kb:
+        viva = []
+        for b in fila:
+            cd = str(getattr(b, "callback_data", "") or "")
+            if cd.startswith("d:") and cd.rsplit(":", 1)[-1] not in text:
+                continue
+            viva.append(b)
+        if viva:
+            nuevas.append(viva)
+    return InlineKeyboardMarkup(nuevas)
+
+
 async def _send_md(chat, text, **kw):
     """Envía en Markdown; si Telegram lo rechaza (símbolos raros del token),
     reintenta en texto plano para NO perder el mensaje en silencio.
@@ -296,7 +323,10 @@ async def _send_md(chat, text, **kw):
     `/errores`: antes solo quedaba un `print` en una ventana que nadie
     mira, igual que el fallo que la Ola 17-L cerro en `tg_send`."""
     chat = getattr(chat, "chat", chat)
+    _entero = text
     text = _recortar_tg(text)
+    if text != _entero and kw.get("reply_markup") is not None:
+        kw["reply_markup"] = _podar_botones(text, kw["reply_markup"])
     try:
         return await chat.send_message(text, parse_mode="Markdown", **kw)
     except Exception as e:
@@ -333,7 +363,10 @@ async def _edit_md(q, text, **kw):
     `BadRequest: message is not modified` es normal (el contenido no
     cambio) y no se considera fallo.
     """
+    _entero = text
     text = _recortar_tg(text)
+    if text != _entero and kw.get("reply_markup") is not None:
+        kw["reply_markup"] = _podar_botones(text, kw["reply_markup"])
     try:
         return await q.edit_message_text(text, parse_mode="Markdown", **kw)
     except Exception as e:
@@ -831,7 +864,7 @@ async def run_address_command(chat, cmd: str, arg: str):
         await chat.send_message("🤔 Consultando la base…")
         from ai_chat import answer_question
         resp = await asyncio.to_thread(answer_question, arg)
-        await chat.send_message(resp)
+        await chat.send_message(_recortar_tg(resp))     # (19-Z)
 
 
 # ─────────────────────────── JOBS PERIÓDICOS ──────────────────────────
@@ -1037,10 +1070,19 @@ async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
         try:
             from digest import resumen_text
             txt = await asyncio.to_thread(resumen_text)
-        except Exception:
+        except Exception as e:
+            # (19-Z) Con print: antes un digest roto caia al resumen viejo
+            # durante semanas sin que nadie lo supiera.
+            print(f"· digest.resumen_text falló ({e}); mando el resumen "
+                  f"básico")
             txt = await asyncio.to_thread(_resumen_diario_text)
-        await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
-                                   parse_mode="Markdown")
+        txt = _recortar_tg(txt)
+        try:
+            await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
+                                       parse_mode="Markdown")
+        except Exception as e:      # (19-Z) sin perder el brief del dia
+            print(f"· resumen diario: Markdown rechazado ({e}); texto plano")
+            await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt)
     except Exception as e:
         print(f"· resumen diario falló: {e}")
 
@@ -1051,7 +1093,7 @@ async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         from post_mortem import generar
-        txt = await asyncio.to_thread(generar)
+        txt = _recortar_tg(await asyncio.to_thread(generar))   # (19-Z)
         try:
             await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt,
                                        parse_mode="Markdown")
@@ -1145,8 +1187,7 @@ async def _hub_run(q, name: str):
     if name == "status":
         await q.answer()
         _txt = await asyncio.to_thread(_status_text)    # (Ola 15 - M5)
-        await q.edit_message_text(_txt, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, _txt, reply_markup=kb_solo_inicio())  # (19-Z)
     elif name in ("top10", "top20"):
         limit = 10 if name == "top10" else 20
         await q.answer()
@@ -1156,30 +1197,25 @@ async def _hub_run(q, name: str):
         await q.answer()
         from rendimiento import rendimiento_text
         txt = await asyncio.to_thread(rendimiento_text)
-        await q.edit_message_text(txt, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, txt, reply_markup=kb_solo_inicio())  # (19-Z)
     elif name == "backtest":
         await q.answer()
         from rendimiento import backtest_text
         txt = await asyncio.to_thread(backtest_text, 0.5)
-        await q.edit_message_text(txt, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, txt, reply_markup=kb_solo_inicio())  # (19-Z)
     elif name == "saldos":
         await q.answer("💰 Consultando saldos…")
         txt = await asyncio.to_thread(_saldos_text)
-        await q.edit_message_text(txt, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, txt, reply_markup=kb_solo_inicio())  # (19-Z)
     elif name == "hermanas":
         await q.answer("🔗 Buscando vínculos… (~1 min)")
         from wallet_links import find_links
         txt = await asyncio.to_thread(find_links)
-        await q.edit_message_text(txt, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, txt, reply_markup=kb_solo_inicio())  # (19-Z)
     elif name == "senales":
         await q.answer()
         _txt = await asyncio.to_thread(_senales_text)   # (Ola 15 - M5)
-        await q.edit_message_text(_txt, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, _txt, reply_markup=kb_solo_inicio())  # (19-Z)
     elif name == "ciclo":
         await q.answer("⏳ Iniciando ciclo…")
         await chat.send_message("⏳ Ciclo completo iniciado…")
@@ -1222,7 +1258,7 @@ async def handle_hub(q, ctx: ContextTypes.DEFAULT_TYPE):
     elif action in SECCIONES:
         texto, kb = SECCIONES[action]
         await q.answer()
-        await q.edit_message_text(texto, parse_mode="Markdown", reply_markup=kb())
+        await _edit_md(q, texto, reply_markup=kb())        # (19-Z)
     elif action == "app":
         kb = app_keyboard()
         if not kb:
@@ -1585,7 +1621,7 @@ async def cmd_senales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # to_thread (Ola 6 - M25): las consultas corrian EN el event loop;
     # un stall de SQLite (busy_timeout 30 s) congelaba el bot entero.
     texto = await asyncio.to_thread(_senales_text)
-    await update.message.reply_text(texto, parse_mode="Markdown")
+    await _send_md(update.message.chat, texto)    # (19-Z)
 
 
 @solo_admin
@@ -1603,7 +1639,7 @@ async def cmd_app(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @solo_admin
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     texto = await asyncio.to_thread(_status_text)
-    await update.message.reply_text(texto, parse_mode="Markdown")
+    await _send_md(update.message.chat, texto)    # (19-Z)
 
 
 # (Ola 18-B) Modo COPIA PURA del paper.
@@ -2596,15 +2632,19 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                  callback_data=f"agc:y:{_tok}"),
             InlineKeyboardButton("❌ Cancelar",
                                  callback_data=f"agc:n:{_tok}")]])
-        msg = (respuesta + "\n\n" if respuesta else "") + \
-            f"¿Ejecuto esta acción?\n{describe_action(accion)}"
+        msg = _recortar_tg((respuesta + "\n\n" if respuesta else "") +
+                           f"¿Ejecuto esta acción?\n{describe_action(accion)}")
         try:
             await update.message.reply_text(msg, parse_mode="Markdown",
                                             reply_markup=kb)
         except Exception:      # (Ola 15 - M8) un "_" impar del modelo no
             await update.message.reply_text(msg, reply_markup=kb)
     else:
-        await update.message.reply_text(respuesta)
+        # (19-Z) Recortada: con el modelo pensante sin tope la respuesta
+        # no tiene longitud acotada, y >4.096 Telegram la rechazaba tras
+        # minutos de espera ("Algo falló") con el turno ya guardado como
+        # entregado.
+        await update.message.reply_text(_recortar_tg(respuesta))
 
 
 # ─────────────────────────── ARRANQUE ─────────────────────────────────
@@ -2836,7 +2876,7 @@ async def cmd_wallets_perf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_rendimiento(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from rendimiento import rendimiento_text
     txt = await asyncio.to_thread(rendimiento_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2849,7 +2889,7 @@ async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
     from rendimiento import backtest_text
     txt = await asyncio.to_thread(backtest_text, monto)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2865,7 +2905,7 @@ async def cmd_clusters(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕸 Buscando clusters de co-compra…")
     from clusters import clusters_text
     txt = await asyncio.to_thread(clusters_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2881,27 +2921,27 @@ async def cmd_lideres(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🕵️ Buscando líderes ocultos…")
     from influence import hidden_leaders_text
     txt = await asyncio.to_thread(hidden_leaders_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
 async def cmd_predicciones(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from predictions import predictions_text
     txt = await asyncio.to_thread(predictions_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
 async def cmd_metricas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     from predictions import metrics_text
     txt = await asyncio.to_thread(metrics_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
 async def cmd_elite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = await asyncio.to_thread(_elite_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2909,7 +2949,7 @@ async def cmd_alpha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔭 Midiendo quién descubre antes…")
     from alpha import alpha_text
     txt = await asyncio.to_thread(alpha_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2917,7 +2957,7 @@ async def cmd_atencion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎯 Calculando Score de Atención…")
     from attention import attention_text
     txt = await asyncio.to_thread(attention_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2925,7 +2965,7 @@ async def cmd_resumen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📋 Componiendo el resumen…")
     from digest import resumen_text
     txt = await asyncio.to_thread(resumen_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2949,7 +2989,7 @@ async def cmd_estrellas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🌱 Buscando estrellas emergentes…")
     from similarity import rising_stars_text
     txt = await asyncio.to_thread(rising_stars_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2957,7 +2997,7 @@ async def cmd_hipotesis(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧪 Generando hipótesis del sistema…")
     from hypotheses import hypotheses_text
     txt = await asyncio.to_thread(hypotheses_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 @solo_admin
@@ -2967,7 +3007,7 @@ async def cmd_entidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     from entity_resolution import entities_text
     txt = await asyncio.to_thread(entities_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 def _elite_text() -> str:
@@ -3273,7 +3313,7 @@ async def cmd_hermanas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🔗 Buscando vínculos entre billeteras ⭐… (puede tardar ~1 min)")
     from wallet_links import find_links
     txt = await asyncio.to_thread(find_links)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 def _saldo_uno_text(addr: str) -> str:
@@ -3293,7 +3333,7 @@ def _saldo_uno_text(addr: str) -> str:
 async def cmd_saldos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💰 Consultando saldos on-chain…")
     txt = await asyncio.to_thread(_saldos_text)
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    await _send_md(update.message.chat, txt)      # (19-Z)
 
 
 def _saldos_text():

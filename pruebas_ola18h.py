@@ -10770,6 +10770,178 @@ def prueba_19y():
         pt.open_trade, pt.close_on_wallet_sell = _reales
 
 
+def prueba_19z():
+    bloque("19-Z - auditoria.py endurecida, botones tras recorte, Markdown seguro, agente")
+    import ast as _a
+    import inspect as _insp
+    import os as _os
+    import shutil
+    import subprocess
+    import sys as _sys
+    import tempfile
+    import telegram_bot as tb
+
+    # ── 1) auditoria.py caza lo que antes pasaba ───────────────────────
+    # Se copia el repo a un temporal y se siembra un archivo con bugs SQL
+    # deliberados. Antes: "Sin hallazgos" con todos ellos.
+    raiz = _os.path.dirname(_os.path.abspath(tb.__file__))
+    d = tempfile.mkdtemp()
+    for fn in _os.listdir(raiz):
+        if fn.endswith(".py") and fn != "pruebas_ola18h.py":
+            shutil.copy(_os.path.join(raiz, fn), d)
+    _bugs = "\n".join([
+        "def a(conn):",
+        "    return conn.execute(\"SELECT address FROM wallets WHER is_tracked=1\").fetchall()",
+        "def b(conn):",
+        "    conn.execute(\"INSERT INTO settings (key, value) VALUES (?,?,?)\", (\"a\", \"b\", \"c\"))",
+        "def c(conn):",
+        "    return conn.execute(\"SELECT address FROM wallets WHERE address=?\").fetchone()",
+        "def d(conn):",
+        "    return conn.execute(\"SELECT wallet FROM signals s JOIN positions p ON p.wallet=s.wallet\").fetchall()",
+        "def e(conn):",
+        "    for r in conn.execute(\"SELECT address FROM wallets\").fetchall():",
+        "        print(r[\"alias\"])",
+        "def g(conn):",
+        "    return conn.execute(\"WITH x AS (SELECT address FROM wallets) SELECT nope FROM x\").fetchall()",
+        "def h(conn):",
+        "    for r in conn.execute(\"SELECT address, alias FROM wallets\"):",
+        "        print(r[\"address\"], r[\"alias\"])",
+        ""])
+    with open(_os.path.join(d, "zz_bugs19z.py"), "w", encoding="utf-8") as f:
+        f.write(_bugs)
+    env = dict(_os.environ)
+    env["DB_PATH"] = _os.path.join(d, "viva_no_tocar.db")
+    r = subprocess.run([_sys.executable, "auditoria.py"], cwd=d,
+                       capture_output=True, text=True, timeout=300, env=env)
+    out = r.stdout
+    comprobar("auditoria.py YA NO dice 'Sin hallazgos' con SQL roto",
+              "Sin hallazgos" not in out and r.returncode != 0, out[-300:])
+    for etiq, marca in (("sintaxis (WHER)", "syntax error"),
+                        ("aridad del INSERT", "3 values for 2 columns"),
+                        ("? sin parametros", "SIN parámetros"),
+                        ("columna ambigua", "ambiguous column"),
+                        ("campo fuera del SELECT en un bucle", "en el bucle"),
+                        ("CTE (WITH) con columna inexistente",
+                         "no such column: nope")):
+        comprobar(f"caza: {etiq}", marca in out, out[-600:])
+    comprobar("y NO se queja del bucle correcto (address y alias si estan)",
+              "zz_bugs19z.py:15" not in out and "zz_bugs19z.py:16" not in out,
+              out[-400:])
+    comprobar("con DB_PATH exportado NO abre esa base (usa una temporal)",
+              not _os.path.exists(env["DB_PATH"]))
+    comprobar("y sobre el repo limpio sigue diciendo 'Sin hallazgos'",
+              "Sin hallazgos" in subprocess.run(
+                  [_sys.executable, "auditoria.py"], cwd=raiz,
+                  capture_output=True, text=True, timeout=300).stdout)
+    shutil.rmtree(d, ignore_errors=True)
+
+    # ── 2) Botones que apuntan a filas recortadas se quitan ──────────
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ 1", callback_data="d:30:DIR_UNO"),
+         InlineKeyboardButton("❌ 2", callback_data="d:30:DIR_DOS")],
+        [InlineKeyboardButton("Top 10", callback_data="t:10")]])
+    texto_recortado = "1. `DIR_UNO`\n…(mensaje recortado)"
+    kb2 = tb._podar_botones(texto_recortado, kb)
+    datos = [b.callback_data for fila in kb2.inline_keyboard for b in fila]
+    comprobar("el boton de la fila que ya no se ve DESAPARECE",
+              "d:30:DIR_DOS" not in datos, datos)
+    comprobar("el de la fila visible se queda", "d:30:DIR_UNO" in datos)
+    comprobar("y los botones que no son de descarte no se tocan",
+              "t:10" in datos)
+    enviados = []
+
+    class _Chat:
+        async def send_message(self, txt, **k):
+            enviados.append(k.get("reply_markup"))
+    import asyncio as _aio
+    _tope_prev = tb.TG_MAX_CHARS
+    try:
+        # `_recortar_tg` reserva 120 caracteres para el aviso, asi que el
+        # tope de prueba tiene que dejar sitio a la primera fila.
+        tb.TG_MAX_CHARS = 300
+        largo = "1. `DIR_UNO`\n" + "x" * 400 + "\n2. `DIR_DOS`"
+        _aio.run(tb._send_md(_Chat(), largo, reply_markup=kb))
+        kbx = enviados[-1]
+        datos2 = [b.callback_data for fila in kbx.inline_keyboard
+                  for b in fila]
+        comprobar("_send_md poda los botones cuando RECORTA",
+                  "d:30:DIR_DOS" not in datos2 and "d:30:DIR_UNO" in datos2,
+                  datos2)
+        _aio.run(tb._send_md(_Chat(), "corto `DIR_UNO` `DIR_DOS`",
+                             reply_markup=kb))
+        comprobar("y no toca nada cuando NO recorta", enviados[-1] is kb)
+    finally:
+        tb.TG_MAX_CHARS = _tope_prev
+
+    # ── 3) Ningun comando manda texto generado en Markdown "a pelo" ───
+    _src = _insp.getsource(tb)
+    _lineas = _src.split("\n")
+    _arbol = _a.parse(_src)
+    _a_pelo = []
+    for n in _a.walk(_arbol):
+        if not isinstance(n, _a.Call):
+            continue
+        nom = getattr(n.func, "attr", "")
+        if nom not in ("reply_text", "edit_message_text"):
+            continue
+        if not any(k.arg == "parse_mode" for k in n.keywords) or not n.args:
+            continue
+        # Lo que se denuncia es TEXTO GENERADO (alias, IA, listas de la
+        # base): las variables con las que los comandos lo reciben. Un
+        # literal, un f-string con nuestros numeros, HELP_TEXT o hub_text()
+        # son Markdown escrito por nosotros y no llevan simbolos ajenos.
+        _arg = n.args[0]
+        if not (isinstance(_arg, _a.Name)
+                and _arg.id in ("txt", "_txt", "texto", "text", "resp",
+                                "respuesta", "msg")):
+            continue
+        _a_pelo.append(n.lineno)
+    # Aceptables: los que YA reintentan en texto plano por su cuenta
+    # (un `except` justo despues).
+    _malos = []
+    for ln in _a_pelo:
+        ventana = "\n".join(_lineas[ln - 1:ln + 3])
+        if "except Exception" in ventana:
+            continue
+        _malos.append(ln)
+    comprobar("ningun comando manda texto generado en Markdown sin la red "
+              "de _send_md/_edit_md (17 lo hacian; un alias con '_' los "
+              "dejaba mudos)", not _malos, f"lineas: {_malos}")
+    comprobar("los seis botones del hub van por _edit_md",
+              _insp.getsource(tb._hub_run).count("_edit_md(") >= 7,
+              _insp.getsource(tb._hub_run).count("_edit_md("))
+
+    # ── 4) Agente: direccion abreviada → instruccion, no afirmacion falsa ─
+    import ai_agent as ag
+    from db import get_conn
+    conn = get_conn()
+    conn.execute("DELETE FROM signals")
+    conn.commit()
+    conn.close()
+    r1 = ag._exec_read("senales_de_billetera", {"address": "7xKp9Q2m"})
+    comprobar("con 8 caracteres NO dice 'no tiene señales' (falso): pide "
+              "resolverla",
+              "no tiene señales" not in r1 and "buscar_billetera" in r1, r1)
+    r2 = ag._exec_read("evidencia_billetera", {"address": "7xKp9Q2m…"})
+    comprobar("evidencia_billetera igual", "buscar_billetera" in r2, r2)
+    comprobar("una direccion completa pasa la validacion",
+              ag._direccion_valida(
+                  "7xKp9Q2mABCDEFGHJKLMNPQRSTUVWXYZabcdefghij") is None)
+    comprobar("_sin_think del agente es la del puente (trata el <think> "
+              "sin cerrar como vacio)",
+              ag._sin_think("<think>razonando sin fin") == ""
+              and ag._sin_think("<think>a</think>hola") == "hola")
+
+    # ── 5) Respuesta del agente y /preguntar recortadas ──────────────
+    comprobar("la respuesta del agente pasa por _recortar_tg",
+              "reply_text(_recortar_tg(respuesta))" in _src)
+    comprobar("y la de /preguntar tambien",
+              "send_message(_recortar_tg(resp))" in _src)
+    comprobar("y el resumen diario",
+              "txt = _recortar_tg(txt)" in _insp.getsource(tb.daily_summary_job))
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -10821,6 +10993,7 @@ def main():
     prueba_19w()
     prueba_19x()
     prueba_19y()
+    prueba_19z()
 
     print("\n" + "─" * 60)
     if _FALLOS:
