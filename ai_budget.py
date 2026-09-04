@@ -36,19 +36,33 @@ def _cap() -> int:
         return 300
 
 
-def used_today(conn) -> int:
+def used_today(conn) -> int | None:
+    """Llamadas a la nube hoy. None si el contador NO se puede leer.
+
+    (19-AA, auditoria M6) Antes devolvia 0 ante cualquier fallo: con la
+    base bloqueada `budget_left` daba 300 (abierto), se llamaba a la
+    nube de pago y `record_call` calculaba 0+1 y RESETEABA el contador.
+    Justo cuando hay carga —que es cuando SQLite se bloquea— el tope no
+    protegia. Ahora "no se" es None, y los de abajo lo tratan como
+    cerrado."""
     try:
         # (Ola 16) int(float(...)): si algún día este contador pasa al
         # UPSERT atómico de api_usage, el valor queda como "124.0" e
         # int("124.0") lanza ValueError. Barato blindarlo ahora.
         return int(float(get_setting(conn, "ai_calls_" + _today(), "0")
                          or 0))
-    except Exception:
-        return 0
+    except Exception as e:
+        print(f"· Presupuesto IA nube: no pude leer el contador ({e}); "
+              f"se trata como agotado")
+        return None
 
 
 def budget_left(conn) -> int:
-    return max(0, _cap() - used_today(conn))
+    """Cero si el contador no se puede leer: no gastar sin contar."""
+    usadas = used_today(conn)
+    if usadas is None:
+        return 0
+    return max(0, _cap() - usadas)
 
 
 def can_call(conn) -> bool:
@@ -74,11 +88,21 @@ def record_call(conn, n: int = 1) -> None:
     try:
         with _LOCK:      # sin lock, dos hilos podian perder conteos
             key = "ai_calls_" + _today()
-            set_setting(conn, key, used_today(conn) + n)
-    except Exception:
-        pass
+            usadas = used_today(conn)
+            if usadas is None:
+                # (19-AA) Sin lectura no hay suma: escribir 0+1 pisaba
+                # el contador real del dia.
+                print("· Presupuesto IA nube: no pude apuntar la llamada "
+                      "(contador ilegible)")
+                return
+            set_setting(conn, key, usadas + n)
+    except Exception as e:
+        print(f"· Presupuesto IA nube: no pude apuntar la llamada ({e})")
 
 
 def status_line(conn) -> str:
     cap = _cap()
-    return f"🤖 IA hoy: {used_today(conn)}/{cap} llamadas · quedan {budget_left(conn)}"
+    usadas = used_today(conn)
+    if usadas is None:
+        return f"🤖 IA hoy: ?/{cap} llamadas (contador ilegible: la nube no se usa)"
+    return f"🤖 IA hoy: {usadas}/{cap} llamadas · quedan {budget_left(conn)}"

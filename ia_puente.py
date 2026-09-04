@@ -31,8 +31,17 @@ de "IA apagada".
 import json
 import os
 import re
+import threading
 
 import requests
+
+# (19-AA, auditoria M6) Bandera POR HILO: la ultima llamada a la local
+# fallo porque estaba OCUPADA (conecto, pero no contesto a tiempo). Con
+# `local_primero` eso NO debe caer a la nube de pago: el modelo esta
+# cargado y trabajando (el analista lo tiene 30-90 s por billetera), y el
+# tope diario de 300 no protegia justo cuando habia carga. Apagada (no
+# conecta) sigue cayendo a la nube.
+_HILO = threading.local()
 
 NUBE_URL = "https://api.anthropic.com/v1/messages"
 NUBE_MODELO = "claude-haiku-4-5-20251001"
@@ -137,8 +146,15 @@ def _local(prompt: str, system: str | None, max_tokens: int,
         # En el reintento va SIN tope de tokens (19/8): el modelo pensante
         # razona lo que necesite y termina solo; el limite real que nos
         # protege es el timeout, no el contador.
-        r = requests.post(
-            f"{url}/v1/chat/completions", json=cuerpo, timeout=timeout)
+        _HILO.ocupada = False
+        try:
+            r = requests.post(
+                f"{url}/v1/chat/completions", json=cuerpo, timeout=timeout)
+        except requests.exceptions.ReadTimeout as e:
+            _HILO.ocupada = True
+            print(f"· IA local OCUPADA (no contestó en {timeout} s): "
+                  f"no se pasa a la nube ({str(e)[:80]})")
+            return None
         if r.status_code >= 400:
             print(f"· IA local HTTP {r.status_code}: {r.text[:200]}")
             return None
@@ -259,6 +275,8 @@ def completar_ex(prompt: str, system: str | None = None,
                             paciencia=paciencia)
             if texto:
                 return texto, nombre
+            if nombre == "local" and getattr(_HILO, "ocupada", False):
+                return None, None       # (19-AA) ocupada ≠ apagada
         return None, None
     finally:
         if propia is not None:

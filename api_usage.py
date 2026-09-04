@@ -175,7 +175,8 @@ def usage_line(conn) -> str:
         partes.append(f"Birdeye {bir}")
     try:
         from ai_budget import used_today as _ia_used, _cap
-        partes.append(f"IA {_ia_used(conn)}/{_cap()}")
-    except Exception:
-        pass
+        _u = _ia_used(conn)          # (19-AA) None = contador ilegible
+        partes.append(f"IA {'?' if _u is None else _u}/{_cap()}")
+    except Exception as e:
+        print(f"· APIs hoy: no pude leer el contador de IA ({e})")
     return "🔌 APIs hoy: " + " · ".join(partes)

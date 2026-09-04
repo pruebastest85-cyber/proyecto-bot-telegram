@@ -722,15 +722,30 @@ def fill_token_performance(conn, limit: int = 5):
         "ORDER BY evaluated_ts DESC LIMIT ?", (limit,)).fetchall()
     for r in rows:
         try:
-            from token_check import analyze_token
-            now_px = analyze_token(r["mint"]).get("price")
+            # (19-AA, auditoria M4) Mismo criterio que signal_tracker
+            # (Ola 8): DexScreener con 200 y SIN pares = el token dejo
+            # de cotizar → -100 (perdida total). Antes se pedia el
+            # precio a `analyze_token` (3 llamadas: DexScreener + 2 de
+            # RugCheck) y un token muerto no tenia precio, asi que la
+            # fila quedaba NULL PARA SIEMPRE y se reintentaba cada 10
+            # min: 31 filas en la base del dueño llevaban 3 semanas
+            # asi, y `AVG(token_chg_pct)` de /metricas ignoraba justo
+            # los rugs. Un fallo de red (muerto=False) sigue dejando
+            # NULL para reintentar.
+            from signal_tracker import _price_mc_ex
+            now_px, _mc, muerto, _liq = _price_mc_ex(r["mint"])
             if now_px and r["price0"]:
                 chg = round(100 * (now_px - r["price0"]) / r["price0"])
-                conn.execute(
-                    "UPDATE predictions SET token_chg_pct=? WHERE id=?",
-                    (chg, r["id"]))
-        except Exception:
-            pass
+            elif muerto:
+                chg = -100
+            else:
+                continue
+            conn.execute(
+                "UPDATE predictions SET token_chg_pct=? WHERE id=?",
+                (chg, r["id"]))
+        except Exception as e:
+            print(f"· Predicciones: no pude medir el token "
+                  f"{str(r['mint'])[:8]} ({e}); se reintenta luego")
     if rows:
         conn.commit()
 

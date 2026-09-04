@@ -36,6 +36,19 @@ def dev_status(mint: str, earliest=None) -> dict:
     except Exception as e:
         print(f"· dev_status pull falló: {e}")
         return {"known": True, "creator": creator, "vendio": None, "pct": None}
+    # (19-AA, auditoria M23) `fetch_parsed_txs` NO lanza: con Helius
+    # caido o con el freno del 85% devuelve [] y deja el motivo en la
+    # bandera del hilo. Antes ese [] llegaba abajo como "recibido 0,
+    # enviado 0" → "no detecté movimientos recientes": la linea
+    # tranquilizadora sobre la señal de rug mas fiable, dicha sin haber
+    # mirado. Se distingue y `dev_line` lo cuenta como lo que es.
+    from wallet_analyzer import motivo_fallo_descarga
+    _fallo = motivo_fallo_descarga()
+    if _fallo:
+        print(f"· dev_status: no pude comprobar al dev {creator[:8]} "
+              f"({_fallo})")
+        return {"known": True, "creator": creator, "vendio": None,
+                "pct": None, "fallo": _fallo}
     for tx in txs or []:
         for tt in (tx.get("tokenTransfers") or []):
             if tt.get("mint") != mint:
@@ -65,6 +78,8 @@ def dev_line(mint: str, earliest=None) -> str:
         return ""
     if not d.get("known"):
         return ""
+    if d.get("fallo"):
+        return "👨‍💻 Dev: no pude comprobar su suministro (Helius no respondió)"
     if d.get("vendio") is None:
         return "👨‍💻 Dev: no detecté movimientos recientes de su suministro"
     if d.get("vendio"):

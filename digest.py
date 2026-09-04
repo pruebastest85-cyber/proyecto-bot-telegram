@@ -106,11 +106,18 @@ def resumen_text() -> str:
         conn = get_conn()
         try:
             since = now - 30 * 86400
+            # (19-AA, auditoria M5) El mismo corte que /predicciones y
+            # /metricas: las predicciones anteriores a la marca de la
+            # Ola 18-G se puntuaron con el denominador equivocado (93%
+            # con acierto 0) y aqui seguian haciendo "lider en declive".
+            from predictions import marca_medicion
             dec = conn.execute(
                 """SELECT leader, AVG(outcome_pct) a, COUNT(*) n
                    FROM predictions WHERE status='evaluada' AND evaluated_ts>=?
+                     AND created_ts >= ?
                    GROUP BY leader HAVING COUNT(*)>=3 AND AVG(outcome_pct)<50
-                   ORDER BY a ASC LIMIT 4""", (since,)).fetchall()
+                   ORDER BY a ASC LIMIT 4""",
+                (since, marca_medicion(conn))).fetchall()
             gmap = {}
             if dec:
                 gmap = {r["address"]: r["alias"] for r in conn.execute(

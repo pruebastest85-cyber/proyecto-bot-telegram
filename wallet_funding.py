@@ -89,8 +89,13 @@ def fondeo(address: str) -> dict | None:
                 (address, out["funder"], out["nombre"], out["tipo"],
                  out["monto"], out["ts"], time.time()))
             conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            # (19-AA, auditoria M17) Esta cache es la que amortiza los
+            # 100 creditos de la llamada; `fondeo()` se invoca 3-4 veces
+            # por evaluacion. Si no se graba se vuelven a pagar, y antes
+            # eso pasaba en silencio total.
+            print(f"· Fondeo: no pude guardar la caché de "
+                  f"{address[:8]} ({e}); se volverá a consultar")
         return out if out["funder"] else None
     finally:
         conn.close()

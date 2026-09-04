@@ -587,6 +587,12 @@ def _c_presupuesto(conn):
                         "nube fuera de juego · titular: IA local")
         from ai_budget import budget_left, used_today, _cap
         quedan, usadas, cap = budget_left(conn), used_today(conn), _cap()
+        if usadas is None:
+            # (19-AA) Contador ilegible: la nube no se usa hasta poder
+            # leerlo. Grave solo si la nube es la titular.
+            return _chk("Presupuesto IA nube", WARN if orden == "nube" else OK,
+                        "contador ilegible (la nube no se usa hasta poder "
+                        "leerlo)", "revisa /errores: la base no responde")
         if quedan <= 0:
             # Solo es un problema si la nube es la titular.
             nivel = WARN if orden == "nube" else OK

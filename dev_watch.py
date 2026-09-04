@@ -151,8 +151,14 @@ def _dev_vendio(dev: str, mint: str, desde_ts: int) -> bool:
     medidos en la base el 24/8 — y, como la alerta se marca una sola
     vez, la venta REAL posterior ya nunca avisaba."""
     try:
-        from helius_rpc import _rpc
+        from helius_rpc import _rpc, ultimo_fallo
         txs, _tok = _rpc(dev, orden="desc", limite=25)
+        # (19-AA, auditoria M23) `_rpc` no lanza: deja el motivo en la
+        # bandera del hilo. El `except` de abajo (17-I) nunca saltaba,
+        # asi que "no pude comprobarlo" seguia pareciendo "no vendio".
+        _fallo = ultimo_fallo()
+        if _fallo:
+            raise RuntimeError(_fallo)
         for tx in txs or []:
             ts = tx.get("timestamp") or 0
             if ts and ts <= desde_ts:

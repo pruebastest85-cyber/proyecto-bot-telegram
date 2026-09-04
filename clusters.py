@@ -343,11 +343,14 @@ def find_clusters(min_shared: int = MIN_SHARED, construir: bool = True):
                     and _CACHE.get("min_shared") == min_shared):
                 return _copia(_CACHE["c"])
             return []
-        # Soltar el viejo ANTES de construir mantiene el pico de memoria
-        # en un solo grafo (CLAUDE.md §5), pero se guarda una referencia
-        # para poder devolverlo si la construccion falla.
+        # (19-AA, auditoria M19) La cache vieja se QUEDA puesta mientras
+        # se construye la nueva. Antes se ponia a None "para ahorrar
+        # memoria", pero `_previo` conservaba la referencia igual (no se
+        # ahorraba nada) y, durante la construccion, `predictions.on_buy`
+        # veia `cache_lista()=False` → meta_score al neutro (hasta 14
+        # puntos menos) → alertas ALPHA perdidas en esa ventana.
+        # `influence.py` (18-C) ya lo hacia bien; esto lo iguala.
         _previo = _CACHE["c"] if _CACHE.get("min_shared") == min_shared else None
-        _CACHE["c"] = None
         try:
             c = _build_clusters(min_shared)
         except Exception as e:

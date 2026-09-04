@@ -10942,6 +10942,397 @@ def prueba_19z():
               "txt = _recortar_tg(txt)" in _insp.getsource(tb.daily_summary_job))
 
 
+def prueba_19aa():
+    bloque("19-AA - tokens muertos en predicciones, digest con marca, clusters "
+           "sin ceguera, radar/dev con Helius caido, cachés que avisan, "
+           "presupuesto ilegible, local ocupada")
+    import contextlib
+    import io
+    import time as _t
+    from db import get_conn, set_setting
+
+    # ── 1) M4: un token MUERTO cuenta como -100, no queda sin medir ────
+    import predictions as pr
+    import signal_tracker as st
+    import token_check as tc
+    conn = get_conn()
+    conn.execute("DELETE FROM predictions")
+    conn.execute(
+        """INSERT INTO predictions (leader, mint, created_ts, stage,
+           confidence, meta_score, predicted, arrived, alerted_stage,
+           status, tier, price0, evaluated_ts, outcome_pct)
+           VALUES ('L1','MUERTO',1,1,50,50,'[]','[]',0,'evaluada','B',
+                   0.001,?,0)""", (int(_t.time()),))
+    conn.execute(
+        """INSERT INTO predictions (leader, mint, created_ts, stage,
+           confidence, meta_score, predicted, arrived, alerted_stage,
+           status, tier, price0, evaluated_ts, outcome_pct)
+           VALUES ('L1','SINRED',1,1,50,50,'[]','[]',0,'evaluada','B',
+                   0.001,?,0)""", (int(_t.time()),))
+    conn.commit()
+    _px_prev, _an_prev = st._price_mc_ex, tc.analyze_token
+    try:
+        # DexScreener: MUERTO responde 200 sin pares; SINRED es un fallo
+        # de red (muerto=False, sin precio).
+        st._price_mc_ex = lambda m: ((None, None, True, 0.0) if m == "MUERTO"
+                                     else (None, None, False, 0.0))
+        tc.analyze_token = lambda m: {"price": None}
+        with contextlib.redirect_stdout(io.StringIO()):
+            pr.fill_token_performance(conn, limit=5)
+        f = {r["mint"]: r["token_chg_pct"] for r in conn.execute(
+            "SELECT mint, token_chg_pct FROM predictions").fetchall()}
+        comprobar("un token que dejó de cotizar queda como -100 (pérdida "
+                  "total), no NULL para siempre", f.get("MUERTO") == -100, f)
+        comprobar("y un fallo de red NO se confunde con muerte (sigue NULL "
+                  "y se reintenta)", f.get("SINRED") is None, f)
+
+        def _explota(m):
+            raise RuntimeError("boom precio")
+        st._price_mc_ex = _explota
+        conn.execute("UPDATE predictions SET token_chg_pct=NULL")
+        conn.commit()
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            pr.fill_token_performance(conn, limit=5)
+        comprobar("si el precio explota, se DICE (no hay except mudo)",
+                  "boom precio" in _buf.getvalue(), _buf.getvalue()[:200])
+    finally:
+        st._price_mc_ex, tc.analyze_token = _px_prev, _an_prev
+        conn.execute("DELETE FROM predictions")
+        conn.commit()
+
+    # ── 2) M5: el resumen diario respeta la marca de medición ─────────
+    import digest as dg
+    ahora = int(_t.time())
+    marca = ahora - 3600
+    conn.execute("DELETE FROM wallets")
+    conn.execute(
+        "INSERT INTO wallets (address, alias, is_tracked) VALUES "
+        "('LIDERVIEJO','Viejo',1)")
+    for i in range(4):
+        conn.execute(
+            """INSERT INTO predictions (leader, mint, created_ts, stage,
+               confidence, meta_score, predicted, arrived, alerted_stage,
+               status, tier, price0, evaluated_ts, outcome_pct)
+               VALUES ('LIDERVIEJO',?,?,1,50,50,'[]','[]',0,'evaluada',
+                       'B',0.001,?,0)""",
+            (f"M{i}", marca - 86400 * (i + 1), ahora - 60))
+    conn.commit()
+    set_setting(conn, "pred_medicion_desde", str(marca))
+    conn.commit()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            txt = dg.resumen_text()
+        comprobar("las predicciones ANTERIORES a la marca (denominador "
+                  "equivocado, 18-G) NO hacen 'líder en declive' en el "
+                  "resumen", "declive" not in txt, txt[-300:])
+        conn.execute("DELETE FROM settings WHERE key='pred_medicion_desde'")
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            txt2 = dg.resumen_text()
+        comprobar("y sin marca se mide como siempre (sale el declive)",
+                  "declive" in txt2, txt2[-300:])
+    finally:
+        conn.execute("DELETE FROM predictions")
+        conn.execute("DELETE FROM wallets")
+        conn.execute("DELETE FROM settings WHERE key='pred_medicion_desde'")
+        conn.commit()
+
+    # ── 3) M19: la caché de clusters NO se vacía mientras se reconstruye
+    import clusters as cl
+    _cache_prev = dict(cl._CACHE)
+    _build_prev = cl._build_clusters
+    vistos = []
+    try:
+        cl._CACHE.update({"c": [{"wallets": ["A", "B"], "size": 2,
+                                 "shared_tokens": 3}],
+                          "ts": 0.0, "min_shared": cl.MIN_SHARED,
+                          "fallo": 0.0})        # vieja pero existente
+
+        def _construye(min_shared):
+            vistos.append(cl.cache_lista())     # ¿el camino caliente ve algo?
+            return [{"wallets": ["C", "D"], "size": 2, "shared_tokens": 4}]
+        cl._build_clusters = _construye
+        with contextlib.redirect_stdout(io.StringIO()):
+            nuevo = cl.find_clusters()
+        comprobar("mientras se reconstruye, el camino caliente SIGUE viendo "
+                  "la caché vieja (antes: None → meta_score al neutro)",
+                  vistos == [True], vistos)
+        comprobar("y al terminar se sirve la nueva",
+                  nuevo and nuevo[0]["wallets"] == ["C", "D"], nuevo)
+
+        def _falla(min_shared):
+            raise RuntimeError("grafo roto")
+        cl._build_clusters = _falla
+        cl._CACHE["ts"] = 0.0
+        with contextlib.redirect_stdout(io.StringIO()):
+            tras_fallo = cl.find_clusters()
+        comprobar("si la construcción falla se sigue con la anterior",
+                  tras_fallo and tras_fallo[0]["wallets"] == ["C", "D"],
+                  tras_fallo)
+    finally:
+        cl._build_clusters = _build_prev
+        cl._CACHE.clear()
+        cl._CACHE.update(_cache_prev)
+
+    # ── 4) M18: radar — Helius caído NO es "sin_conocidas:0" ───────────
+    import radar as rd
+    import helius_rpc as hr
+    import helius_budget as _hb
+    _puede_prev = _hb.puede_llamar
+    _hb.puede_llamar = lambda *a, **k: True
+    _fr_prev, _pt_prev = rd._frescos, hr.primeras_txs
+    _an_prev2, _sem_prev = tc.analyze_token, rd._semaforo
+    _px_prev2 = st._price_mc_ex
+    rd._frescos = lambda: [{"mint": "RADARX", "symbol": "RX",
+                            "liq": 20000.0, "edad_min": 10}]
+    tc.analyze_token = lambda m: {"price": 1.0, "liq": 20000.0,
+                                  "symbol": "RX", "rug_ok": True}
+    rd._semaforo = lambda t: (True, "seguridad OK")
+    st._price_mc_ex = lambda m: (1.0, 100.0, False, 100.0)
+
+    def _helius_caido(mint, max_txs=1500):
+        hr._set_fallo("Helius no respondió (timeout)")
+        return ([], False)
+    hr.primeras_txs = _helius_caido
+    try:
+        conn.execute("DELETE FROM radar_tokens")
+        conn.execute("DELETE FROM settings WHERE key LIKE 'radar_sin_chequear%'")
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rd.escanear()
+        fila = conn.execute(
+            "SELECT resultado FROM radar_tokens WHERE mint='RADARX'"
+        ).fetchone()
+        comprobar("con Helius caído el token NO queda quemado como "
+                  "'sin_conocidas:0': vuelve a la cola", fila is None,
+                  dict(fila) if fila else None)
+        from db import get_setting
+        comprobar("y se cuenta como 'sin poder comprobar' (sale en /radar)",
+                  int(float(get_setting(conn, "radar_sin_chequear", 0)
+                            or 0)) >= 1)
+
+        def _helius_bien(mint, max_txs=1500):
+            hr._set_fallo(None)
+            return ([{"tokenTransfers": [{"mint": mint,
+                                           "toUserAccount": "NADIE"}]}],
+                    True)
+        hr.primeras_txs = _helius_bien
+        conn.execute("DELETE FROM radar_tokens")
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rd.escanear()
+        fila = conn.execute(
+            "SELECT resultado FROM radar_tokens WHERE mint='RADARX'"
+        ).fetchone()
+        comprobar("con Helius bien y sin conocidas sí se cierra como "
+                  "sin_conocidas", fila is not None
+                  and str(fila["resultado"]).startswith("sin_conocidas"),
+                  dict(fila) if fila else None)
+    finally:
+        _hb.puede_llamar = _puede_prev
+        rd._frescos, hr.primeras_txs = _fr_prev, _pt_prev
+        tc.analyze_token, rd._semaforo = _an_prev2, _sem_prev
+        st._price_mc_ex = _px_prev2
+        conn.execute("DELETE FROM radar_tokens")
+        conn.execute("DELETE FROM settings WHERE key LIKE 'radar_sin_chequear%'")
+        conn.commit()
+
+    # ── 5) M17: las cachés de fondeo/identidad avisan si no pueden grabar
+    import wallet_funding as wf
+    import wallet_identity as wi
+
+    class _ConnRota:
+        def __init__(self, real):
+            self._r = real
+
+        def execute(self, sql, *a):
+            if "INSERT" in sql and ("funder_nombre" in sql
+                                    or "wallet_identity" in sql):
+                raise RuntimeError("database is locked (prueba)")
+            return self._r.execute(sql, *a)
+
+        def __getattr__(self, n):
+            return getattr(self._r, n)
+
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        wi._guardar(_ConnRota(conn), "W1", {"tipo": "cex", "nombre": "X"})
+    comprobar("identidad: si la caché no se puede grabar, se DICE (100 "
+              "créditos que se volverán a pagar)",
+              "identidad" in _buf.getvalue().lower()
+              and "locked" in _buf.getvalue(), _buf.getvalue()[:200])
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"funder": "FUNDER1", "funderName": "n", "funderType": "t",
+                    "amount": 1.0, "timestamp": 1}
+    _gc_prev, _get_prev = wf.get_conn, wf.requests.get
+    import os as _os
+    _key_prev = _os.environ.get("HELIUS_API_KEY")
+    wf.get_conn = lambda: _ConnRota(get_conn())
+    wf.requests.get = lambda *a, **k: _Resp()
+    _os.environ["HELIUS_API_KEY"] = "clave-de-prueba"
+    try:
+        wf._ensure(conn)
+        conn.execute("DELETE FROM wallet_funding WHERE address='WF1'")
+        conn.commit()
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            r = wf.fondeo("WF1")
+        comprobar("fondeo: el dato se devuelve igual",
+                  r and r.get("funder") == "FUNDER1", r)
+        comprobar("pero si la caché no se pudo grabar, se DICE",
+                  "fondeo" in _buf.getvalue().lower()
+                  and "locked" in _buf.getvalue(), _buf.getvalue()[:200])
+    finally:
+        wf.get_conn, wf.requests.get = _gc_prev, _get_prev
+        if _key_prev is None:
+            _os.environ.pop("HELIUS_API_KEY", None)
+        else:
+            _os.environ["HELIUS_API_KEY"] = _key_prev
+
+    # ── 6) M23: "no pude comprobarlo" ≠ "no detecté movimientos" ───────
+    import dev_check as dc
+    import dev_watch as dw
+    import wallet_analyzer as wa
+    _fc_prev, _fp_prev = dc.find_creator, dc.fetch_parsed_txs
+    try:
+        dc.find_creator = lambda mint, earliest=None: "DEV1"
+
+        def _pull_caido(addr, limit=100):
+            wa._set_fallo("Helius no respondio (timeout)")
+            return []
+        dc.fetch_parsed_txs = _pull_caido
+        with contextlib.redirect_stdout(io.StringIO()):
+            linea = dc.dev_line("MINTX")
+        comprobar("dev_check: Helius caído → 'no pude comprobar', NUNCA "
+                  "'no detecté movimientos' (la línea tranquilizadora)",
+                  "no pude comprobar" in linea
+                  and "no detecté" not in linea, linea)
+
+        def _pull_vacio(addr, limit=100):
+            wa._set_fallo(None)
+            return []
+        dc.fetch_parsed_txs = _pull_vacio
+        with contextlib.redirect_stdout(io.StringIO()):
+            linea2 = dc.dev_line("MINTX")
+        comprobar("y con Helius bien pero sin movimientos, la de siempre",
+                  "no detecté movimientos" in linea2, linea2)
+    finally:
+        dc.find_creator, dc.fetch_parsed_txs = _fc_prev, _fp_prev
+
+    _rpc_prev = hr._rpc
+
+    def _rpc_caido(addr, **k):
+        hr._set_fallo("Helius rechazó la petición (prueba)")
+        return ([], None)
+    hr._rpc = _rpc_caido
+    try:
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            v = dw._dev_vendio("DEV1", "MINTX", 0)
+        comprobar("dev_watch: con Helius caído devuelve False PERO deja "
+                  "rastro (el except de 17-I nunca saltaba: _rpc no lanza)",
+                  v is False and "DEV1"[:8] in _buf.getvalue()
+                  and "rechaz" in _buf.getvalue(), _buf.getvalue()[:200])
+    finally:
+        hr._rpc = _rpc_prev
+
+    # ── 7) M6: presupuesto de nube ilegible = NO se gasta ──────────────
+    import ai_budget as ab
+    _gs_prev, _ss_prev = ab.get_setting, ab.set_setting
+    escritos = []
+
+    def _gs_rota(conn_, k, d=None):
+        raise RuntimeError("settings inaccesible")
+    try:
+        ab.get_setting = _gs_rota
+        ab.set_setting = lambda c, k, v: escritos.append((k, v))
+        with contextlib.redirect_stdout(io.StringIO()):
+            comprobar("used_today ilegible → None, no 0",
+                      ab.used_today(conn) is None)
+            comprobar("budget_left ilegible → 0 (cerrado, no 300 abierto)",
+                      ab.budget_left(conn) == 0, ab.budget_left(conn))
+            ab.record_call(conn)
+        comprobar("record_call NO resetea el contador a 1 si no puede "
+                  "leerlo", escritos == [], escritos)
+        with contextlib.redirect_stdout(io.StringIO()):
+            sl = ab.status_line(conn)
+        comprobar("status_line lo dice en vez de inventar 0/300",
+                  "?" in sl or "ilegible" in sl, sl)
+    finally:
+        ab.get_setting, ab.set_setting = _gs_prev, _ss_prev
+
+    import salud as sd
+    import os as _os2
+    _key2 = _os2.environ.get("ANTHROPIC_API_KEY")
+    _ut_prev, _bl_prev = ab.used_today, ab.budget_left
+    try:
+        _os2.environ["ANTHROPIC_API_KEY"] = "clave-falsa"
+        ab.used_today = lambda c: None
+        ab.budget_left = lambda c: 0
+        with contextlib.redirect_stdout(io.StringIO()):
+            ch = sd._c_presupuesto(conn)
+        comprobar("/salud: contador ilegible se dice como tal, no como "
+                  "'agotado (None/300)'", "None" not in str(ch)
+                  and ("ilegible" in str(ch) or "no se pudo leer" in str(ch)),
+                  str(ch))
+    finally:
+        ab.used_today, ab.budget_left = _ut_prev, _bl_prev
+        if _key2 is None:
+            _os2.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            _os2.environ["ANTHROPIC_API_KEY"] = _key2
+
+    # ── 8) ia_puente: local OCUPADA (timeout de lectura) no cae a la nube;
+    #       local APAGADA (no conecta) sí ──────────────────────────────
+    import ia_puente as ip
+    import requests as _rq
+    _post_prev, _nube_prev = ip.requests.post, ip._nube
+    _st_prev = ip._setting
+    import os as _os3
+    _url_prev = _os3.environ.get("LOCAL_AI_URL")
+    _os3.environ["LOCAL_AI_URL"] = "http://127.0.0.1:1"
+    nube_llamada = []
+    try:
+        ip._setting = lambda k, d=None, c=None: (
+            "local_primero" if k == "ia_proveedor" else d)
+        ip._nube = lambda *a, **k: nube_llamada.append(1) or "de la nube"
+
+        def _post_lento(*a, **k):
+            raise _rq.exceptions.ReadTimeout("lenta")
+        ip.requests.post = _post_lento
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = ip.completar_ex("hola", timeout=5, conn=conn)
+        comprobar("local OCUPADA (ReadTimeout): NO se pasa a la nube de "
+                  "pago (el tope de 300 no protegía justo con carga)",
+                  nube_llamada == [] and r == (None, None),
+                  f"nube={nube_llamada} r={r}")
+
+        def _post_apagada(*a, **k):
+            raise _rq.exceptions.ConnectionError("connection refused")
+        ip.requests.post = _post_apagada
+        with contextlib.redirect_stdout(io.StringIO()):
+            r2 = ip.completar_ex("hola", timeout=5, conn=conn)
+        comprobar("local APAGADA (no conecta): la nube sigue de respaldo",
+                  nube_llamada == [1] and r2 == ("de la nube", "nube"),
+                  f"nube={nube_llamada} r={r2}")
+    finally:
+        ip.requests.post, ip._nube, ip._setting = (_post_prev, _nube_prev,
+                                                   _st_prev)
+        if _url_prev is None:
+            _os3.environ.pop("LOCAL_AI_URL", None)
+        else:
+            _os3.environ["LOCAL_AI_URL"] = _url_prev
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -10994,6 +11385,7 @@ def main():
     prueba_19x()
     prueba_19y()
     prueba_19z()
+    prueba_19aa()
 
     print("\n" + "─" * 60)
     if _FALLOS:

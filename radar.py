@@ -356,7 +356,26 @@ def escanear() -> int:
                 continue
 
             # 2. ¿Está comprando gente que ya conocemos?
+            # (19-AA, auditoria M18) Helius caido NO es "nadie conocido
+            # compro". `_rpc` no lanza: devuelve [] y deja el motivo en
+            # la bandera del hilo. Antes ese [] se grababa como
+            # `sin_conocidas:0` y el INSERT OR IGNORE de arriba impedia
+            # volver a mirar el token: quemado por un fallo nuestro.
+            # Ahora se trata como RugCheck caido (17-I): se borra la
+            # reserva y el token vuelve a la cola.
+            from helius_rpc import reset_fallo as _hr_reset, \
+                ultimo_fallo as _hr_fallo
+            _hr_reset()
             buyers = _compradores(c["mint"])
+            _fallo_helius = _hr_fallo()
+            if _fallo_helius:
+                print(f"· Radar: no pude ver los compradores de "
+                      f"{c['mint'][:8]} ({_fallo_helius}); vuelve a la cola")
+                conn.execute("DELETE FROM radar_tokens WHERE mint=?",
+                             (c["mint"],))
+                conn.commit()
+                _sin_chequear += 1
+                continue
             conocidas = _conocidas(conn, buyers)
             if len(conocidas) < MIN_CONOCIDAS:
                 conn.execute(
@@ -432,8 +451,8 @@ def escanear() -> int:
         # (Ola 17-I) Se DICE. Antes esto no aparecia en ningun sitio: ni
         # en el log ni en /radar, asi que un rato de RugCheck caido era
         # completamente invisible.
-        print(f"📡 Radar: {_sin_chequear} token(s) sin poder comprobar la "
-              f"seguridad; vuelven a la cola")
+        print(f"📡 Radar: {_sin_chequear} token(s) sin poder comprobar "
+              f"(seguridad o compradores: fuente caída); vuelven a la cola")
         try:                    # (Ola 17-K) para que /radar lo enseñe
             _c2 = get_conn()
             try:
@@ -634,7 +653,7 @@ def radar_text() -> str:
         finally:
             _c3.close()
         if _sc and time.time() - _sc_ts < 3600:
-            out.append(f"  ⚪ sin poder comprobar la seguridad en la última "
+            out.append(f"  ⚪ sin poder comprobar (fuente caída) en la última "
                        f"pasada: {_sc} (vuelven a la cola, no se pierden)")
     except Exception:
         pass

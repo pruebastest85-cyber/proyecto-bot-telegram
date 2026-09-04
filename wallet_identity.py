@@ -79,8 +79,11 @@ def _guardar(conn, addr, d):
             (addr, d.get("tipo"), d.get("nombre"), d.get("categoria"),
              json.dumps(d.get("etiquetas") or []), time.time()))
         conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        # (19-AA, auditoria M17) Igual que en wallet_funding: sin la
+        # cache se vuelve a pagar la consulta, y antes no se decia.
+        print(f"· Identidad: no pude guardar la caché de "
+              f"{str(addr)[:8]} ({e}); se volverá a consultar")
 
 
 def identificar(direcciones: list[str]) -> dict:
