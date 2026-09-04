@@ -3453,7 +3453,34 @@ def _con_reloj(nombre: str, fn, intervalo: int | None = None):
     return _w
 
 
+def _instalar_ctrl_break() -> bool:
+    """(19-W) Que CTRL_BREAK termine el bot por el camino LIMPIO.
+
+    El supervisor para el bot con `CTRL_BREAK_EVENT` (19-G) creyendo que
+    "llega como KeyboardInterrupt y los atexit corren". En Windows llega
+    como SIGBREAK, no SIGINT, y Python no le pone manejador: el proceso
+    muere por la accion por defecto, sin `atexit` — asi que el volcado del
+    bufer de creditos de Helius (api_usage) se seguia perdiendo en cada
+    despliegue (hasta 60 s / 25 eventos), y el freno del 85 % y el cupo
+    adaptativo iban con subconteo. Con `default_int_handler` SIGBREAK
+    hace lo mismo que Ctrl+C: KeyboardInterrupt → run_polling se apaga
+    ordenadamente → atexit corre. En Linux no existe SIGBREAK y no se
+    hace nada.
+    """
+    import signal as _sg
+    sig = getattr(_sg, "SIGBREAK", None)
+    if sig is None:
+        return False
+    try:
+        _sg.signal(sig, _sg.default_int_handler)
+        return True
+    except Exception as e:
+        print(f"· No pude instalar el manejador de CTRL_BREAK ({e})")
+        return False
+
+
 def main():
+    _instalar_ctrl_break()
     if not BOT_TOKEN:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN. Créalo con @BotFather.")
     if not ADMIN_ID:

@@ -49,6 +49,15 @@ proximo_intento = 0.0
 # (19-G) Ultimo commit que arranco BIEN (vivio mas de VIDA_CORTA_S). Es
 # el destino del rollback cuando uno nuevo no levanta.
 commit_bueno = None
+# (19-W) Commit que YA fue rechazado (no compila, o murio dos veces al
+# arrancar y hubo rollback). Sin esta memoria, tras el rollback HEAD =
+# commit_bueno != origin/main, y a la media hora `hay_actualizacion()`
+# volvia a ser cierto: matar el bot bueno, instalar el malo, dos muertes,
+# rollback, media hora, otra vez — ~45 vueltas al dia hasta que el dueño
+# subiera otro commit, cortando LaserStream (y su cola en vuelo) en cada
+# vuelta y mandando dos mensajes por vuelta. Un commit nuevo distinto lo
+# desbloquea solo.
+commit_rechazado = None
 # (19-G) Fichero de instancia unica. Nada impedia arrancar DOS
 # supervisores —doble clic en el .bat mas el del arranque de Windows—, y
 # dos supervisores son dos bots con el mismo token de Telegram (el
@@ -130,6 +139,9 @@ def hay_actualizacion() -> bool:
         if not aqui or not alla:
             print("· No pude leer los commits; no toco nada esta vuelta")
             return False
+        if alla == commit_rechazado:
+            # (19-W) Ese ya se probo y no sirve: no se vuelve a instalar.
+            return False
         return aqui != alla
     except Exception as e:
         print(f"· No pude consultar GitHub: {e}")
@@ -162,6 +174,7 @@ def _avisar_una_vez(objetivo, texto):
 def actualizar() -> bool:
     """Trae el codigo nuevo. Devuelve si de verdad quedo en origin/main."""
     global pip_pendiente, aviso_fallo_commit, proximo_intento
+    global commit_rechazado
     print("⬇️  Commit nuevo en GitHub: actualizando...")
     objetivo = _git("rev-parse", "origin/main")
     if not objetivo:
@@ -197,6 +210,7 @@ def actualizar() -> bool:
                       "asi que dejo el arbol como esta."))
         if commit_bueno:
             volver_atras(commit_bueno)
+        commit_rechazado = objetivo          # (19-W) no reintentarlo
         proximo_intento = time.monotonic() + ESPERA_FALLO_S
         return False
     pip_pendiente = not _pip()
@@ -207,6 +221,7 @@ def actualizar() -> bool:
     # en la siguiente media hora se quedaria esperando sin motivo).
     aviso_fallo_commit = None
     proximo_intento = 0.0
+    commit_rechazado = None              # (19-W) este si sirvio
     print(f"✅ Codigo en {_git('rev-parse', '--short', 'HEAD')}")
     return True
 
@@ -258,6 +273,52 @@ def volver_atras(destino: str) -> bool:
     return True
 
 
+def _leer_env(ruta: str) -> dict:
+    """(19-W) Lee `K=V` de un .env sin imprimir ni guardar nada mas.
+
+    El .bat carga bot_local.env UNA vez al arrancar, y `Popen` sin `env=`
+    hereda ese entorno congelado: ningun reinicio —ni por commit ni por
+    crash— recogia un cambio en el archivo hasta cerrar la ventana y
+    volver a lanzar el .bat. Vivido el 30/8 con HELIUS_CYCLE_START_DAY:
+    escrito a las 23:40, el bot siguio contando con el valor viejo, y
+    ningun mensaje lo decia. Es el mismo sintoma que 19-L/19-O ("el
+    mando no hace nada").
+
+    Los VALORES son secretos (tokens, claves): esta funcion no los
+    imprime, no los registra y no los manda a ningun sitio; solo los
+    devuelve para `Popen(env=...)`.
+    """
+    salida = {}
+    try:
+        with open(ruta, encoding="utf-8", errors="replace") as f:
+            for linea in f:
+                linea = linea.strip()
+                if not linea or linea.startswith("#") or "=" not in linea:
+                    continue
+                if linea.startswith("export "):
+                    linea = linea[7:].lstrip()
+                k, v = linea.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                if k:
+                    salida[k] = v
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️  No pude leer {os.path.basename(ruta)} ({e}); el bot "
+              f"hereda el entorno del supervisor")
+    return salida
+
+
+def _entorno_hijo() -> dict:
+    """(19-W) Entorno con el que arranca el bot: el del supervisor mas lo
+    que diga bot_local.env AHORA (el archivo manda)."""
+    env = dict(os.environ)
+    env.update(_leer_env(os.path.join(DESTINO, "bot_local.env")))
+    return env
+
+
 def lanzar() -> subprocess.Popen:
     global pip_pendiente
     if pip_pendiente:
@@ -281,8 +342,9 @@ def lanzar() -> subprocess.Popen:
     _flags = {}
     if os.name == "nt":
         _flags["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    # (19-W) `env=`: el bot recoge los cambios del .env en cada arranque.
     return subprocess.Popen([sys.executable, "telegram_bot.py"],
-                            cwd=DESTINO, **_flags)
+                            cwd=DESTINO, env=_entorno_hijo(), **_flags)
 
 
 def parar(proc: subprocess.Popen):
@@ -392,7 +454,7 @@ def instancia_unica() -> bool:
 
 
 def main():
-    global proximo_intento, commit_bueno
+    global proximo_intento, commit_bueno, commit_rechazado
     if not instancia_unica():
         return
     print("=" * 60)
@@ -439,6 +501,7 @@ def main():
                 if (muertes_seguidas >= 2 and commit_bueno
                         and _hoy and _hoy != commit_bueno):
                     if volver_atras(commit_bueno):
+                        commit_rechazado = _hoy   # (19-W) no reinstalarlo
                         muertes_seguidas = 0
                         # No se vuelve a intentar la actualizacion
                         # enseguida: si no, dentro de 5 min se detectaria

@@ -10133,6 +10133,168 @@ def prueba_19v():
     conn.close()
 
 
+def prueba_19w():
+    bloque("19-W - supervisor: commit rechazado, .env de ahora, CTRL_BREAK limpio")
+    import contextlib
+    import io as _io
+    import os as _os
+    import signal as _sg
+    import tempfile
+    import supervisor as sv
+    import telegram_bot as tb
+
+    # ── 1) _leer_env: K=V, CRLF, comentarios, comillas, export ────────
+    d = tempfile.mkdtemp()
+    ruta = _os.path.join(d, "bot_local.env")
+    with open(ruta, "wb") as f:
+        f.write(b"# comentario\r\nPRUEBA19W_A=hola\r\n\r\n"
+                b"PRUEBA19W_B=\"con comillas\"\r\n"
+                b"export PRUEBA19W_C=exportada\r\n"
+                b"PRUEBA19W_SECRETO=sk-clave-secreta-123\r\n"
+                b"linea sin igual\r\n=sin clave\r\n")
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        env = sv._leer_env(ruta)
+    comprobar("lee K=V y quita el CR de Windows",
+              env.get("PRUEBA19W_A") == "hola", env)
+    comprobar("quita las comillas", env.get("PRUEBA19W_B") == "con comillas")
+    comprobar("acepta 'export K=V'", env.get("PRUEBA19W_C") == "exportada")
+    comprobar("ignora comentarios, vacias y lineas sin clave",
+              len(env) == 4 and "" not in env, env)
+    comprobar("NO imprime los valores (son secretos)",
+              "sk-clave-secreta-123" not in buf.getvalue())
+    comprobar("un archivo que no existe da {} sin reventar",
+              sv._leer_env(_os.path.join(d, "no_existe.env")) == {})
+
+    # ── 2) el hijo arranca con el .env de AHORA ───────────────────────
+    _destino_prev = sv.DESTINO
+    _os.environ["PRUEBA19W_A"] = "vieja-del-supervisor"
+    try:
+        sv.DESTINO = d
+        e = sv._entorno_hijo()
+        comprobar("el archivo MANDA sobre el entorno heredado",
+                  e.get("PRUEBA19W_A") == "hola", e.get("PRUEBA19W_A"))
+        comprobar("y lo heredado que no esta en el archivo se conserva",
+                  e.get("PATH") == _os.environ.get("PATH"))
+        # lanzar() de verdad, con Popen/run/git/pip falsos.
+        capturado = {}
+
+        class _Proc:
+            def __init__(self, *a, **k):
+                capturado.update(k)
+            def poll(self):
+                return None
+
+        _reales = (sv.subprocess.Popen, sv.subprocess.run, sv._git, sv._pip)
+        sv.subprocess.Popen = _Proc
+        sv.subprocess.run = lambda *a, **k: None
+        sv._git = lambda *a, **k: "abc1234"
+        sv._pip = lambda: True
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):
+                sv.lanzar()
+        finally:
+            (sv.subprocess.Popen, sv.subprocess.run, sv._git,
+             sv._pip) = _reales
+        comprobar("lanzar() pasa env= al hijo",
+                  "env" in capturado and capturado["env"] is not None)
+        comprobar("y ese env trae lo que dice el archivo AHORA",
+                  (capturado.get("env") or {}).get("PRUEBA19W_A") == "hola")
+    finally:
+        sv.DESTINO = _destino_prev
+        _os.environ.pop("PRUEBA19W_A", None)
+
+    # ── 3) un commit rechazado no se reinstala ────────────────────────
+    _reales = (sv._git, sv._git_ok, sv.commit_rechazado)
+    try:
+        sv._git_ok = lambda *a, **k: True
+        sv._git = lambda *a, **k: {"HEAD": "aaa"}.get(a[-1], "bbb")
+        sv.commit_rechazado = None
+        comprobar("con HEAD=aaa y origin=bbb hay actualizacion",
+                  sv.hay_actualizacion() is True)
+        sv.commit_rechazado = "bbb"
+        comprobar("si bbb ya fue RECHAZADO, NO se vuelve a instalar "
+                  "(antes: cada 30 min, para siempre)",
+                  sv.hay_actualizacion() is False)
+        sv.commit_rechazado = "ccc"
+        comprobar("un commit NUEVO distinto del rechazado si se instala",
+                  sv.hay_actualizacion() is True)
+    finally:
+        sv._git, sv._git_ok, sv.commit_rechazado = _reales
+
+    # ── 4) actualizar(): quien rechaza, marca; quien acierta, limpia ──
+    _reales = (sv._git, sv._git_ok, sv.compila, sv.volver_atras, sv._avisar,
+               sv._pip, sv.commit_bueno, sv.commit_rechazado,
+               sv.proximo_intento)
+    try:
+        sv._git_ok = lambda *a, **k: True
+        sv._git = lambda *a, **k: "bbb"
+        sv.volver_atras = lambda d: True
+        sv._avisar = lambda t: None
+        sv._pip = lambda: True
+        sv.commit_bueno = "aaa"
+        sv.commit_rechazado = None
+        sv.compila = lambda: False
+        with contextlib.redirect_stdout(_io.StringIO()):
+            ok = sv.actualizar()
+        comprobar("un commit que NO compila se marca como rechazado",
+                  ok is False and sv.commit_rechazado == "bbb",
+                  sv.commit_rechazado)
+        sv.compila = lambda: True
+        with contextlib.redirect_stdout(_io.StringIO()):
+            ok = sv.actualizar()
+        comprobar("y un commit que SI sirve limpia la marca",
+                  ok is True and sv.commit_rechazado is None,
+                  sv.commit_rechazado)
+    finally:
+        (sv._git, sv._git_ok, sv.compila, sv.volver_atras, sv._avisar,
+         sv._pip, sv.commit_bueno, sv.commit_rechazado,
+         sv.proximo_intento) = _reales
+    # El rollback por muerte temprana tambien marca (por AST: es un
+    # bucle infinito con sleeps, no se puede ejecutar aqui).
+
+    import inspect as _insp
+    _src = _insp.getsource(sv.main)
+    comprobar("el rollback por dos muertes tempranas tambien marca el "
+              "commit como rechazado",
+              "commit_rechazado = _hoy" in _src)
+
+    # ── 5) CTRL_BREAK termina como Ctrl+C (atexit corre) ──────────────
+    # En Linux no existe SIGBREAK: se simula con SIGUSR1 para EJECUTAR
+    # el mecanismo, no solo leerlo.
+    _tenia = hasattr(_sg, "SIGBREAK")
+    _prev_h = _sg.getsignal(_sg.SIGUSR1)
+    try:
+        # Manejador NEUTRO primero: si `_instalar_ctrl_break` no lo
+        # sustituye, la señal no hace nada (y la prueba de abajo falla con
+        # nombre) en vez de matar la suite entera por la accion por
+        # defecto de SIGUSR1.
+        _sg.signal(_sg.SIGUSR1, lambda *a: None)
+        if not _tenia:
+            _sg.SIGBREAK = _sg.SIGUSR1
+        comprobar("el manejador se instala cuando SIGBREAK existe",
+                  tb._instalar_ctrl_break() is True)
+        _salto = False
+        try:
+            _os.kill(_os.getpid(), _sg.SIGUSR1)
+            import time as _tt
+            _tt.sleep(0.2)
+        except KeyboardInterrupt:
+            _salto = True
+        comprobar("y la señal se convierte en KeyboardInterrupt (el camino "
+                  "limpio: run_polling se apaga y los atexit corren)",
+                  _salto)
+    finally:
+        _sg.signal(_sg.SIGUSR1, _prev_h)
+        if not _tenia and hasattr(_sg, "SIGBREAK"):
+            del _sg.SIGBREAK
+    if not _tenia:
+        comprobar("sin SIGBREAK (Linux) no hace nada y devuelve False",
+                  tb._instalar_ctrl_break() is False)
+    comprobar("main() lo instala antes de arrancar",
+              "_instalar_ctrl_break()" in _insp.getsource(tb.main))
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -10181,6 +10343,7 @@ def main():
     prueba_19t()
     prueba_19u()
     prueba_19v()
+    prueba_19w()
 
     print("\n" + "─" * 60)
     if _FALLOS:
