@@ -722,6 +722,12 @@ def _preparar_pg(pg):
             # vendidos. Si la ⭐ vende el 15%, el paper vende SU 15%.
             ("paper_trades", "fraccion_restante", "DOUBLE PRECISION"),
             ("paper_trades", "pnl_realizado_usd", "DOUBLE PRECISION"),
+            # (19-AG) MC y liquidez del pool en el momento del cierre: la
+            # tarjeta "hizo xN" dice a que MC salio el paper, y el
+            # desglose del costo real estima el impacto propio con la
+            # liquidez de salida.
+            ("paper_trades", "exit_mc", "DOUBLE PRECISION"),
+            ("paper_trades", "exit_liq", "DOUBLE PRECISION"),
             # (Ola 18-E) Rendimiento ya realizado por los trozos, en
             # FRACCION del importe invertido, no en dolares. Existe porque
             # el PnL de una venta parcial no depende de saber el cambio
@@ -910,6 +916,7 @@ def _preparar_sqlite(conn):
                      ("pnl_usd_neto", "REAL"), ("demora_s", "REAL"),
                      ("fraccion_restante", "REAL"),
                      ("pnl_realizado_usd", "REAL"),
+                     ("exit_mc", "REAL"), ("exit_liq", "REAL"),   # (19-AG)
                      ("pnl_realizado_frac", "REAL"),
                      ("sin_dato_desde", "REAL"),
                      ("gestion", "TEXT"), ("decidido_por", "TEXT"),

@@ -12211,6 +12211,166 @@ def prueba_19af():
     conn.close()
 
 
+def prueba_19ag():
+    bloque("19-AG - la tarjeta xN dice que paso con el paper; MC y liquidez "
+           "de salida; desglose del costo real")
+    import contextlib
+    import inspect as _insp
+    import io
+    import time as _t
+    from db import get_conn
+    import paper_trading as pt
+    import signal_tracker as st
+
+    conn = get_conn()
+
+    # ── 0) Migraciones: exit_mc y exit_liq en las DOS listas ──────────
+    import db as _db
+    _src_db = _insp.getsource(_db)
+    comprobar("exit_mc/exit_liq en la lista SQLite y en la de Postgres",
+              _src_db.count('"exit_mc"') >= 2 and _src_db.count('"exit_liq"') >= 2)
+
+    # ── 1) Desglose del costo real: fees · comisión+impacto · precio ──
+    d = pt.desglose_costo(stake_usd=100.0, usd_salida=80.0, costos=0.1,
+                          pnl_usd=5.0, pnl_neto=-20.1,
+                          liq_entrada=20000.0, liq_salida=20000.0,
+                          lp_pct=0.3)
+    comprobar("brecha papel-neto = 25.1", abs(d["brecha"] - 25.1) < 0.01, d)
+    comprobar("fees = costos (0.1)", abs(d["fees"] - 0.1) < 1e-9, d)
+    # comision 0.3% ida y vuelta + impacto propio x/(L/2+x) en los dos
+    # lados: 0.3 + 0.24 + 100*100/10100 + 80*80/10080 = 2.165
+    comprobar("comisión+impacto propio ≈ 2.17 (fórmula de producto "
+              "constante con la liquidez real)",
+              abs(d["comision_impacto"] - 2.165) < 0.02, d)
+    comprobar("el resto (precio real vs tarjeta) ≈ 22.8: la venta del "
+              "líder + el retraso, no las comisiones",
+              abs(d["precio_real"] - (25.1 - 0.1 - d["comision_impacto"])) < 1e-6,
+              d)
+    d2 = pt.desglose_costo(stake_usd=100.0, usd_salida=80.0, costos=0.1,
+                           pnl_usd=5.0, pnl_neto=-20.1,
+                           liq_entrada=None, liq_salida=None, lp_pct=0.3)
+    comprobar("sin liquidez conocida: la comisión se estima y el impacto "
+              "queda como desconocido (no se inventa)",
+              d2["impacto_desconocido"] is True
+              and abs(d2["comision_impacto"] - 0.54) < 0.01, d2)
+
+    # ── 2) Al cerrar se guardan MC y liquidez de salida ───────────────
+    conn.execute("DELETE FROM paper_trades")
+    conn.execute("DELETE FROM paper_fills")
+    conn.execute("DELETE FROM signals")
+    conn.commit()
+    ahora = int(_t.time())
+    conn.execute(
+        """INSERT INTO paper_trades (signature, wallet, mint, symbol,
+           stake_sol, stake_usd, entry_price, entry_ts, status, tokens_raw)
+           VALUES ('SG1','W1','MINTAG','AG',1.0,100.0,0.01,?,'abierta',NULL)""",
+        (ahora - 7200,))
+    conn.execute(
+        """INSERT INTO signals (signature, wallet, mint, sol, ts, side,
+           price_usd, mc, liq) VALUES ('SG1','W1','MINTAG',1.0,?,'compra',
+           0.01, 500000, 30000)""", (ahora - 7200,))
+    conn.commit()
+    _tg_prev, _px_prev = pt._tg, pt._sol_a_usd
+    _pmx_prev = st._price_mc_ex
+    tarjetas = []
+    pt._tg = lambda txt, *a, **k: tarjetas.append(txt) or True
+    pt._sol_a_usd = lambda: 100.0
+    st._price_mc_ex = lambda m: (0.012, 600000.0, False, 25000.0)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt._close(conn, conn.execute(
+                "SELECT * FROM paper_trades WHERE signature='SG1'").fetchone(),
+                0.012, "venta de la ⭐", "🚪")
+        f = conn.execute("SELECT exit_mc, exit_liq, status FROM paper_trades "
+                         "WHERE signature='SG1'").fetchone()
+        comprobar("la fila cerrada guarda el MC de salida (600k) y la "
+                  "liquidez del pool (25k)",
+                  f["status"] == "cerrada" and f["exit_mc"] == 600000.0
+                  and f["exit_liq"] == 25000.0, dict(f))
+        comprobar("y el aviso de cierre dice a qué MC salió",
+                  tarjetas and "MC" in tarjetas[-1] and "600" in tarjetas[-1],
+                  tarjetas[-1][:300] if tarjetas else "sin aviso")
+    finally:
+        pt._tg, pt._sol_a_usd, st._price_mc_ex = _tg_prev, _px_prev, _pmx_prev
+
+    # ── 3) Línea del paper para la tarjeta xN ─────────────────────────
+    with contextlib.redirect_stdout(io.StringIO()):
+        lin_c = pt.linea_paper_tarjeta(conn, "MINTAG", 0.05)
+    comprobar("posición CERRADA: dice hace cuánto, por qué, a qué MC y el "
+              "neto", lin_c and "CERRADA" in lin_c and "venta de la ⭐" in lin_c
+              and "600" in lin_c and ("hace" in lin_c or "recién" in lin_c),
+              lin_c)
+    conn.execute(
+        """INSERT INTO paper_trades (signature, wallet, mint, symbol,
+           stake_sol, stake_usd, entry_price, entry_ts, status)
+           VALUES ('SG2','W1','MINTAG','AG',1.0,100.0,0.02,?,'abierta')""",
+        (ahora - 600,))
+    conn.execute(
+        """INSERT INTO signals (signature, wallet, mint, sol, ts, side,
+           price_usd, mc, liq) VALUES ('SG2','W1','MINTAG',1.0,?,'compra',
+           0.02, 1000000, 30000)""", (ahora - 600,))
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        lin_a = pt.linea_paper_tarjeta(conn, "MINTAG", 0.05)
+    comprobar("posición ABIERTA (la más reciente manda): dice MC de "
+              "entrada y cuánto va (+150%)",
+              lin_a and "ABIERTA" in lin_a and "1.0M" in lin_a
+              and "+150" in lin_a, lin_a)
+    with contextlib.redirect_stdout(io.StringIO()):
+        lin_n = pt.linea_paper_tarjeta(conn, "NADA", 1.0)
+    comprobar("sin posición: lo dice", lin_n and "sin posición" in lin_n, lin_n)
+
+    # La tarjeta xN la incluye (comportamiento: se manda y se lee)
+    import realtime as _rt
+    import card_image as _ci
+    import db as _dbm
+    _tgs_prev, _tgp_prev = _rt.tg_send, _rt.tg_send_photo
+    _mmc_prev = _ci.make_multiple_card
+    _top_prev = _dbm.top_addresses
+    _mandados = []
+    _rt.tg_send = lambda txt, *a, **k: _mandados.append(txt) or True
+
+    def _sin_imagen(*a, **k):
+        raise RuntimeError("sin imagen en la prueba")
+    _ci.make_multiple_card = _sin_imagen
+    _dbm.top_addresses = lambda c: None          # sin filtro de top
+    conn.execute("DELETE FROM settings WHERE key LIKE 'mult_%:MINTAG'")
+    conn.commit()
+    try:
+        _s = {"wallet": "W1", "ts": ahora - 3600, "mc": 500000.0,
+              "mint": "MINTAG", "symbol": "AG", "price_usd": 0.01}
+        with contextlib.redirect_stdout(io.StringIO()):
+            st._alert_milestone(conn, _s, 400.0, 0.05, mc_actual=2500000.0)
+        comprobar("la tarjeta 'hizo x5' que llega al chat lleva la línea "
+                  "del paper (ABIERTA, +150%)",
+                  _mandados and "🧪 Paper" in _mandados[-1]
+                  and "ABIERTA" in _mandados[-1] and "x5" in _mandados[-1],
+                  (_mandados[-1] if _mandados else "no se mandó nada")[:300])
+    finally:
+        _rt.tg_send, _rt.tg_send_photo = _tgs_prev, _tgp_prev
+        _ci.make_multiple_card = _mmc_prev
+        _dbm.top_addresses = _top_prev
+        conn.execute("DELETE FROM settings WHERE key LIKE 'mult_%:MINTAG'")
+        conn.commit()
+
+    # ── 4) /paper: sección de costos reales ───────────────────────────
+    conn.execute("UPDATE paper_trades SET pnl_usd=5.0, pnl_usd_neto=-20.1, "
+                 "costos_usd=0.1, usd_salida_real=80.0 WHERE signature='SG1'")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt = pt.resumen_text()
+    comprobar("/paper trae '💸 Costos reales' con fees, comisión+impacto y "
+              "precio real vs tarjeta",
+              "💸" in txt and "fees" in txt.lower() and "impacto" in txt.lower()
+              and "precio real" in txt.lower(), txt[-500:])
+
+    conn.execute("DELETE FROM paper_trades")
+    conn.execute("DELETE FROM paper_fills")
+    conn.execute("DELETE FROM signals")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12269,6 +12429,7 @@ def main():
     prueba_19ad()
     prueba_19ae()
     prueba_19af()
+    prueba_19ag()
 
     print("\n" + "─" * 60)
     if _FALLOS:

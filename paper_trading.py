@@ -607,6 +607,141 @@ def quien(conn, address):
     return (nombre, pos)
 
 
+# ── (19-AG) COSTO REAL: de qué se compone la brecha papel → neto ──────
+# El neto ya es realista (cotización de Jupiter en el instante del cierre:
+# incluye la comisión del pool, el impacto de la propia orden y el precio
+# real). Lo que faltaba era DECIR de qué se compone la diferencia con el
+# papel. Medido en la base del dueño (258 cerradas con neto): los fees son
+# ~0,10 $, el slippage de entrada ~1 %, y la brecha mediana es 12 $ (14 %
+# del importe) — casi toda en la SALIDA: la ⭐ vende antes que la copia y
+# su propia venta hunde el precio; DexScreener además llega tarde.
+#
+# Tres partidas:
+#   fees              prioridad de red (costos_usd, ya medido)
+#   comision_impacto  comisión del pool ida y vuelta (`paper_lp_fee_pct`,
+#                     0,3 % = Raydium/PumpSwap 0,25 % + agregador 0,05 %;
+#                     pump.fun en curva cobra 1 %) + impacto de la PROPIA
+#                     orden en un pool de producto constante:
+#                     x / (L/2 + x), con L la liquidez del pool
+#   precio_real       el resto: movimiento del precio entre la tarjeta y la
+#                     ejecución (venta del líder, retraso, precio viejo)
+LP_FEE_PCT_DEFECTO = 0.3
+
+
+def _impacto_propio(valor_usd, liq_usd):
+    """Fracción de precio que mueve una orden `valor_usd` en un pool de
+    producto constante con liquidez total `liq_usd` (mitad por lado)."""
+    try:
+        v, l = float(valor_usd or 0), float(liq_usd or 0)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0 or l <= 0:
+        return None
+    return v / (l / 2.0 + v)
+
+
+def desglose_costo(stake_usd, usd_salida, costos, pnl_usd, pnl_neto,
+                   liq_entrada=None, liq_salida=None,
+                   lp_pct: float = LP_FEE_PCT_DEFECTO) -> dict | None:
+    """Reparte la brecha papel→neto de UNA operación en tres partidas.
+    None si falta alguna de las dos cifras (no hay brecha que repartir)."""
+    if pnl_usd is None or pnl_neto is None or stake_usd is None:
+        return None
+    stake = float(stake_usd)
+    salida = float(usd_salida or 0)
+    fees = float(costos or 0)
+    brecha = float(pnl_usd) - float(pnl_neto)
+    lp = float(lp_pct) / 100.0
+    comision = stake * lp + salida * lp
+    imp_in = _impacto_propio(stake, liq_entrada)
+    imp_out = _impacto_propio(salida, liq_salida)
+    desconocido = imp_in is None or imp_out is None
+    impacto = stake * (imp_in or 0) + salida * (imp_out or 0)
+    com_imp = comision + impacto
+    return {"brecha": brecha, "fees": fees, "comision_impacto": com_imp,
+            "precio_real": brecha - fees - com_imp,
+            "impacto_desconocido": desconocido}
+
+
+def _lp_pct(conn) -> float:
+    return _f(conn, "paper_lp_fee_pct", LP_FEE_PCT_DEFECTO)
+
+
+def _liq_entrada(conn, signature):
+    """Liquidez del pool cuando se abrió (la guarda la señal)."""
+    try:
+        r = conn.execute("SELECT liq, mc FROM signals WHERE signature=?",
+                         (signature,)).fetchone()
+        return (r["liq"], r["mc"]) if r else (None, None)
+    except Exception as e:
+        print(f"· Paper: no pude leer la liquidez de entrada ({e})")
+        return (None, None)
+
+
+def _mc_liq_salida(mint):
+    """(MC, liquidez) del pool AHORA, para guardarlos con el cierre."""
+    try:
+        from signal_tracker import _price_mc_ex
+        _px, mc, _muerto, liq = _price_mc_ex(mint)
+        return mc, liq
+    except Exception as e:
+        print(f"· Paper: no pude leer MC/liquidez de salida de "
+              f"{str(mint)[:8]} ({e})")
+        return None, None
+
+
+def linea_paper_tarjeta(conn, mint: str, price_now) -> str:
+    """(19-AG) Una línea para la tarjeta "hizo xN": qué pasó con la copia
+    de ese token en el paper. El dueño el 4/9: «no dice si la posición
+    aún se mantiene abierta o si fue cerrada, ni en qué MC se cerró»."""
+    from card_image import _fmt_mc, _ago
+    try:
+        r = conn.execute(
+            """SELECT signature, status, entry_price, entry_ts, exit_ts,
+                      exit_reason, exit_price, exit_mc, pnl_usd,
+                      pnl_usd_neto, fraccion_restante
+               FROM paper_trades WHERE mint=?
+               ORDER BY entry_ts DESC LIMIT 1""", (mint,)).fetchone()
+    except Exception as e:
+        print(f"· Paper: no pude leer la posición de {str(mint)[:8]} ({e})")
+        return ""
+    if not r:
+        return "🧪 Paper: sin posición (no se copió)"
+    _liq0, mc0 = _liq_entrada(conn, r["signature"])
+    ahora = time.time()
+    if r["status"] == "abierta":
+        pct = None
+        try:
+            if price_now and r["entry_price"]:
+                pct = (float(price_now) / float(r["entry_price"]) - 1) * 100
+        except (TypeError, ValueError, ZeroDivisionError):
+            pct = None
+        frac = r["fraccion_restante"]
+        viva = (f", queda el {float(frac) * 100:.0f}%"
+                if frac is not None and 0 < float(frac) < 1 else "")
+        return ("🧪 Paper: posición *ABIERTA* · entrada "
+                + (f"MC {_fmt_mc(mc0)}" if mc0 else f"${_precio(r['entry_price'])}")
+                + f" {_ago((ahora - (r['entry_ts'] or ahora)) / 3600)}"
+                + (f" · ahora *{pct:+.0f}%*" if pct is not None else "")
+                + viva)
+    pct_c = None
+    try:
+        if r["exit_price"] and r["entry_price"]:
+            pct_c = (float(r["exit_price"]) / float(r["entry_price"]) - 1) * 100
+    except (TypeError, ValueError, ZeroDivisionError):
+        pct_c = None
+    neto = r["pnl_usd_neto"]
+    return ("🧪 Paper: *CERRADA* "
+            + f"{_ago((ahora - (r['exit_ts'] or ahora)) / 3600)}"
+            + f" por «{r['exit_reason'] or '?'}»"
+            + (f" a MC {_fmt_mc(r['exit_mc'])}" if r["exit_mc"]
+               else (f" a ${_precio(r['exit_price'])}" if r["exit_price"] else ""))
+            + (f" ({pct_c:+.0f}%)" if pct_c is not None else "")
+            + (f" · neto real *{_usd_firmado(neto)}*" if neto is not None
+               else (f" · PnL papel {_usd_firmado(r['pnl_usd'])}"
+                     if r["pnl_usd"] is not None else "")))
+
+
 def _close(conn, row, price: float, reason: str, icon: str, firma=None,
            liq_salida=None, nota="", vendedor=None, _reintento=False):
     # ── (19-C) RELECTURA ANTES DE CALCULAR ───────────────────────────
@@ -775,16 +910,27 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     # y se reintenta UNA vez con la fila fresca (que ademas vuelve a
     # cotizar, porque `tokens_raw` habra cambiado). `COALESCE` en vez de
     # `IS` porque `IS` no compara igual en los dos motores.
+    # (19-AG) MC y liquidez del pool al salir. Si el llamador ya trae la
+    # liquidez (job de 15 min) se usa; el MC se pide igual (una consulta
+    # a DexScreener; el cierre ya lleva una a Jupiter). En un rug
+    # DexScreener no tiene par: quedan a NULL, que es la verdad.
+    exit_mc, exit_liq = (None, liq_salida)
+    if reason != "sin liquidez":
+        _mc2, _liq2 = _mc_liq_salida(row["mint"])
+        exit_mc = _mc2
+        if exit_liq is None:
+            exit_liq = _liq2
     cur_cierre = conn.execute(
         """UPDATE paper_trades SET status='cerrada', exit_price=?,
            exit_ts=?, exit_reason=?, pnl_pct=?, pnl_sol=?, pnl_usd=?,
            stake_usd=?, costos_usd=?, usd_salida_real=?, pnl_usd_neto=?,
-           fraccion_restante=0 WHERE id=? AND status='abierta'
+           fraccion_restante=0, exit_mc=?, exit_liq=?
+           WHERE id=? AND status='abierta'
              AND COALESCE(fraccion_restante, 1.0) = ?
              AND COALESCE(pnl_realizado_usd, 0) = ?""",
         (price, int(time.time()), reason, pct, pnl, pnl_usd,
-         stake_usd, costos, usd_salida, pnl_neto, row["id"],
-         _cas_frac, _cas_real))
+         stake_usd, costos, usd_salida, pnl_neto, exit_mc, exit_liq,
+         row["id"], _cas_frac, _cas_real))
     conn.commit()
     if getattr(cur_cierre, "rowcount", 1) == 0:
         _ahora = _releer(conn, row["id"])
@@ -835,6 +981,30 @@ def _close(conn, row, price: float, reason: str, icon: str, firma=None,
     if pnl_neto is not None:
         linea_neto = (f"\n⚖️ Neto real (Jupiter, con slippage y fees): "
                       f"*{_usd_firmado(pnl_neto)}*")
+        # (19-AG) De qué se compone la diferencia con el papel. Solo si
+        # hay brecha que explicar (>= 1 $): el dueño veia "+15 $ la ⭐ /
+        # -34 $ yo" sin saber si eran comisiones o el precio.
+        try:
+            _liq_in, _ = _liq_entrada(conn, row["signature"])
+            _d = desglose_costo(stake_usd, usd_salida, costos, pnl_usd,
+                                pnl_neto, _liq_in, exit_liq, _lp_pct(conn))
+        except Exception as e:
+            print(f"· Paper: no pude desglosar el costo ({e})")
+            _d = None
+        if _d and abs(_d["brecha"]) >= 1.0:
+            linea_neto += (
+                f"\n💸 Costo real {_usd(_d['brecha'])}: fees "
+                f"{_usd(_d['fees'])} · comisión+impacto propio "
+                f"{'≈' if _d['impacto_desconocido'] else ''}"
+                f"{_usd(_d['comision_impacto'])} · precio real vs "
+                f"tarjeta {_usd_firmado(-_d['precio_real'])}"
+                + ("\n_(el último es la venta de la ⭐ antes que tú y el "
+                   "retraso: no son comisiones)_"
+                   if _d["precio_real"] > _d["comision_impacto"] + _d["fees"]
+                   else ""))
+    if exit_mc:
+        from card_image import _fmt_mc as _fmc
+        linea_neto += f"\n🏷 Salió a MC {_fmc(exit_mc)}"
     # (Ola 18-I) En un cierre por RUG manda el NETO, no el -99%.
     #
     # El -99% es el precio del TOKEN; el neto es el DINERO del dueño, y en
@@ -2165,6 +2335,35 @@ def resumen_text() -> str:
     # cubre todo. Medido: las excluidas tienen media +24,5% frente a
     # +19,2% las incluidas, o sea que la comparacion es LIGERAMENTE
     # pesimista respecto al total; conviene decirlo.
+    # (19-AG) Desglose acumulado del costo real, fila a fila (la formula
+    # del impacto no es lineal, no se puede sumar en SQL).
+    costos_acum = {"n": 0, "fees": 0.0, "com": 0.0, "precio": 0.0,
+                   "brecha": 0.0, "sin_liq": 0}
+    try:
+        _lp = _lp_pct(conn)
+        for _r in conn.execute(
+                """SELECT p.stake_usd, p.usd_salida_real, p.costos_usd,
+                          p.pnl_usd, p.pnl_usd_neto, p.exit_liq, s.liq
+                   FROM paper_trades p
+                   LEFT JOIN signals s ON s.signature = p.signature
+                   WHERE p.status='cerrada' AND p.pnl_usd_neto IS NOT NULL
+                     AND p.pnl_usd IS NOT NULL
+                     AND COALESCE(p.exit_ts, 0) >= ?""", (desde,)).fetchall():
+            _d = desglose_costo(_r["stake_usd"], _r["usd_salida_real"],
+                                _r["costos_usd"], _r["pnl_usd"],
+                                _r["pnl_usd_neto"], _r["liq"], _r["exit_liq"],
+                                _lp)
+            if not _d:
+                continue
+            costos_acum["n"] += 1
+            costos_acum["fees"] += _d["fees"]
+            costos_acum["com"] += _d["comision_impacto"]
+            costos_acum["precio"] += _d["precio_real"]
+            costos_acum["brecha"] += _d["brecha"]
+            if _d["impacto_desconocido"]:
+                costos_acum["sin_liq"] += 1
+    except Exception as e:
+        print(f"· Paper: no pude desglosar los costos acumulados ({e})")
     fuera = conn.execute(
         "SELECT COUNT(*) n FROM paper_trades WHERE status='cerrada' "
         "AND (pnl_usd_neto IS NULL OR pnl_usd IS NULL) "
@@ -2281,6 +2480,19 @@ def resumen_text() -> str:
                 + (f"\n   _{fuera} cerrada(s) más quedan fuera de esta "
                    f"comparación: no se pudo cotizar su salida._"
                    if fuera else ""))
+        if costos_acum["n"]:
+            _ca = costos_acum
+            out.append(
+                f"💸 *Costos reales* ({_ca['n']} op. · {_usd(_ca['brecha'])} "
+                f"de brecha):\n"
+                f"   fees {_usd(_ca['fees'])} · comisión+impacto propio "
+                f"{_usd(_ca['com'])} · precio real vs tarjeta "
+                f"{_usd(_ca['precio'])}\n"
+                f"   _(el tercero = la ⭐ vende antes que tú y su venta "
+                f"mueve el precio; no son comisiones"
+                + (f" · impacto estimado sin liquidez en {_ca['sin_liq']}"
+                   if _ca["sin_liq"] else "")
+                + ")_")
         if demora and (demora["n"] or 0) > 0:
             out.append(f"⚡ Demora señal→copia: {demora['d']:.1f}s de media "
                        f"({demora['n']} medidas)")

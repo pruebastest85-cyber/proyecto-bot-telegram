@@ -574,13 +574,22 @@ def _alert_milestone(conn, s, pct: float, price: float,
     linea_precio = (f"💰 MC {_fmt_mc(mc0)}  →  *{_fmt_mc(mc1)}*"
                     if mc0 else
                     f"💵 ${_fmt_price(base)}  →  *${_fmt_price(price)}*")
+    # (19-AG) ¿Y el paper? El dueño: "no dice si la posición aún se
+    # mantiene abierta o si fue cerrada, ni en qué MC se cerró".
+    try:
+        from paper_trading import linea_paper_tarjeta
+        _lp = linea_paper_tarjeta(conn, s["mint"], price)
+    except Exception as e:
+        print(f"· Tarjeta xN: sin línea del paper ({e})")
+        _lp = ""
     caption = (
         f"🚀 *{simbolo}* hizo *x{mult}*  (+{subida:.0f}%)\n"
         f"{linea_precio}\n"
         f"👤 Primer llamado: *{alias}*"
         + (f"  ·  🏆 #{_pos} del top" if _pos else "")
         + f"  ·  {_ago(hace)}\n"
-        f"`{s['mint']}`\n"
+        + (f"{_lp}\n" if _lp else "")
+        + f"`{s['mint']}`\n"
         f"📊 [DexScreener](https://dexscreener.com/solana/{s['mint']})")
 
     # Tarjeta con imagen (estilo Trojan); si falla, cae al texto normal
