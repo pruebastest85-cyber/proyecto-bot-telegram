@@ -2,8 +2,10 @@
 Analista IA: usa la API de Claude para clasificar billeteras candidatas.
 
 v5:
-  - Doble nivel: Haiku filtra rápido; si su confianza es baja (<65)
-    se escala a un modelo más potente para el veredicto final.
+  - (19-AL) La confianza del veredicto SI decide algo: un "bot" de la IA
+    solo sella is_bot=1 (permanente) con confianza >= BOT_IA_CONFIANZA_MIN;
+    por debajo queda como rechazada re-evaluable. (El "escalado a un
+    modelo más potente" de la v5 murió con el puente local.)
   - Track record: la IA recibe la estadística real de las señales
     pasadas de la billetera (tasa de acierto a 1h/24h).
   - Re-evaluación semanal: los veredictos caducan a los 7 días y se
@@ -174,8 +176,9 @@ def ai_verdict(profile: dict, evidence_lines: list[str],
                track_record: dict | None = None,
                avoid_aliases: list[str] | None = None) -> dict | None:
     """
-    Veredicto en dos niveles: Haiku primero; si su confianza es baja,
-    se consulta al modelo potente y prevalece su respuesta.
+    Veredicto de la IA (puente: local primero, nube de respaldo). Un solo
+    nivel: el escalado por confianza baja de la v5 ya no existe; la
+    confianza se usa en `evaluate_tracked` (sello is_bot, 19-AL).
     """
     if not __import__("ia_puente").hay_ia():
         return None
@@ -262,6 +265,21 @@ def nota_bloquea(conn, tier) -> bool:
     if not nota_vinculante(conn):
         return False
     return (tier or "") not in NOTAS_CON_ESTRELLA
+
+
+# (19-AL) Confianza minima para que un veredicto "bot" de la IA selle
+# is_bot=1 (permanente). Por debajo: ai_class='bot', ai_follow=0 y
+# re-evaluacion a los REEVAL_RECHAZADAS_DIAS como cualquier rechazada.
+BOT_IA_CONFIANZA_MIN = 80
+
+
+def _confianza(verdict: dict) -> float:
+    """Confianza del veredicto como numero; 0 si falta o no es un numero."""
+    try:
+        v = float(verdict.get("confianza"))
+        return v if v == v else 0.0            # NaN → 0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _hard_bot_reason(p: dict) -> str | None:
@@ -928,33 +946,64 @@ def evaluate_tracked(conn, limite: int | None = None) -> int:
         except Exception as e:
             print(f"· No pude releer la estrella de {addr[:8]} ({e})")
         _is_tracked_final = seguir
+        _cambio_en_medio = False
         if _estrella_cambio_en_medio(_era_estrella, _es_estrella_ahora):
+            _cambio_en_medio = True
             print(f"· La ⭐ de «{alias or addr[:8]}» cambió mientras la "
                   f"evaluaba ({int(_era_estrella)}→{int(_es_estrella_ahora)}"
                   f"); respeto ese cambio y no la piso")
             _is_tracked_final = _es_estrella_ahora
             _era_estrella = _es_estrella_ahora
+        # (19-AL, 05/09) Si la estrella cambio en medio, "respetar el
+        # cambio" tiene que ser de verdad: la 19-AC conservaba is_tracked
+        # pero escribia ai_follow=veredicto, ai_class y grade — justo los
+        # tres campos que /rastrear pone en 1/NULL/NULL para proteger la
+        # estrella y que /descartar pone en 0/'descartada'. Resultado
+        # reproducido: fila is_tracked=1 con ai_follow=0 → el
+        # recompute_scores del ciclo siguiente le quitaba la ⭐ (o
+        # depurar_estrellas por grade='Descartada'). Ahora, si cambio en
+        # medio, esos tres campos se dejan como los puso el dueño y el
+        # veredicto queda solo en ai_reason.
+        _respetar = 1 if _cambio_en_medio else 0
+        _razon_final = verdict.get("razon", "")
+        if _respetar:
+            _razon_final = ("[cambio a mano durante la evaluacion; veredicto "
+                            "no aplicado] " + _razon_final)[:500]
+        # (19-AL) Un veredicto "bot" de la IA solo sella is_bot=1 con
+        # confianza alta: is_bot es permanente (saca de la cola, borra el
+        # historial, sin vuelta salvo /rastrear) y antes lo ponia cualquier
+        # respuesta del modelo local con confianza 35. Con menos confianza
+        # queda ai_class='bot', ai_follow=0 y se re-evalua a los 14 dias
+        # como el resto de rechazadas. Las huellas duras (frecuencia
+        # inhumana, flips, compras identicas, MM) siguen sellando por su
+        # cuenta en _hard_bot_reason.
+        _sello_bot = (verdict["clasificacion"] == "bot"
+                      and _confianza(verdict) >= BOT_IA_CONFIANZA_MIN)
         conn.execute(
-            """UPDATE wallets SET ai_class=?, ai_follow=?, ai_reason=?,
+            """UPDATE wallets SET
+               ai_class=CASE WHEN ?=1 THEN ai_class ELSE ? END,
+               ai_follow=CASE WHEN ?=1 THEN ai_follow ELSE ? END,
+               ai_reason=?,
                alias=COALESCE(alias, ?),
                pnl_30d=?, pnl_total=?, pnl_unreal=?, pnl_net=?,
-               grade=?, consistency=?,
+               grade=CASE WHEN ?=1 THEN grade ELSE ? END, consistency=?,
                hold_median_min=?, roi_median=?,
                pnl_updated=?, wallet_score=?,
-               is_tracked=?, is_bot=CASE WHEN ?='bot' THEN 1 ELSE is_bot END
+               is_tracked=?, is_bot=CASE WHEN ?=1 THEN 1 ELSE is_bot END
                WHERE address=?""",
-            (verdict["clasificacion"], seguir,
-             verdict.get("razon", ""),
+            (_respetar, verdict["clasificacion"],
+             _respetar, seguir,
+             _razon_final,
              alias,
              round(profile.get("pnl_30d_sol", 0.0), 2),
              round(profile.get("pnl_total_sol", 0.0), 2),
              round(profile.get("unrealized_sol", 0.0), 2),
              round(profile.get("net_pnl_sol", profile.get("pnl_total_sol", 0.0)), 2),
-             (_grade or {}).get("tier"), (_grade or {}).get("consistency"),
+             _respetar, (_grade or {}).get("tier"), (_grade or {}).get("consistency"),
              profile.get("hold_median_min"),
              (profile.get("metrics") or {}).get("roi_median"),
              now_iso(), wscore,
-             _is_tracked_final, verdict["clasificacion"], addr),
+             _is_tracked_final, 1 if (_sello_bot and not _respetar) else 0, addr),
         )
         # (18-L) Fase de la estrella. Una promocion NUNCA confirma por si
         # sola: la nueva ⭐ entra EN PRUEBA (el reloj de la prueba arranca

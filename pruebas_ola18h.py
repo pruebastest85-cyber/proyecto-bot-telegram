@@ -12985,6 +12985,160 @@ def prueba_19ak():
     conn.close()
 
 
+def prueba_19al():
+    bloque("19-AL - la purga respeta las descartadas a mano, /rastrear en "
+           "medio de una evaluacion se respeta DE VERDAD, y un 'bot' de la "
+           "IA solo sella con confianza alta")
+    import contextlib
+    import io
+    import time as _t
+    from db import get_conn
+    import db as _db
+    import ai_analyst as aa
+    import wallet_admin as wa
+    import wallet_funding
+    import influence
+    import trades_store as ts
+    from wallet_metrics import trade_metrics
+
+    conn = get_conn()
+    ts._ensure(conn)
+    for t in ("wallets", "appearances", "winning_tokens", "trades", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    now = _t.time()
+
+    # ── M2: purgar_bots no toca a las descartadas a mano ──────────────
+    conn.execute("INSERT INTO wallets (address, is_tracked, is_bot, ai_class, score) "
+                 "VALUES ('BOTPURO', 0, 1, 'bot', 1.0)")
+    conn.execute("INSERT INTO wallets (address, is_tracked, is_bot, ai_class, score) "
+                 "VALUES ('AMANO', 0, 1, 'descartada', 1.0)")
+    for w in ("BOTPURO", "AMANO"):
+        conn.execute("INSERT INTO trades (wallet, signature, mint, side, sol, tokens, ts) "
+                     "VALUES (?, ?, 'M', 'compra', 1.0, 10.0, ?)", (w, "s" + w, int(now)))
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        n = ts.purgar_bots(conn)
+    quedan = {r["wallet"] for r in conn.execute("SELECT DISTINCT wallet FROM trades")}
+    comprobar("M2: la purga borra el historial del bot y CONSERVA el de la "
+              "descartada a mano", n == 1 and quedan == {"AMANO"}, (n, quedan))
+
+    # ── M7 y M8: evaluate_tracked con perfil fijo y veredicto controlado ──
+    def _perfil(addr):
+        toks = {f"M{i}": {"pnl_sol": -1.0, "sol_out": 2.0, "sol_in": 1.0, "buys": 2,
+                          "sells": 2, "first_buy_ts": now - 86400,
+                          "first_sell_ts": now - 80000, "symbol": "", "holding_sol": 0.0,
+                          "tok_in": 1.0, "tok_out": 1.0} for i in range(12)}
+        return {"address": addr, "tx_sampled": 300, "last_tx_ts": now - 3600, "tx_7d": 5,
+                "tokens": toks, "pnl_total_sol": -12.0, "pnl_30d_sol": -1.0,
+                "unrealized_sol": 0.0, "net_pnl_sol": -12.0, "held_tokens": 0,
+                "priced_tokens": 0, "possible_bot": False, "tx_multi_token": 0,
+                "historial_entero": True, "hold_median_min": 60.0, "win_rate_pct": 0,
+                "closed_positions": 12, "flips_1min_pct": 0, "active_hours_24": 8,
+                "uniform_buys_pct": 10, "mm_tokens": 0, "mm_pct": 0,
+                "metrics": trade_metrics(toks)}
+
+    def _sembrar(addr):
+        conn.execute("INSERT INTO wallets (address, winning_tokens_count, score, is_tracked, "
+                     "ai_follow, ai_class, pnl_updated, turno_desde) VALUES (?, 1, 40, 0, 0, "
+                     "'trader', '2020-01-01T00:00:00+00:00', NULL)", (addr,))
+        conn.execute("INSERT OR IGNORE INTO winning_tokens (mint) VALUES ('TAL')")
+        conn.execute("INSERT INTO appearances (wallet, mint, buy_sol, entry_multiple) "
+                     "VALUES (?, 'TAL', 2.0, 5.0)", (addr,))
+        conn.commit()
+
+    _pw0, _rc0, _her0, _inf0, _ver0 = (aa.profile_wallet, wallet_funding.recien_creada,
+                                       wallet_funding.hermanas, influence.influence,
+                                       aa.ai_verdict)
+    aa.profile_wallet = lambda a, with_holdings=True: _perfil(a)
+    wallet_funding.recien_creada = lambda a, ts_referencia=None: (False, None, None)
+    wallet_funding.hermanas = lambda a, limite=12: []
+    influence.influence = lambda a: {}
+    VEREDICTO = {}
+    aa.ai_verdict = lambda *a, **k: dict(VEREDICTO) if VEREDICTO else None
+
+    class _Conn:
+        """Simula /rastrear del dueño justo en la relectura de 19-AC."""
+        def __init__(s, c, addr):
+            s.c, s.n, s.addr = c, 0, addr
+        def execute(s, sql, p=()):
+            if "SELECT is_tracked FROM wallets WHERE address = ?" in sql:
+                s.n += 1
+                if s.n == 2:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        wa.restore_wallet(s.addr)
+            return s.c.execute(sql, p)
+        def commit(s):
+            s.c.commit()
+        def close(s):
+            pass
+        def __getattr__(s, k):
+            return getattr(s.c, k)
+
+    try:
+        # M7: la IA (respaldo grading, sin IA) la degrada; el dueño la
+        # restaura en medio → la fila queda como la puso el dueño.
+        VEREDICTO.clear()
+        _sembrar("WRACE")
+        with contextlib.redirect_stdout(io.StringIO()):
+            aa.evaluate_tracked(_Conn(conn, "WRACE"), limite=5)
+        r = dict(conn.execute("SELECT is_tracked, ai_follow, ai_class, grade, ai_reason "
+                              "FROM wallets WHERE address='WRACE'").fetchone())
+        comprobar("M7: tras /rastrear en medio, is_tracked=1 Y ai_follow=1 Y "
+                  "grade NULL (como los dejo /rastrear); el veredicto solo en ai_reason",
+                  r["is_tracked"] == 1 and r["ai_follow"] == 1 and r["grade"] is None
+                  and "no aplicado" in (r["ai_reason"] or ""), r)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _db.recompute_scores(conn, 1, 60)
+        r2 = dict(conn.execute("SELECT is_tracked, ai_follow FROM wallets WHERE address='WRACE'").fetchone())
+        comprobar("M7: el recompute_scores del ciclo siguiente NO le quita la ⭐",
+                  r2["is_tracked"] == 1, r2)
+        # M8: veredicto 'bot' con confianza 35 → NO sella; con 90 → sella.
+        # (Las puertas 1-2 previas se apagan: aqui se prueba el veredicto.)
+        import config as _cfgal
+        _p12_0 = getattr(_cfgal, "FILTRO_PUERTA_PROMOCION", 1)
+        _cfgal.FILTRO_PUERTA_PROMOCION = 0
+        for addr, conf in (("WBOT35", 35), ("WBOT90", 90), ("WBOTNAN", "nan")):
+            VEREDICTO.clear()
+            VEREDICTO.update({"clasificacion": "bot", "seguir": False, "confianza": conf,
+                              "alias": None, "razon": "parece bot", "modelo": "prueba"})
+            _sembrar(addr)
+            with contextlib.redirect_stdout(io.StringIO()):
+                aa.evaluate_tracked(conn, limite=5)
+        f = {a: dict(conn.execute("SELECT is_bot, ai_class, ai_follow, is_tracked FROM wallets "
+                                  "WHERE address=?", (a,)).fetchone())
+             for a in ("WBOT35", "WBOT90", "WBOTNAN")}
+        comprobar("M8: 'bot' con confianza 35 → is_bot sigue en 0, ai_class='bot', "
+                  "ai_follow=0 (re-evaluable)",
+                  (f["WBOT35"]["is_bot"] or 0) == 0 and f["WBOT35"]["ai_class"] == "bot"
+                  and f["WBOT35"]["ai_follow"] == 0 and f["WBOT35"]["is_tracked"] == 0, f["WBOT35"])
+        comprobar(f"M8: 'bot' con confianza 90 (>= {aa.BOT_IA_CONFIANZA_MIN}) → is_bot=1",
+                  f["WBOT90"]["is_bot"] == 1, f["WBOT90"])
+        comprobar("M8: confianza 'nan' cuenta como 0 → no sella",
+                  (f["WBOTNAN"]["is_bot"] or 0) == 0, f["WBOTNAN"])
+        # Y una clase que no es 'bot' con confianza 99 tampoco sella.
+        VEREDICTO.clear()
+        VEREDICTO.update({"clasificacion": "mev_bot", "seguir": False, "confianza": 99,
+                          "alias": None, "razon": "mev", "modelo": "prueba"})
+        _sembrar("WMEV")
+        with contextlib.redirect_stdout(io.StringIO()):
+            aa.evaluate_tracked(conn, limite=5)
+        comprobar("M8: otra clase (mev_bot) con confianza 99 no toca is_bot",
+                  (conn.execute("SELECT is_bot FROM wallets WHERE address='WMEV'").fetchone()["is_bot"] or 0) == 0)
+    finally:
+        (aa.profile_wallet, wallet_funding.recien_creada, wallet_funding.hermanas,
+         influence.influence, aa.ai_verdict) = _pw0, _rc0, _her0, _inf0, _ver0
+        try:
+            _cfgal.FILTRO_PUERTA_PROMOCION = _p12_0
+        except NameError:
+            pass
+
+    for t in ("wallets", "appearances", "winning_tokens", "trades", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -13048,6 +13202,7 @@ def main():
     prueba_19ai()
     prueba_19aj()
     prueba_19ak()
+    prueba_19al()
 
     print("\n" + "─" * 60)
     if _FALLOS:

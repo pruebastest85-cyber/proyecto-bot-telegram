@@ -301,9 +301,15 @@ def purgar_bots(conn=None) -> int:
         conn = get_conn()
     try:
         _ensure(conn)
+        # (19-AL, 05/09) Las descartadas A MANO (/descartar, boton ❌)
+        # usan la misma bandera is_bot=1 que los bots, pero su historial
+        # NO sobra: /rastrear promete revertir el descarte y sin trades
+        # la billetera restaurada no pasa el embudo ("0 posiciones
+        # cerradas") — reproducido. Se excluyen por ai_class.
         cur = conn.execute(
             "DELETE FROM trades WHERE wallet IN "
-            "(SELECT address FROM wallets WHERE COALESCE(is_bot,0)=1)")
+            "(SELECT address FROM wallets WHERE COALESCE(is_bot,0)=1 "
+            " AND COALESCE(ai_class,'') <> 'descartada')")
         n = cur.rowcount or 0
         if n:
             conn.commit()
