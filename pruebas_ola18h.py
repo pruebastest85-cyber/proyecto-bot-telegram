@@ -12591,6 +12591,110 @@ def prueba_19ah():
     conn.close()
 
 
+def prueba_19ai():
+    bloque("19-AI - la copiabilidad cuenta TODAS las copias reales y las "
+           "casa por (billetera, token), no por firma")
+    import time as _t
+    from db import get_conn
+    import copiabilidad as cp
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    for t in ("wallets", "signals", "paper_trades", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+
+    def star(addr, ws=60.0):
+        conn.execute(
+            "INSERT INTO wallets (address, alias, is_tracked, confirmada, "
+            "wallet_score, pnl_total, is_bot, score, winning_tokens_count) "
+            "VALUES (?,?,1,1,?,10.0,0,1.0,1)", (addr, addr.title(), ws))
+        conn.execute("INSERT INTO positions (wallet, mint, last_ts) VALUES (?,?,?)",
+                     (addr, "M" + addr, ahora))
+
+    def senal(addr, sig, mint, ts, chg):
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, sol, ts, side, "
+            "price_usd, chg_24h) VALUES (?,?,?,1.0,?,'compra',0.01,?)",
+            (sig, addr, mint, ts, chg))
+
+    def copia(addr, sig, mint, entry_ts, neto, papel=None, stake=100.0):
+        conn.execute(
+            "INSERT INTO paper_trades (signature, wallet, mint, symbol, "
+            "stake_sol, stake_usd, entry_price, entry_ts, exit_ts, status, "
+            "pnl_usd, pnl_usd_neto) VALUES (?,?,?,?,1.0,?,0.01,?,?,'cerrada',?,?)",
+            (sig, addr, mint, "S", stake, entry_ts, entry_ts + 60,
+             neto if papel is None else papel, neto))
+
+    T = ahora - 3600 * 24 * 3
+    # FLIP: 5 copias reales cuya señal NO tiene chg_24h (la ⭐ compró y
+    # vendió en segundos; el token nunca se midió a 24 h).
+    star("FLIP")
+    for i in range(5):
+        senal("FLIP", f"f{i}", f"MF{i}", T + i * 100, None)
+        copia("FLIP", f"f{i}", f"MF{i}", T + i * 100, -20.0)
+    # CONSENSO: la fila del paper lleva wallet=LIDER y la firma de SEG.
+    star("LIDER"); star("SEG")
+    senal("LIDER", "sL", "MC", T, 20.0)
+    senal("SEG", "sS", "MC", T + 600, 10.0)
+    copia("LIDER", "sS", "MC", T + 600, 50.0)
+    # HUERFANA: copia cuya señal ya no existe (podada): cuenta igual.
+    star("HUERF")
+    copia("HUERF", "sin_senal", "MH", T, 30.0)
+    # DOBLE: señal con chg_24h Y copia sobre ella: una sola observación.
+    star("DOBLE")
+    senal("DOBLE", "d0", "MD", T, 40.0)
+    copia("DOBLE", "d0", "MD", T, 35.0, papel=40.0)
+    # ORDEN: la curva sigue el tiempo real (señal, copia, señal).
+    star("ORDEN")
+    senal("ORDEN", "o0", "MO0", T, -30.0)
+    senal("ORDEN", "o1", "MO1", T + 1, None)
+    copia("ORDEN", "o1", "MO1", T + 1, 100.0)
+    senal("ORDEN", "o2", "MO2", T + 2, -50.0)
+    # NOSTAR: copias de una billetera sin ⭐ no entran en nada.
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, is_bot, score) VALUES ('NOSTAR',0,0,1.0)")
+    copia("NOSTAR", "n0", "MN", T, 80.0)
+    conn.commit()
+
+    res = cp.calcular(conn, ahora=ahora)
+    bp = res["_pob"]["brecha"]
+    fl = res.get("FLIP", {"n": 0, "n_real": 0, "media": 0})
+    comprobar("FLIP: 5 copias reales sin chg_24h cuentan: n=5, 5 reales, "
+              "media -20", fl["n"] == 5 and fl["n_real"] == 5
+              and abs(fl["media"] + 20) < 0.01, fl)
+    _nada = {"n": 0, "n_real": 0, "media": 0, "dd": -1}
+    li, se = res.get("LIDER", _nada), res.get("SEG", _nada)
+    comprobar("CONSENSO: el neto real (+50) se acredita a la LIDER (n_real 1) "
+              "y no a la que completó el quórum",
+              li["n"] == 1 and li["n_real"] == 1 and abs(li["media"] - 50) < 0.01,
+              li)
+    comprobar("CONSENSO: la señal de SEG sigue siendo una estimación "
+              "(10 - brecha poblacional), sin copia real",
+              se["n"] == 1 and se["n_real"] == 0
+              and abs(se["media"] - (10 - bp)) < 0.05, (se, bp))
+    hu = res.get("HUERF", _nada)
+    comprobar("HUERFANA: la copia sin señal cuenta (n=1, real, +30)",
+              hu["n"] == 1 and hu["n_real"] == 1 and abs(hu["media"] - 30) < 0.01, hu)
+    do = res.get("DOBLE", _nada)
+    comprobar("DOBLE: señal con chg_24h cubierta por su copia = UNA "
+              "observación, la real (35, no 40)",
+              do["n"] == 1 and do["n_real"] == 1 and abs(do["media"] - 35) < 0.01, do)
+    od = res.get("ORDEN", _nada)
+    _dd_esp = cp._dd([-30 - bp, 100.0, -50 - bp])
+    comprobar("ORDEN: la caída máxima se calcula en orden temporal "
+              "(señal, copia, señal), no copias primero",
+              abs(od["dd"] - round(_dd_esp, 1)) < 0.11, (od, _dd_esp))
+    comprobar("NOSTAR: sin ⭐ no entra ni en observaciones ni en la brecha",
+              "NOSTAR" not in res
+              and res["_pob"]["n"] == 5 + 1 + 1 + 1 + 1 + 3, res["_pob"])
+
+    for t in ("wallets", "signals", "paper_trades", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12651,6 +12755,7 @@ def main():
     prueba_19af()
     prueba_19ag()
     prueba_19ah()
+    prueba_19ai()
 
     print("\n" + "─" * 60)
     if _FALLOS:

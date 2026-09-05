@@ -15,13 +15,16 @@ ordenar es EL RESULTADO DE COPIARLA.
 
 Cómo se calcula (todo en % sobre el importe):
 
-  observaciones  cada señal de COMPRA de la ⭐ con `chg_24h` medido en la
-                 ventana (VENTANA_DIAS). Si esa señal se copió en el paper
-                 y cerró con neto, la observación es el neto REAL
-                 (pnl_usd_neto / stake_usd); si no, es chg_24h menos la
-                 brecha típica de esa ⭐ (o de la población si aún no
-                 tiene copias). Se recorta a [TOPE_MIN, TOPE_MAX] para que
-                 un x68 no convierta una billetera mediocre en la primera.
+  observaciones  (a) cada copia REAL cerrada en el paper a nombre de la ⭐
+                 en la ventana (VENTANA_DIAS): neto real
+                 (pnl_usd_neto / stake_usd), tenga o no chg_24h su señal;
+                 (b) cada señal de COMPRA de la ⭐ con `chg_24h` medido
+                 que NO cubra una copia: chg_24h menos la brecha típica de
+                 esa ⭐ (o de la población si aún no tiene copias). Copia
+                 y señal se casan por (billetera, token) — no por firma,
+                 que en el consenso es de otra ⭐. Se recorta a
+                 [TOPE_MIN, TOPE_MAX] para que un x68 no convierta una
+                 billetera mediocre en la primera.
   media          media de las observaciones recortadas.
   score          media ENCOGIDA hacia la media de la población según la
                  muestra: (n·media + K·media_poblacion) / (n + K). Con K=5,
@@ -85,19 +88,28 @@ def calcular(conn, ahora=None, dias: int = VENTANA_DIAS) -> dict:
     ⭐ con al menos UNA observación. `poblacion` va bajo la clave "_pob"."""
     ahora = time.time() if ahora is None else ahora
     desde = ahora - dias * 86400
-    # Copias reales cerradas con neto, por firma de la señal.
-    copias = {}
+    # Copias reales cerradas con neto de las ⭐. (19-AI, 05/09) Se casan
+    # con su señal por (billetera, token), NO por firma: en una copia por
+    # CONSENSO la fila lleva wallet = LÍDER pero signature = la de la ⭐
+    # que completó el quórum, y por firma el neto real se acreditaba a la
+    # billetera equivocada. Y TODA copia real es una observación aunque su
+    # señal no tenga chg_24h (medido el 05/09: 84 de 262 copias no lo
+    # tenían —los flips de segundos, justo las que más pierden— y por eso
+    # una ⭐ con 5 copias a −96 $ seguía "sin medir" en el puesto 8).
+    copias = []
     for r in conn.execute(
-            """SELECT signature, wallet, stake_usd, pnl_usd, pnl_usd_neto
-               FROM paper_trades
-               WHERE status='cerrada' AND pnl_usd_neto IS NOT NULL
-                 AND stake_usd > 0 AND COALESCE(exit_ts, 0) >= ?""",
-            (desde,)).fetchall():
-        copias[r["signature"]] = r
+            """SELECT p.signature, p.wallet, p.mint, p.entry_ts, p.stake_usd,
+                      p.pnl_usd, p.pnl_usd_neto
+               FROM paper_trades p JOIN wallets w ON w.address = p.wallet
+               WHERE p.status='cerrada' AND p.pnl_usd_neto IS NOT NULL
+                 AND p.stake_usd > 0 AND COALESCE(p.exit_ts, 0) >= ?
+                 AND w.is_tracked = 1
+               ORDER BY p.entry_ts""", (desde,)).fetchall():
+        copias.append(r)
     # Brecha mediana por ⭐ (papel - neto, en % del importe) y poblacional.
     brechas = {}
     todas_brechas = []
-    for r in copias.values():
+    for r in copias:
         if r["pnl_usd"] is None:
             continue
         b = (r["pnl_usd"] - r["pnl_usd_neto"]) / r["stake_usd"] * 100
@@ -107,27 +119,48 @@ def calcular(conn, ahora=None, dias: int = VENTANA_DIAS) -> dict:
                   else BRECHA_DEFECTO_PCT)
     brecha_w = {w: statistics.median(v) for w, v in brechas.items()
                 if len(v) >= 3}
-    # Observaciones: señales de compra medidas a 24 h, en orden temporal.
+    # Señales de compra de las ⭐ en la ventana (con o sin chg_24h): las
+    # que tienen chg_24h son observaciones ESTIMADAS salvo que una copia
+    # real las cubra; las demás solo sirven para fechar la copia.
+    senales = conn.execute(
+        """SELECT s.signature, s.wallet, s.mint, s.ts, s.chg_24h
+           FROM signals s JOIN wallets w ON w.address = s.wallet
+           WHERE s.side='compra' AND s.ts >= ? AND w.is_tracked = 1
+           ORDER BY s.ts""", (desde,)).fetchall()
+    por_firma = {s["signature"]: s for s in senales}
+    por_wm = {}
+    for s in senales:
+        por_wm.setdefault((s["wallet"], s["mint"]), []).append(s)
+    # (x, real, ts) por billetera; la señal cubierta por una copia no se
+    # cuenta dos veces.
     obs = {}
-    for s in conn.execute(
-            """SELECT s.signature, s.wallet, s.chg_24h
-               FROM signals s JOIN wallets w ON w.address = s.wallet
-               WHERE s.side='compra' AND s.chg_24h IS NOT NULL
-                 AND s.ts >= ? AND w.is_tracked = 1
-               ORDER BY s.ts""", (desde,)).fetchall():
-        c = copias.get(s["signature"])
-        if c is not None:
-            x = _recorta(c["pnl_usd_neto"] / c["stake_usd"] * 100)
-            real = True
-        else:
-            x = _recorta(s["chg_24h"] - brecha_w.get(s["wallet"], brecha_pob))
-            real = False
-        obs.setdefault(s["wallet"], []).append((x, real))
-    todas = [x for v in obs.values() for x, _ in v]
+    cubiertas = set()
+    for c in copias:
+        s = por_firma.get(c["signature"])
+        if s is None or s["wallet"] != c["wallet"]:
+            # consenso (firma ajena) o señal ya podada: la ÚLTIMA compra
+            # de esa billetera en ese token antes de la entrada.
+            s = None
+            for cand in por_wm.get((c["wallet"], c["mint"]), []):
+                if cand["ts"] <= c["entry_ts"] + 60:
+                    s = cand
+        if s is not None:
+            cubiertas.add(s["signature"])
+        x = _recorta(c["pnl_usd_neto"] / c["stake_usd"] * 100)
+        obs.setdefault(c["wallet"], []).append(
+            (x, True, s["ts"] if s is not None else c["entry_ts"]))
+    for s in senales:
+        if s["chg_24h"] is None or s["signature"] in cubiertas:
+            continue
+        x = _recorta(s["chg_24h"] - brecha_w.get(s["wallet"], brecha_pob))
+        obs.setdefault(s["wallet"], []).append((x, False, s["ts"]))
+    for v in obs.values():
+        v.sort(key=lambda t: t[2])
+    todas = [x for v in obs.values() for x, _, _ in v]
     pob = (sum(todas) / len(todas)) if todas else 0.0
     out = {"_pob": {"media": pob, "n": len(todas), "brecha": brecha_pob}}
     for w, v in obs.items():
-        xs = [x for x, _ in v]
+        xs = [x for x, _, _ in v]
         n = len(xs)
         media = sum(xs) / n
         score = (n * media + K_ENCOGIMIENTO * pob) / (n + K_ENCOGIMIENTO)
@@ -135,7 +168,7 @@ def calcular(conn, ahora=None, dias: int = VENTANA_DIAS) -> dict:
         if brecha is not None and brecha > BRECHA_MAX_PCT and score > 0:
             score *= 0.5
         out[w] = {"score": round(score, 2), "n": n,
-                  "n_real": sum(1 for _, r in v if r),
+                  "n_real": sum(1 for _, r, _ in v if r),
                   "media": round(media, 2), "pf": _pf(xs),
                   "dd": round(_dd(xs), 1),
                   "brecha": round(brecha, 2) if brecha is not None else None}
