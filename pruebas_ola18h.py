@@ -13139,6 +13139,124 @@ def prueba_19al():
     conn.close()
 
 
+def prueba_19am():
+    bloque("19-AM - el freno del 85 % y los contadores de Helius cubren el "
+           "RPC, el fondeo y la identidad")
+    import contextlib
+    import io
+    import os as _os
+    import requests
+    import helius_budget as hb
+    import helius_rpc as hr
+    import wallet_funding as wf
+    import wallet_identity as wi
+    import api_usage
+    from db import get_conn
+
+    conn = get_conn()
+    wf._ensure(conn)
+    wi._ensure(conn)
+    conn.execute("DELETE FROM wallet_funding")
+    conn.execute("DELETE FROM wallet_identity")
+    conn.commit()
+    conn.close()
+
+    class _R:
+        def __init__(self, st, data):
+            self.status_code, self._d, self.ok = st, data, 200 <= st < 300
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    llamadas = []
+    apuntes = []
+    def _post(url, *a, **kw):
+        llamadas.append(("post", url))
+        if "batch-identity" in url:
+            return _R(200, [{"address": "IDW1", "type": "exchange", "name": "X"}])
+        filas = [{"signature": f"s{i}", "blockTime": 1, "meta": {}, "transaction": {"message": {}}}
+                 for i in range(150)]
+        return _R(200, {"result": {"data": filas, "paginationToken": None}})
+    def _get(url, *a, **kw):
+        llamadas.append(("get", url))
+        return _R(200, {"funder": "FUNDER1", "funderName": "F", "funderType": "wallet",
+                        "amount": 1.0, "timestamp": 1})
+    def _rec(api, n=1):
+        apuntes.append((api, n))
+
+    _p0, _g0, _pl0, _rec0, _hr_rec0 = (requests.post, requests.get, hb.puede_llamar,
+                                       api_usage.record, hr._api_rec)
+    _key0 = _os.environ.get("HELIUS_API_KEY")
+    _os.environ["HELIUS_API_KEY"] = "clave-prueba"
+    requests.post, requests.get = _post, _get
+    api_usage.record = _rec
+    hr._api_rec = _rec
+    try:
+        # ── freno ACTIVO: nadie llama ──────────────────────────────────
+        hb.puede_llamar = lambda conn=None: False
+        hr._FRENO_CACHE["ts"] = 0.0
+        with contextlib.redirect_stdout(io.StringIO()):
+            txs, tok = hr._rpc("ADDRAM")
+            f = wf.fondeo("FUNDW1")
+            ident = wi.identificar(["IDW1"])
+        comprobar("freno activo: _rpc no llama, devuelve vacio y deja el motivo",
+                  txs == [] and tok is None and llamadas == []
+                  and "presupuesto" in (hr.ultimo_fallo() or ""), (txs, tok, llamadas, hr.ultimo_fallo()))
+        comprobar("freno activo: fondeo e identidad no llaman ni cachean",
+                  f is None and ident == {} and llamadas == [], (f, ident, llamadas))
+        # ── freno LIBRE: llaman y APUNTAN creditos y llamadas ──────────
+        hb.puede_llamar = lambda conn=None: True
+        hr._FRENO_CACHE["ts"] = 0.0
+        apuntes.clear(); llamadas.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            txs, tok = hr._rpc("ADDRAM")
+        comprobar("_rpc: 150 filas → 20 creditos Y una llamada apuntada",
+                  ("helius_credits", 20) in apuntes and ("helius", 1) in apuntes
+                  and hr.ultimo_fallo() is None, apuntes)
+        apuntes.clear(); llamadas.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            f = wf.fondeo("FUNDW1")
+        comprobar("fondeo: llamada apuntada con sus creditos y cacheada",
+                  f is not None and f["funder"] == "FUNDER1"
+                  and ("helius", 1) in apuntes and any(a == "helius_credits" and n >= 100 for a, n in apuntes),
+                  (f, apuntes))
+        apuntes.clear(); llamadas.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            f2 = wf.fondeo("FUNDW1")
+        comprobar("fondeo: la segunda vez sale de la cache: ni llamada ni apunte",
+                  f2 is not None and llamadas == [] and apuntes == [], (llamadas, apuntes))
+        apuntes.clear(); llamadas.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            ident = wi.identificar(["IDW1"])
+        comprobar("identidad: lote apuntado con sus creditos",
+                  "IDW1" in ident and ("helius", 1) in apuntes
+                  and any(a == "helius_credits" and n >= 100 for a, n in apuntes), (ident, apuntes))
+        # cache del freno: 60 s
+        hb.puede_llamar = lambda conn=None: False
+        comprobar("_rpc cachea el freno 60 s (no reconsulta en cada pagina)",
+                  hr._freno_permite() is True)
+        hr._FRENO_CACHE["ts"] = 0.0
+        comprobar("…y al vencer la cache vuelve a mirar", hr._freno_permite() is False)
+    finally:
+        requests.post, requests.get = _p0, _g0
+        hb.puede_llamar = _pl0
+        api_usage.record = _rec0
+        hr._api_rec = _hr_rec0
+        hr._FRENO_CACHE["ts"] = 0.0
+        hr._set_fallo(None)
+        if _key0 is None:
+            _os.environ.pop("HELIUS_API_KEY", None)
+        else:
+            _os.environ["HELIUS_API_KEY"] = _key0
+        conn = get_conn()
+        conn.execute("DELETE FROM wallet_funding")
+        conn.execute("DELETE FROM wallet_identity")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -13203,6 +13321,7 @@ def main():
     prueba_19aj()
     prueba_19ak()
     prueba_19al()
+    prueba_19am()
 
     print("\n" + "─" * 60)
     if _FALLOS:

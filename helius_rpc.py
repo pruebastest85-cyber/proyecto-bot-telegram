@@ -39,6 +39,31 @@ except Exception as _ex:
 
 LAMPORTS = 1_000_000_000
 
+# (19-AM, 05/09) El freno del 85 % de Helius lo consultaban la Enhanced
+# API, el radar, wallet_links y vaciar_cola — pero NO este cliente RPC,
+# que con USE_RPC_HISTORY=1 es la ruta PRINCIPAL (analisis de tokens,
+# perfilado, /perfil, dev_watch). El freno solo paraba el perfilado
+# automatico (cupo 0); el resto seguia gastando. Se consulta aqui, con
+# cache de 60 s para no abrir una conexion por pagina.
+_FRENO_CACHE = {"ts": 0.0, "ok": True}
+_FRENO_TTL_S = 60.0
+_AVISO_FRENO = [0.0]
+
+
+def _freno_permite() -> bool:
+    """True si el presupuesto de Helius permite llamar (cache 60 s)."""
+    ahora = time.time()
+    if ahora - _FRENO_CACHE["ts"] < _FRENO_TTL_S:
+        return _FRENO_CACHE["ok"]
+    try:
+        from helius_budget import puede_llamar
+        ok = bool(puede_llamar())
+    except Exception as _ex:
+        _avisar_ex("helius_rpc:_freno_permite", _ex)
+        ok = True
+    _FRENO_CACHE["ts"], _FRENO_CACHE["ok"] = ahora, ok
+    return ok
+
 
 # ───────────────────────── traducción de formato ─────────────────────────
 
@@ -243,6 +268,13 @@ def _rpc(address: str, *, orden: str = "desc", limite: int = 1000,
     cuerpo = {"jsonrpc": "2.0", "id": 1,
               "method": "getTransactionsForAddress",
               "params": [address, cfg]}
+    if not _freno_permite():
+        if time.time() - _AVISO_FRENO[0] > 3600:
+            _AVISO_FRENO[0] = time.time()
+            print("  ⛔ Presupuesto de Helius casi agotado: el historial por "
+                  "RPC se pausa hasta el próximo ciclo")
+        _set_fallo("presupuesto de Helius agotado")
+        return ([], None)
     try:
         r = requests.post(config.HELIUS_RPC, json=cuerpo, timeout=60)
         time.sleep(getattr(config, "HELIUS_DELAY", 0.1))
@@ -270,6 +302,7 @@ def _rpc(address: str, *, orden: str = "desc", limite: int = 1000,
     # Coste real: 10 créditos por cada 100 devueltas (mínimo 10)
     creditos = max(10, 10 * ((len(filas) + 99) // 100))
     _api_rec("helius_credits", creditos)
+    _api_rec("helius")            # (19-AM) /status "Helius N req" contaba solo la Enhanced API
 
     salida = [t for t in (traducir(x) for x in filas) if t]
     return (salida, res.get("paginationToken"))

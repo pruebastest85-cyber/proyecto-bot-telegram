@@ -28,6 +28,29 @@ from avisos import aviso as _avisar_ex   # (19-AE)
 
 API = "https://api.helius.xyz/v1/wallet/{addr}/funded-by"
 
+def _apuntar_creditos(n_llamadas: int = 1) -> None:
+    """(19-AM) Apunta la llamada en los contadores que alimentan el freno
+    del 85 % y /salud (como hace wallet_links). El coste por llamada se
+    toma de config.HELIUS_CREDITS_PER_CALL (100)."""
+    try:
+        import config as _cfg
+        from api_usage import record as _api_rec
+        _api_rec("helius", n_llamadas)
+        _api_rec("helius_credits",
+                 n_llamadas * getattr(_cfg, "HELIUS_CREDITS_PER_CALL", 100))
+    except Exception as e:
+        print(f"· fondeo: no pude apuntar los créditos ({e})")
+
+
+def _freno_permite() -> bool:
+    try:
+        from helius_budget import puede_llamar
+        return bool(puede_llamar())
+    except Exception as e:
+        print(f"· fondeo: no pude leer el freno de Helius ({e}); sigo")
+        return True
+
+
 # Por debajo de esto, la billetera se creó prácticamente para operar
 HORAS_RECIEN_CREADA = 24
 
@@ -59,10 +82,17 @@ def fondeo(address: str) -> dict | None:
                     "ts": r["ts_fondeo"]}
         if not api_key:
             return None
+        # (19-AM, 05/09) Esta llamada cuesta creditos (el docstring lo
+        # decia: 100) y no los apuntaba ni miraba el freno del 85 %.
+        if not _freno_permite():
+            print("  · Fondeo: presupuesto de Helius casi agotado; no se consulta")
+            return None
 
         try:
             resp = requests.get(API.format(addr=address),
                                 params={"api-key": api_key}, timeout=25)
+            if resp.status_code in (200, 404):
+                _apuntar_creditos()
             if resp.status_code == 404:
                 conn.execute(
                     "INSERT OR IGNORE INTO wallet_funding "
