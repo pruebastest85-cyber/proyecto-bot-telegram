@@ -530,8 +530,20 @@ def _fill_nuevo(conn, trade_id: int, firma) -> bool:
         conn.commit()
         return bool(cur.rowcount)
     except Exception as e:
-        print(f"· paper_fills no disponible ({e}); sigo sin guardia")
-        return True
+        # (19-AK, 05/09) Antes: "sigo sin guardia" (True). Con la base
+        # bloqueada, el camino caliente y la via normal procesaban el
+        # MISMO evento y un espejo parcial del 50 % se aplicaba dos veces
+        # (reproducido: fraccion_restante 0,25 en vez de 0,50). Cerrar en
+        # falso es peor que no copiar un evento: la otra pasada o el job
+        # de 15 min lo recogen.
+        print(f"· paper_fills no disponible ({e}); NO proceso el evento "
+              f"(lo recoge la otra pasada o el job)")
+        try:
+            from errores import record as _rec
+            _rec("paper.fill_nuevo", e, f"trade {trade_id}")
+        except Exception as _ex:
+            _avisar_ex("paper_trading:_fill_nuevo:except", _ex)
+        return False
 
 
 def _fill_resultado(conn, trade_id: int, firma, tipo: str, motivo: str,

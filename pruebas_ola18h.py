@@ -12812,6 +12812,179 @@ def prueba_19aj():
     conn.close()
 
 
+def prueba_19ak():
+    bloque("19-AK - precio FRESCO en la señal, _fill_nuevo cierra al fallar, "
+           "la acción del agente va entera")
+    import contextlib
+    import io
+    import json as _json
+    import time as _t
+    import requests
+    import config as _cfg
+    from db import get_conn, set_setting
+    import realtime as rt
+    import paper_trading as pt
+    import telegram_bot as tb
+    import token_check as tc
+
+    # ── red simulada, acotada a esta prueba ────────────────────────────
+    ESTADO = {"dex_px": 0.001, "jup_px": 0.001, "sol_usd": 200.0}
+
+    class _R:
+        def __init__(self, st, data):
+            self.status_code, self._d, self.ok = st, data, 200 <= st < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            mint = url.rsplit("/", 1)[-1]
+            if mint.startswith("So1111"):
+                return _R(200, {"pairs": [{"priceUsd": str(ESTADO["sol_usd"]),
+                                          "baseToken": {"address": mint, "symbol": "SOL"}}]})
+            return _R(200, {"pairs": [{"priceUsd": str(ESTADO["dex_px"]),
+                                      "baseToken": {"address": mint, "symbol": "TOK"},
+                                      "liquidity": {"usd": 50000.0}, "marketCap": 1_000_000.0,
+                                      "pairAddress": "PAIR", "chainId": "solana",
+                                      "txns": {"m5": {"buys": 1, "sells": 1}},
+                                      "volume": {"h24": 1000}, "priceChange": {"h1": 0, "h24": 0}}]})
+        if "jup.ag" in url:
+            p = params or {}
+            amt = int(p.get("amount"))
+            if str(p.get("inputMint", "")).startswith("So1111"):
+                out = int(amt / 1e9 * ESTADO["sol_usd"] / ESTADO["jup_px"] * 1e6)
+            else:
+                out = int(amt / 1e6 * ESTADO["jup_px"] / ESTADO["sol_usd"] * 1e9)
+            return _R(200, {"inAmount": str(amt), "outAmount": str(out), "priceImpactPct": "0.5"})
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+
+    def _post(url, *a, **kw):
+        if "telegram" in url:
+            return _R(200, {"ok": True})
+        return _R(200, {"result": None})
+
+    def _tx(wallet, mint, side, sol, tokens, ts, sig):
+        delta = -int(sol * 1e9) if side == "compra" else int(sol * 1e9)
+        tt = ({"mint": mint, "toUserAccount": wallet, "fromUserAccount": None, "tokenAmount": tokens}
+              if side == "compra" else
+              {"mint": mint, "fromUserAccount": wallet, "toUserAccount": None, "tokenAmount": tokens})
+        return {"signature": sig, "timestamp": ts, "feePayer": wallet, "transactionError": None,
+                "tokenTransfers": [tt], "nativeTransfers": [],
+                "accountData": [{"account": wallet, "nativeBalanceChange": delta}]}
+
+    conn = get_conn()
+    import errores as _err
+    _err._ensure(conn)
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills", "errors"):
+        conn.execute(f"DELETE FROM {t}")
+    W = "WAK" + "x" * 41
+    conn.execute("INSERT INTO wallets (address, alias, is_tracked, confirmada, is_bot, "
+                 "wallet_score, pnl_total, score, winning_tokens_count) "
+                 "VALUES (?,?,1,1,0,80,5,90,3)", (W, "Wak"))
+    conn.execute("INSERT INTO positions (wallet, mint, first_ts, last_ts, tokens) "
+                 "VALUES (?,?,?,?,0)", (W, "ACTIVIDAD", int(_t.time()), int(_t.time())))
+    for k, v in (("top_alertas", "50"), ("paper_max_sol", "1"), ("paper_tp_pct", "999999"),
+                 ("paper_sl_pct", "999999"), ("paper_timeout_h", "999999"),
+                 ("min_signal_score", "0"), ("umbral_manual", "1"), ("ia_local_activa", "0")):
+        set_setting(conn, k, v)
+    conn.commit()
+    conn.close()
+
+    _g0, _p0 = requests.get, requests.post
+    _d0, _h0 = _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY
+    requests.get, requests.post = _get, _post
+    _cfg.DEXSCREENER_DELAY = 0.0
+    _cfg.HELIUS_DELAY = 0.0
+    # Caches de otras pruebas (vigiladas 60 s, conjunto operativo): fuera.
+    rt.invalidar_vigiladas()
+    try:
+        from db import invalidar_copiables as _inv
+        _inv()
+    except Exception as _e:
+        print(f"· no pude invalidar copiables: {_e}")
+    tc._dex_cache.clear()
+    try:
+        # ── M1: la venta 10 s despues, con DexScreener a la mitad ────
+        M = "MINTAK1" + "y" * 37
+        T = int(_t.time()) - 5
+        ESTADO.update({"dex_px": 0.001, "jup_px": 0.001})
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(W, M, "compra", 1.0, 1_000_000, T, "SIGAK_BUY")])
+        ESTADO.update({"dex_px": 0.0005, "jup_px": 0.0005})
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(W, M, "venta", 0.5, 1_000_000, T + 10, "SIGAK_SELL")])
+        conn = get_conn()
+        sv = conn.execute("SELECT price_usd FROM signals WHERE signature='SIGAK_SELL'").fetchone()
+        pp = conn.execute("SELECT entry_price, exit_price, status FROM paper_trades WHERE mint=?", (M,)).fetchone()
+        comprobar("M1: la señal de VENTA se guarda con el precio FRESCO (0,0005), "
+                  "no con el de la caché de 45 s (0,001)",
+                  sv is not None and abs(sv["price_usd"] - 0.0005) < 1e-9,
+                  dict(sv) if sv else None)
+        comprobar("M1: y el paper cerro a ese mismo precio",
+                  pp is not None and pp["status"] == "cerrada"
+                  and abs(pp["exit_price"] - 0.0005) < 1e-9, dict(pp) if pp else None)
+        conn.close()
+        tc._dex_cache.clear()
+
+        # ── M3: paper_fills inaccesible → el evento NO se procesa ─────
+        M2 = "MINTAK2" + "y" * 37
+        T2 = int(_t.time()) - 100
+        ESTADO.update({"dex_px": 0.001, "jup_px": 0.001})
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(W, M2, "compra", 1.0, 1_000_000, T2, "SIGAK2_BUY")])
+        conn = get_conn()
+        conn.execute("ALTER TABLE paper_fills RENAME TO paper_fills_fuera")
+        conn.commit(); conn.close()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rt.process_transactions([_tx(W, M2, "venta", 0.5, 500_000, T2 + 30, "SIGAK2_SELL50")])
+        finally:
+            conn = get_conn()
+            conn.execute("ALTER TABLE paper_fills_fuera RENAME TO paper_fills")
+            conn.commit()
+        pp2 = conn.execute("SELECT status, fraccion_restante FROM paper_trades WHERE mint=?", (M2,)).fetchone()
+        nerr = conn.execute("SELECT COUNT(*) c FROM errors WHERE modulo='paper.fill_nuevo'").fetchone()["c"]
+        comprobar("M3: con la guardia caída el espejo NO se aplica (ni una vez "
+                  "ni dos): la posición sigue entera y queda constancia en errores",
+                  pp2 is not None and pp2["status"] == "abierta"
+                  and (pp2["fraccion_restante"] is None or pp2["fraccion_restante"] >= 0.999)
+                  and nerr >= 1, (dict(pp2) if pp2 else None, nerr))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _fn = pt._fill_nuevo(None, 1, "firma")
+        comprobar("M3: _fill_nuevo devuelve False ante una excepción", _fn is False)
+        conn.close()
+    finally:
+        requests.get, requests.post = _g0, _p0
+        _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY = _d0, _h0
+        tc._dex_cache.clear()
+
+    # ── M10: la acción entera aunque la respuesta sea larga ──────────
+    acc = {"tool": "descartar_billetera", "args": {"address": "D" * 44}}
+    largo = "bla " * 1500                     # ~6.000 caracteres
+    msg = tb._mensaje_propuesta(largo, acc)
+    comprobar("M10: con respuesta de 6.000 caracteres el mensaje cabe, "
+              "contiene '¿Ejecuto esta acción?' y la dirección",
+              tb._largo_tg(msg) <= tb.TG_MAX_CHARS and "¿Ejecuto esta acción?" in msg
+              and "D" * 12 + "…" in msg and "recortado" in msg, tb._largo_tg(msg))
+    msg2 = tb._mensaje_propuesta("ok", acc)
+    comprobar("M10: con respuesta corta no se recorta nada",
+              "recortado" not in msg2 and msg2.startswith("ok"))
+    comprobar("M10: on_chat usa _mensaje_propuesta",
+              "_mensaje_propuesta(respuesta, accion)" in open("telegram_bot.py", encoding="utf-8").read())
+
+    conn = get_conn()
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills", "errors"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12874,6 +13047,7 @@ def main():
     prueba_19ah()
     prueba_19ai()
     prueba_19aj()
+    prueba_19ak()
 
     print("\n" + "─" * 60)
     if _FALLOS:

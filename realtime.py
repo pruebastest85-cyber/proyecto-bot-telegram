@@ -1059,12 +1059,18 @@ def _proc(txs: list[dict], conn):
         #   a) si `analyze_token` no trajo precio pero el camino caliente
         #      SI lo consiguio, se usa ese en vez de escribir NULL;
         #   b) nunca se pisa con NULL un valor que ya estaba puesto.
+        # (19-AK, 05/09) El precio FRESCO del camino caliente manda: el de
+        # `analyze_token` viene de una cache de 45 s por mint, asi que la
+        # 2ª/3ª ⭐ del mismo token en ese lapso (consenso, snipers) se
+        # grababa con el precio de la señal ANTERIOR — y de ese precio
+        # salen chg_1h/24h, los hitos xN y la copiabilidad. La cache queda
+        # solo de respaldo.
         _px = t.get("price")
         _mcv, _liqv = t.get("mc"), t.get("liq")
-        if not _px and _px_caliente:
-            _px, _mcv, _liqv = (_px_caliente[0],
-                                _mcv or _px_caliente[1],
-                                _liqv or _px_caliente[2])
+        if _px_caliente:
+            _px = _px_caliente[0]
+            _mcv = _px_caliente[1] if _px_caliente[1] is not None else _mcv
+            _liqv = _px_caliente[2] if _px_caliente[2] is not None else _liqv
         if _px:
             conn.execute(
                 "UPDATE signals SET price_usd=?, symbol=?, mc=?, liq=? "

@@ -338,6 +338,17 @@ def _cerrar_markdown(cuerpo: str) -> str:
     return _cerrar_markdown(cuerpo)
 
 
+def _mensaje_propuesta(respuesta: str, accion: dict) -> str:
+    """(19-AK, 05/09) Texto de una propuesta del agente: la respuesta del
+    modelo RECORTADA y la accion ENTERA. Antes se recortaba el conjunto por
+    el final —que es donde va "¿Ejecuto…?"— y con una respuesta larga el
+    dueño veia Confirmar/Cancelar sin saber que confirmaba."""
+    from ai_agent import describe_action
+    cola = f"¿Ejecuto esta acción?\n{describe_action(accion)}"
+    sitio = max(200, TG_MAX_CHARS - _largo_tg(cola) - 4)
+    return ((_recortar_tg(respuesta, sitio) + "\n\n") if respuesta else "") + cola
+
+
 def _recortar_tg(text: str, tope: int | None = None) -> str:
     """Un mensaje mas largo que el tope de Telegram NO se envia — ni en
     Markdown ni en texto plano. Medido: la evidencia de la billetera mas
@@ -2742,7 +2753,7 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # no es un token tradeable (¿billetera?) → sigue el flujo normal
 
     await update.message.chat.send_action("typing")
-    from ai_agent import chat, describe_action
+    from ai_agent import chat
     respuesta, accion = await asyncio.to_thread(chat, texto)
     if accion:
         # (Ola 15 - A2) Cada propuesta lleva su propio token: el boton
@@ -2758,8 +2769,7 @@ async def on_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                  callback_data=f"agc:y:{_tok}"),
             InlineKeyboardButton("❌ Cancelar",
                                  callback_data=f"agc:n:{_tok}")]])
-        msg = _recortar_tg((respuesta + "\n\n" if respuesta else "") +
-                           f"¿Ejecuto esta acción?\n{describe_action(accion)}")
+        msg = _mensaje_propuesta(respuesta, accion)
         try:
             await update.message.reply_text(msg, parse_mode="Markdown",
                                             reply_markup=kb)
