@@ -964,15 +964,25 @@ def _proc(txs: list[dict], conn):
                             # manada de billeteras en prueba no es señal,
                             # y "medir en silencio" significa que el
                             # paper no las toca ni via consenso.
+                            # (19-AN, 05/09) Y solo las que SIGUEN DENTRO
+                            # (positions.tokens > 0): una ⭐ que ya vendio
+                            # todo no es manada, y como lider dejaba una
+                            # posicion abierta a su nombre para siempre
+                            # (nunca volvera a vender). Reproducido.
                             _mana = conn.execute(
                                 "SELECT s.wallet, MIN(s.ts) t0 "
                                 "FROM signals s JOIN wallets w "
                                 "ON w.address=s.wallet AND w.is_tracked=1 "
                                 "AND COALESCE(w.confirmada, 0) = 1 "
+                                "LEFT JOIN positions p ON p.wallet=s.wallet "
+                                "AND p.mint=s.mint "
                                 "WHERE s.mint=? AND s.ts>=? "
                                 "AND s.side='compra' "
+                                "AND (COALESCE(p.tokens, 0) > 0 "
+                                "     OR s.wallet = ?) "
                                 "GROUP BY s.wallet ORDER BY t0 ASC",
-                                (trade["mint"], _since)).fetchall()
+                                (trade["mint"], _since,
+                                 trade["wallet"])).fetchall()
                             if len(_mana) >= _n_min:
                                 _t_lider = dict(trade)
                                 _t_lider["wallet"] = _mana[0]["wallet"]

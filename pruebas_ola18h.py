@@ -13257,6 +13257,229 @@ def prueba_19am():
         conn.close()
 
 
+def prueba_19an():
+    bloque("19-AN - consenso solo con quien sigue dentro, pares sin precio "
+           "con liquidez de polvo = muerto, aviso de la medicion de 24 h "
+           "perdida, agente en la nube con varias herramientas")
+    import contextlib
+    import io
+    import json as _json
+    import time as _t
+    import requests
+    import config as _cfg
+    from db import get_conn, set_setting
+    import realtime as rt
+    import signal_tracker as st
+    import token_check as tc
+    import ai_agent as ag
+    import errores as _err
+
+    class _R:
+        def __init__(self, st_, data):
+            self.status_code, self._d, self.ok = st_, data, 200 <= st_ < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    ESTADO = {"dex_px": 0.001, "jup_px": 0.001, "sol_usd": 200.0, "dex_pairs": None}
+
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            mint = url.rsplit("/", 1)[-1]
+            if mint.startswith("So1111"):
+                return _R(200, {"pairs": [{"priceUsd": str(ESTADO["sol_usd"]),
+                                          "baseToken": {"address": mint, "symbol": "SOL"}}]})
+            if ESTADO["dex_pairs"] is not None:
+                return _R(200, {"pairs": ESTADO["dex_pairs"]})
+            return _R(200, {"pairs": [{"priceUsd": str(ESTADO["dex_px"]),
+                                      "baseToken": {"address": mint, "symbol": "TOK"},
+                                      "liquidity": {"usd": 50000.0}, "marketCap": 1_000_000.0,
+                                      "pairAddress": "PAIR", "chainId": "solana",
+                                      "txns": {"m5": {"buys": 1, "sells": 1}},
+                                      "volume": {"h24": 1000}, "priceChange": {"h1": 0, "h24": 0}}]})
+        if "jup.ag" in url:
+            p = params or {}
+            amt = int(p.get("amount"))
+            if str(p.get("inputMint", "")).startswith("So1111"):
+                out = int(amt / 1e9 * ESTADO["sol_usd"] / ESTADO["jup_px"] * 1e6)
+            else:
+                out = int(amt / 1e6 * ESTADO["jup_px"] / ESTADO["sol_usd"] * 1e9)
+            return _R(200, {"inAmount": str(amt), "outAmount": str(out), "priceImpactPct": "0.5"})
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+
+    NUBE = {"paso": 0, "peticiones": []}
+
+    def _post(url, *a, **kw):
+        if "telegram" in url:
+            return _R(200, {"ok": True})
+        if "anthropic" in url or "v1/messages" in url:
+            NUBE["paso"] += 1
+            msgs = (kw.get("json") or {}).get("messages") or []
+            NUBE["peticiones"].append(msgs)
+            if NUBE["paso"] == 1:
+                return _R(200, {"content": [
+                    {"type": "text", "text": "miro dos cosas"},
+                    {"type": "tool_use", "id": "t1", "name": "ver_ajustes", "input": {}},
+                    {"type": "tool_use", "id": "t2", "name": "buscar_billetera",
+                     "input": {"texto": "x"}}]})
+            # regla real de la API: cada tool_use necesita su tool_result
+            ult = msgs[-1]
+            ids = {b.get("tool_use_id") for b in (ult.get("content") or [])
+                   if isinstance(b, dict) and b.get("type") == "tool_result"}
+            if ids != {"t1", "t2"}:
+                return _R(400, {"type": "error", "error": {"message": "tool_use ids without tool_result"}})
+            return _R(200, {"content": [{"type": "text", "text": "listo: top 50"}]})
+        return _R(200, {"result": None})
+
+    def _tx(wallet, mint, side, sol, tokens, ts, sig):
+        delta = -int(sol * 1e9) if side == "compra" else int(sol * 1e9)
+        tt = ({"mint": mint, "toUserAccount": wallet, "fromUserAccount": None, "tokenAmount": tokens}
+              if side == "compra" else
+              {"mint": mint, "fromUserAccount": wallet, "toUserAccount": None, "tokenAmount": tokens})
+        return {"signature": sig, "timestamp": ts, "feePayer": wallet, "transactionError": None,
+                "tokenTransfers": [tt], "nativeTransfers": [],
+                "accountData": [{"account": wallet, "nativeBalanceChange": delta}]}
+
+    conn = get_conn()
+    _err._ensure(conn)
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills", "errors"):
+        conn.execute(f"DELETE FROM {t}")
+    A, B, C, Z = ("A" + "a" * 43), ("B" + "b" * 43), ("C" + "c" * 43), ("Z" + "z" * 43)
+    ahora = int(_t.time())
+    for w, ws in ((A, 80), (B, 80), (C, 80), (Z, 99)):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, confirmada, is_bot, "
+                     "wallet_score, pnl_total, score, winning_tokens_count) "
+                     "VALUES (?,?,1,1,0,?,5,90,3)", (w, w[:1], ws))
+    conn.execute("INSERT INTO positions (wallet, mint, first_ts, last_ts, tokens) "
+                 "VALUES (?,?,?,?,0)", (Z, "ACTIVIDAD", ahora, ahora))
+    for k, v in (("top_alertas", "1"), ("paper_max_sol", "1"), ("paper_tp_pct", "999999"),
+                 ("paper_sl_pct", "999999"), ("paper_timeout_h", "999999"),
+                 ("consenso_copia_n", "2"), ("min_signal_score", "0"),
+                 ("umbral_manual", "1"), ("ia_local_activa", "0")):
+        set_setting(conn, k, v)
+    conn.commit()
+    conn.close()
+
+    _g0, _p0 = requests.get, requests.post
+    _d0, _h0 = _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY
+    requests.get, requests.post = _get, _post
+    _cfg.DEXSCREENER_DELAY = 0.0
+    _cfg.HELIUS_DELAY = 0.0
+    rt.invalidar_vigiladas()
+    try:
+        from db import invalidar_copiables as _inv
+        _inv()
+    except Exception as _e:
+        print(f"· no pude invalidar copiables: {_e}")
+    tc._dex_cache.clear()
+    try:
+        # ── M4: A compra, vende TODO; B compra → sin quorum (A ya no esta);
+        #        C compra → quorum B+C, lider B ──────────────────────────
+        M = "MINTAN1" + "y" * 37
+        T = ahora - 400
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(A, M, "compra", 1.0, 1_000_000, T, "AN_A_BUY")])
+            rt.process_transactions([_tx(A, M, "venta", 1.2, 1_000_000, T + 60, "AN_A_SELL")])
+            rt.process_transactions([_tx(B, M, "compra", 1.0, 1_000_000, T + 120, "AN_B_BUY")])
+        conn = get_conn()
+        n1 = conn.execute("SELECT COUNT(*) c FROM paper_trades WHERE mint=?", (M,)).fetchone()["c"]
+        conn.close()
+        comprobar("M4: con A ya fuera del token, A+B NO hacen quorum: sin paper",
+                  n1 == 0, n1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(C, M, "compra", 1.0, 1_000_000, T + 180, "AN_C_BUY")])
+        conn = get_conn()
+        filas = [dict(r) for r in conn.execute(
+            "SELECT wallet, origen, status FROM paper_trades WHERE mint=?", (M,)).fetchall()]
+        conn.close()
+        comprobar("M4: B+C hacen quorum y la lider es B (la primera que SIGUE dentro), "
+                  "no A", len(filas) == 1 and filas[0]["wallet"] == B
+                  and filas[0]["origen"] == "consenso", filas)
+
+        # ── M11: pares sin precio con liquidez de polvo → muerto ──────
+        tc._dex_cache.clear()
+        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MX", "symbol": "TOK"},
+                                "liquidity": {"usd": 3.0}, "chainId": "solana"}]
+        p, mc, muerto, liq = st._price_mc_ex("MINTAN_POLVO")
+        comprobar("M11: pares sin priceUsd y liquidez leida de 3 $ → muerto",
+                  p is None and muerto is True, (p, mc, muerto, liq))
+        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MX", "symbol": "TOK"},
+                                "chainId": "solana"}]
+        p, mc, muerto, liq = st._price_mc_ex("MINTAN_SINDATO")
+        comprobar("M11: pares sin priceUsd y SIN liquidez leida → sin dato, no muerto",
+                  p is None and muerto is False, (p, mc, muerto, liq))
+        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MX", "symbol": "TOK"},
+                                "liquidity": {"usd": 5000.0}, "chainId": "solana"}]
+        p, mc, muerto, liq = st._price_mc_ex("MINTAN_VIVO")
+        comprobar("M11: pares sin priceUsd pero con liquidez SANA → sin dato, no muerto",
+                  p is None and muerto is False, (p, mc, muerto, liq))
+        ESTADO["dex_pairs"] = None
+
+        # ── M11b: la perdida de la medicion de 24 h se cuenta y se apunta ──
+        conn = get_conn()
+        conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, side, price_usd, "
+                     "price_1h, chg_1h) VALUES ('AN_VIEJA', ?, 'MINTAN_V', 1.0, ?, 'compra', "
+                     "0.01, 0.011, 10.0)", (Z, ahora - 33 * 3600))
+        conn.execute("DELETE FROM errors WHERE modulo LIKE 'medicion.%'")
+        conn.commit()
+        conn.close()
+        with contextlib.redirect_stdout(io.StringIO()):
+            st.track_outcomes()
+        conn = get_conn()
+        e24 = conn.execute("SELECT COUNT(*) c FROM errors WHERE modulo='medicion.fuera_de_ventana_24h'").fetchone()["c"]
+        conn.close()
+        comprobar("M11b: una señal de 33 h sin price_24h queda apuntada como "
+                  "medicion de 24 h perdida", e24 == 1, e24)
+
+        # ── M13: agente en la nube con dos tool_use ──────────────────
+        _key0, _url0, _exec0 = ag.ANTHROPIC_API_KEY, ag.API_URL, ag._exec_read
+        ag.ANTHROPIC_API_KEY = "sk-prueba"
+        ag.API_URL = "https://api.anthropic.com/v1/messages"
+        ag._exec_read = lambda name, args: f"resultado de {name}"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                res = ag._chat_nube([{"role": "user", "content": "pon el top en 20"}])
+        finally:
+            ag.ANTHROPIC_API_KEY, ag.API_URL, ag._exec_read = _key0, _url0, _exec0
+        comprobar("M13: con dos tool_use en el mismo turno el agente responde "
+                  "a los dos y termina (no 400 → None)",
+                  res is not None and res[0] == "listo: top 50" and NUBE["paso"] == 2,
+                  (res, NUBE["paso"]))
+    finally:
+        requests.get, requests.post = _g0, _p0
+        _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY = _d0, _h0
+        tc._dex_cache.clear()
+        conn = get_conn()
+        for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills", "errors"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+        conn.close()
+
+    # ── M12: auditoria.py ejecuta las consultas reales del top ───────
+    import auditoria as au
+    import db as _db
+    au.fallos.clear()
+    n5 = au.clase5_consultas_reales()
+    comprobar("M12: clase 5 ejecuta las 3 consultas del top sin hallazgos",
+              n5 == 3 and au.fallos == [], (n5, au.fallos))
+    _ot0 = _db.orden_top
+    _db.orden_top = lambda: "w.is_tracked DESC, w.wallet_scoree DESC"
+    try:
+        au.fallos.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            au.clase5_consultas_reales()
+        comprobar("M12: con una columna rota en orden_top la clase 5 lo denuncia",
+                  any("wallet_scoree" in f for f in au.fallos), au.fallos)
+    finally:
+        _db.orden_top = _ot0
+        au.fallos.clear()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -13322,6 +13545,7 @@ def main():
     prueba_19ak()
     prueba_19al()
     prueba_19am()
+    prueba_19an()
 
     print("\n" + "─" * 60)
     if _FALLOS:

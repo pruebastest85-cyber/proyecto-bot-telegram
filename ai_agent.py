@@ -715,14 +715,32 @@ def _chat_nube(messages: list[dict]):
             tool_calls = [b for b in content if b.get("type") == "tool_use"]
             if not tool_calls:
                 return (text or "No entendí, ¿puedes reformular?"), None
-            tc = tool_calls[0]
-            if tc["name"] in MODIFYING:
-                return text, {"tool": tc["name"], "args": tc.get("input", {})}
-            resultado = _exec_read(tc["name"], tc.get("input", {}))
+            # (19-AN, 05/09) Responder TODOS los tool_use del turno, como
+            # ya hace _chat_local (Ola 15 - M4). Aqui seguia ejecutandose
+            # solo el primero y reinyectando el `content` entero: la API
+            # de Anthropic rechaza el paso siguiente (tool_use sin su
+            # tool_result) → 400 → "Ninguna IA respondio" con la llamada
+            # ya cobrada. Reproducido con dos herramientas en paralelo.
+            _pendiente = None
+            _resultados = []
+            for tc in tool_calls:
+                if tc["name"] in MODIFYING:
+                    if _pendiente is None:
+                        _pendiente = {"tool": tc["name"],
+                                      "args": tc.get("input", {})}
+                    _resultados.append((tc["id"], "Propuesta al usuario; "
+                                        "espera su confirmación."))
+                    continue
+                _resultados.append((tc["id"],
+                                    _exec_read(tc["name"], tc.get("input", {}))))
+            if _pendiente is not None and len(tool_calls) == 1:
+                return text, _pendiente
             msgs.append({"role": "assistant", "content": content})
             msgs.append({"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": tc["id"],
-                 "content": resultado}]})
+                {"type": "tool_result", "tool_use_id": _tid, "content": _res}
+                for _tid, _res in _resultados]})
+            if _pendiente is not None:
+                return text, _pendiente
         return "Necesité demasiados pasos; intenta ser más específico.", None
     except Exception as e:
         print(f"· Agente nube no disponible: {e}")

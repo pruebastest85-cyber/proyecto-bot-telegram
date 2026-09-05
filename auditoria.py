@@ -450,6 +450,38 @@ def clase4_literales():
     return n
 
 
+def clase5_consultas_reales():
+    """(19-AN, 05/09) Las consultas del top se arman con f-strings
+    (`db.orden_top()` dentro de top_wallets, _operativas y
+    wallet_ident.posicion) y la clase 1 SALTA los f-strings: una columna
+    rota en el ORDER BY comun pasaba con "Sin hallazgos" y tumbaba /top,
+    el conjunto operativo y la posicion de las tarjetas (reproducido el
+    05/09 con `w.wallet_scoree`). Aqui se EJECUTAN de verdad contra la
+    base temporal: si revientan, es hallazgo."""
+    n = 0
+    try:
+        import db as dbmod
+        import wallet_ident as wimod
+        c = dbmod.get_conn()
+        try:
+            for nombre, fn in (("db.top_wallets", lambda: dbmod.top_wallets(c, 5)),
+                               ("db._operativas", lambda: dbmod._operativas(c, 5)),
+                               ("wallet_ident.posicion",
+                                lambda: wimod.posicion(c, "x" * 44, 5))):
+                n += 1
+                try:
+                    fn()
+                except Exception as e:
+                    print(f"· clase 5: {nombre} revienta: {e}")
+                    fallos.append(f"{nombre}: la consulta real revienta — {e}")
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"· clase 5: no pude ejecutar las consultas del top: {e}")
+        fallos.append(f"clase 5: no pude ejecutar las consultas del top — {e}")
+    return n
+
+
 def main():
     raw = _base()
     print("🔍 Auditoría del código\n")
@@ -458,6 +490,7 @@ def main():
     print(f"  clase 3 · campos fuera de su SELECT ..... {clase3_campos(raw)} accesos")
     print(f"  clase 3b· campos exigidos por helpers ... {clase3b_helpers(raw)} llamadas")
     print(f"  clase 4 · literales escritos/filtrados .. {clase4_literales()} pares")
+    print(f"  clase 5 · consultas reales del top ...... {clase5_consultas_reales()} ejecutadas")
     print()
     if fallos:
         print(f"❌ {len(fallos)} hallazgo(s):\n")

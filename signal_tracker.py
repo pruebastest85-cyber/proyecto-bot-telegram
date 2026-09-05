@@ -112,6 +112,13 @@ def _price_mc_ex(mint: str):
         # (Ola 18-H, 3ª vuelta) La mayor liquidez LEIDA de cualquier par,
         # solo para poder DECIRLO en el log. No se devuelve: ver abajo.
         mejor_conocida = None
+        # (19-AN, 05/09) Liquidez LEIDA de los pares que NO traen precio.
+        # Un token cuyos pares existen pero ninguno cotiza y cuya
+        # liquidez conocida es polvo esta tan muerto como uno sin pares;
+        # antes eso era "sin dato" para siempre y la señal se quedaba sin
+        # chg_24h (medido: 6 señales de ⭐, todas flips al precio de
+        # lanzamiento de pump.fun).
+        _liq_sin_precio, _liq_sin_precio_sabida = 0.0, False
         for p in pairs:
             # (Ola 18-E) La liquidez tambien va DENTRO del try. Estaba
             # fuera, y si DexScreener mandaba `liquidity` como lista en
@@ -122,6 +129,13 @@ def _price_mc_ex(mint: str):
             try:
                 px = float(p.get("priceUsd") or 0)
                 if px <= 0:
+                    try:
+                        _lb = (p.get("liquidity") or {}).get("usd")
+                        if _lb is not None and float(_lb) >= 0:
+                            _liq_sin_precio = max(_liq_sin_precio, float(_lb))
+                            _liq_sin_precio_sabida = True
+                    except (TypeError, ValueError, AttributeError):
+                        pass
                     continue
                 # (Ola 18-E) "no viene el dato" NO es "vale 0". Antes las
                 # dos cosas daban `liq=0.0`, o sea por debajo de
@@ -167,7 +181,12 @@ def _price_mc_ex(mint: str):
                 mejor_liq, mejor = _cmp, p
                 mejor_liq_sabida = liq is not None
         if not mejor:
-            # Hay pares pero ninguno con precio usable: sin dato, no muerte.
+            if _liq_sin_precio_sabida and _liq_sin_precio < LIQ_MUERTO_USD:
+                # (19-AN) Pares sin precio y con liquidez de polvo LEIDA:
+                # muerto (como "sin pares").
+                return (None, None, True, _liq_sin_precio)
+            # Hay pares pero ninguno con precio usable y la liquidez no se
+            # conoce: sin dato, no muerte.
             return (None, None, False, 0.0)
         px = float(mejor.get("priceUsd") or 0) or None
         mc = mejor.get("marketCap") or mejor.get("fdv")
@@ -843,6 +862,29 @@ def _track_outcomes(conn) -> int:
         except Exception as _ex:
             _avisar_ex("signal_tracker:_track_outcomes:826", _ex)
             pass
+    # (19-AN, 05/09) La misma cuenta para la medicion de 24 h, que es la
+    # que alimenta rachas, umbral y copiabilidad: antes solo se avisaba
+    # de la de 1 h y una parada de mas de 6 h dejaba señales sin chg_24h
+    # en silencio.
+    _perdidas24 = conn.execute(
+        """SELECT COUNT(*) c FROM signals s
+           JOIN wallets w ON w.address = s.wallet
+                AND COALESCE(w.is_bot, 0) = 0
+                AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2)
+           WHERE s.side='compra' AND s.price_usd IS NOT NULL
+             AND s.price_usd > 0 AND s.price_24h IS NULL
+             AND s.ts < ? AND s.ts >= ?""",
+        (int(now - 30 * HOUR), int(now - 36 * HOUR))).fetchone()["c"]
+    if _perdidas24:
+        print(f"· Medición: {_perdidas24} señal(es) de hace 30-36 h se "
+              f"quedaron sin medir a 24 h y ya están fuera de ventana")
+        try:
+            from errores import record as _rec
+            _rec("medicion.fuera_de_ventana_24h",
+                 RuntimeError(f"{_perdidas24} señales sin chg_24h, "
+                              f"ventana cerrada"))
+        except Exception as _ex:
+            _avisar_ex("signal_tracker:_track_outcomes:perdidas24", _ex)
     if len(pend) >= 100:
         # Tope alcanzado: el excedente envejece y puede caer fuera de la
         # ventana. Ya paso una vez con LIMIT 30 (ver comentario arriba) y
