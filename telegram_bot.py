@@ -2687,6 +2687,14 @@ async def _extract_buyers_bg(chat, mint: str, symbol, chg24):
                 f"(Helius no respondió). No registré nada para no meter "
                 f"datos a medias. Vuelve a pegar el mint cuando quieras: "
                 f"no se ha guardado en caché.")
+        elif status == "sin_precio":
+            # (19-AJ) Sin precio actual no se puede medir quien entro antes
+            # de la subida; no se gasta Helius y no se registra nada.
+            await chat.send_message(
+                f"⚠️ DexScreener no me da precio actual de {nombre}, y sin "
+                f"él no puedo saber quién compró ANTES de la subida. No "
+                f"registré nada ni gasté créditos. Vuelve a pegar el mint "
+                f"en un rato.")
         # "cache" y "error" no molestan al usuario
     except Exception as e:
         print(f"· _extract_buyers_bg falló: {e}")

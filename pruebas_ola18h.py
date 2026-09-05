@@ -12695,6 +12695,123 @@ def prueba_19ai():
     conn.close()
 
 
+def prueba_19aj():
+    bloque("19-AJ - sin precio de DexScreener el token NO se analiza "
+           "(no se descarga historial ni entra nadie en la cola)")
+    import contextlib
+    import io
+    import time as _t
+    from db import get_conn
+    import wallet_analyzer as wa
+    import vaciar_cola as vc
+
+    conn = get_conn()
+    import errores as _err
+    _err._ensure(conn)
+    for t in ("wallets", "appearances", "winning_tokens", "errors"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    now = int(_t.time())
+    conn.execute("INSERT INTO winning_tokens (mint, symbol, price_change_24h) "
+                 "VALUES ('MINTAJ','TOK',300.0)")
+    conn.commit()
+
+    def _txs():
+        out = []
+        for i in range(5):
+            w = f"BUYERAJ{i}"
+            out.append({"signature": f"saj{i}", "timestamp": now - 1000 + i,
+                        "feePayer": w, "transactionError": None,
+                        "tokenTransfers": [{"mint": "MINTAJ", "toUserAccount": w,
+                                            "tokenAmount": 1000.0}],
+                        "nativeTransfers": [{"fromUserAccount": w, "toUserAccount": "POOL",
+                                             "amount": 2_000_000_000}],
+                        "accountData": []})
+        return out
+    llamadas = []
+    _fetch0, _precio0 = wa.fetch_earliest_txs, wa._precio_actual
+    wa.fetch_earliest_txs = lambda mint, con_estado=False, **k: (llamadas.append(mint) or _txs(), True)
+    tok = {"mint": "MINTAJ", "symbol": "TOK", "price_change_24h": 300.0}
+    try:
+        wa._SIN_PRECIO_INTENTOS.clear()
+        # Sin precio: dos ciclos → pendiente, sin Helius, sin apariciones.
+        wa._precio_actual = lambda mint: (None, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            n1 = wa.analyze_token(conn, tok)
+            n2 = wa.analyze_token(conn, tok)
+        analizado = conn.execute("SELECT analyzed FROM winning_tokens WHERE mint='MINTAJ'").fetchone()["analyzed"]
+        apar = conn.execute("SELECT COUNT(*) c FROM appearances").fetchone()["c"]
+        comprobar("sin precio (2 ciclos): 0 registradas, 0 apariciones, token "
+                  "PENDIENTE y NI UNA descarga de Helius",
+                  n1 == 0 and n2 == 0 and analizado == 0 and apar == 0 and llamadas == [],
+                  (n1, n2, analizado, apar, llamadas))
+        comprobar("la cola de perfilado sigue vacia", vc.en_cola(conn) == 0, vc.en_cola(conn))
+        comprobar("queda constancia en errores (wallet_analyzer.sin_precio)",
+                  conn.execute("SELECT COUNT(*) c FROM errors WHERE modulo='wallet_analyzer.sin_precio'").fetchone()["c"] >= 1)
+        # Tercer ciclo sin precio: se rinde, marca analizado SIN registrar.
+        with contextlib.redirect_stdout(io.StringIO()):
+            n3 = wa.analyze_token(conn, tok)
+        analizado = conn.execute("SELECT analyzed FROM winning_tokens WHERE mint='MINTAJ'").fetchone()["analyzed"]
+        apar = conn.execute("SELECT COUNT(*) c FROM appearances").fetchone()["c"]
+        comprobar(f"al {wa.SIN_PRECIO_MAX_INTENTOS}º ciclo sin precio se marca analizado "
+                  "SIN registrar a nadie y sin descargar",
+                  n3 == 0 and analizado == 1 and apar == 0 and llamadas == []
+                  and "MINTAJ" not in wa._SIN_PRECIO_INTENTOS,
+                  (n3, analizado, apar, llamadas))
+        # Con precio y token que NO subio (x1): descarga, 0 registradas (llegaron tarde).
+        conn.execute("UPDATE winning_tokens SET analyzed=0"); conn.commit()
+        wa._precio_actual = lambda mint: (0.002, 100000.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            nA = wa.analyze_token(conn, tok)
+        comprobar("con precio (x1 desde la entrada): se descarga y las 5 se "
+                  "descartan por llegar tarde; token analizado",
+                  nA == 0 and llamadas == ["MINTAJ"]
+                  and conn.execute("SELECT analyzed FROM winning_tokens WHERE mint='MINTAJ'").fetchone()["analyzed"] == 1,
+                  (nA, llamadas))
+        # Con precio y token que SI subio (x10): se registran con multiplo.
+        conn.execute("UPDATE winning_tokens SET analyzed=0"); conn.commit()
+        wa._precio_actual = lambda mint: (0.02, 100000.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            nB = wa.analyze_token(conn, tok)
+        nulos = conn.execute("SELECT COUNT(*) c FROM appearances WHERE entry_multiple IS NULL").fetchone()["c"]
+        comprobar("con precio (x10): las 5 se registran, todas con entry_multiple",
+                  nB == 5 and nulos == 0, (nB, nulos))
+        # Un fallo aislado seguido de precio: el contador se limpia.
+        conn.execute("UPDATE winning_tokens SET analyzed=0"); conn.commit()
+        wa._precio_actual = lambda mint: (None, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            wa.analyze_token(conn, tok)
+        wa._precio_actual = lambda mint: (0.02, 100000.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            wa.analyze_token(conn, tok)
+        comprobar("un fallo aislado no deja rastro: al volver el precio el "
+                  "contador de intentos se limpia",
+                  "MINTAJ" not in wa._SIN_PRECIO_INTENTOS, dict(wa._SIN_PRECIO_INTENTOS))
+        # Mint pegado a mano sin precio: estado propio, sin cachear.
+        import token_extract as te
+        wa._precio_actual = lambda mint: (None, None)
+        _rate0 = te._rate_ok
+        te._rate_ok = lambda *a, **k: True
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                st, n = te.extract_buyers("MINTAJ2", "TOK2", 100.0)
+        finally:
+            te._rate_ok = _rate0
+        comprobar("mint pegado a mano sin precio → estado 'sin_precio', 0 "
+                  "registradas y NO se cachea (se puede volver a pegar)",
+                  st == "sin_precio" and n == 0 and not te._recently_analyzed("MINTAJ2"),
+                  (st, n))
+        comprobar("telegram_bot explica el estado 'sin_precio' al dueño",
+                  'status == "sin_precio"' in open("telegram_bot.py", encoding="utf-8").read())
+    finally:
+        wa.fetch_earliest_txs, wa._precio_actual = _fetch0, _precio0
+        wa._SIN_PRECIO_INTENTOS.clear()
+    for t in ("wallets", "appearances", "winning_tokens", "errors"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -12756,6 +12873,7 @@ def main():
     prueba_19ag()
     prueba_19ah()
     prueba_19ai()
+    prueba_19aj()
 
     print("\n" + "─" * 60)
     if _FALLOS:

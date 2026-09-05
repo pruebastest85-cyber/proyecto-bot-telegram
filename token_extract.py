@@ -77,6 +77,9 @@ def extract_buyers(mint: str, symbol: str | None = None,
     Devuelve (status, registradas):
       - ("cache", 0): ya se analizó hace poco → no se repite.
       - ("rate", 0):  se alcanzó el límite por hora.
+      - ("sin_precio", 0): (19-AJ) DexScreener no da precio actual; no se
+        analiza ni se cachea.
+      - ("descarga", 0): la descarga de Helius fallo; no se cachea.
       - ("ok", n):    n billeteras registradas en la red.
       - ("error", 0): algo falló (ya logueado).
     """
@@ -101,10 +104,18 @@ def extract_buyers(mint: str, symbol: str | None = None,
             # tuviera compradores. Un mint pegado a mano no esta en
             # `winning_tokens`, asi que el ciclo tampoco lo reintenta: se
             # perdia del todo.
-            from wallet_analyzer import motivo_fallo_descarga
+            from wallet_analyzer import motivo_fallo_descarga, sin_precio_actual
             _motivo = motivo_fallo_descarga()
+            _sin_precio = sin_precio_actual()
         finally:
             conn.close()
+        if _sin_precio:
+            # (19-AJ) Sin precio actual no se analiza (no se puede saber
+            # quien llego tarde) y no se gasta nada: que el dueño lo sepa
+            # y pueda volver a pegar el mint mas tarde.
+            print("· extract_buyers: sin precio actual en DexScreener; "
+                  "no se analiza ni se cachea")
+            return ("sin_precio", 0)
         if _motivo:
             print(f"· extract_buyers: descarga incompleta ({_motivo}); "
                   f"no se cachea, se puede reintentar")

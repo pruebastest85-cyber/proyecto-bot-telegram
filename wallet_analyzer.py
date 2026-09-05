@@ -56,6 +56,13 @@ def motivo_fallo_descarga():
     return getattr(_local, "fallo", None)
 
 
+def sin_precio_actual() -> bool:
+    """(19-AJ) True si el ultimo `analyze_token` DE ESTE HILO se salto el
+    analisis por no tener precio actual (distinto de un fallo de descarga:
+    aqui no se gasto nada y el token queda pendiente)."""
+    return bool(getattr(_local, "sin_precio", False))
+
+
 def fetch_parsed_txs(address: str, before: str | None = None,
                      limit: int = 100) -> list[dict]:
     """Descarga transacciones parseadas de una dirección desde Helius.
@@ -261,6 +268,12 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
     return buys
 
 
+# (19-AJ) Reintentos por token cuando DexScreener no da precio: en memoria
+# (un reinicio los pone a cero, que es lo mas benigno).
+_SIN_PRECIO_INTENTOS = {}
+SIN_PRECIO_MAX_INTENTOS = 3
+
+
 def _precio_actual(mint):
     """Precio actual en SOL por token (para medir el crecimiento desde la
     entrada). Devuelve (precio_sol, mc_usd) o (None, None)."""
@@ -288,6 +301,41 @@ def analyze_token(conn, token) -> int:
 
     precio_ahora, mc_ahora = _precio_actual(mint)
     min_mult = float(getattr(config, "MIN_ENTRY_MULTIPLE", 3.0))
+    # (Ola 19-AJ, 05/09) SIN precio actual no se puede saber quien "llego
+    # tarde" (el filtro de abajo compara el precio de entrada con el de
+    # ahora). Antes, sin precio, el filtro se ABRIA: se registraban hasta
+    # 600 compradores con entry_multiple NULL y la cola de perfilado los
+    # aceptaba a todos (medido el 05/09: 2.208 apariciones sin multiplo en
+    # una semana y 1.080 billeteras esperando en la cola SOLO por eso, a
+    # 50-250 creditos de Helius cada una). Ahora: sin precio no se baja el
+    # historial (0 creditos), el token queda PENDIENTE y se reintenta en el
+    # ciclo siguiente; tras SIN_PRECIO_MAX_INTENTOS seguidos se da por
+    # analizado SIN registrar a nadie (mejor perder un token que pagar
+    # 600 perfilados a ciegas).
+    _local.sin_precio = False
+    if not precio_ahora:
+        _local.sin_precio = True
+        n = _SIN_PRECIO_INTENTOS.get(mint, 0) + 1
+        _SIN_PRECIO_INTENTOS[mint] = n
+        if n < SIN_PRECIO_MAX_INTENTOS:
+            print(f"  ⚠️ Sin precio actual de {symbol} (intento {n}/"
+                  f"{SIN_PRECIO_MAX_INTENTOS}): sin precio no se distingue "
+                  f"quien llego tarde. NO se descarga el historial ni se "
+                  f"registra nada; se reintenta en el proximo ciclo.")
+            try:
+                from errores import record as _rec
+                _rec("wallet_analyzer.sin_precio",
+                     RuntimeError(f"{mint[:12]}…: intento {n}"))
+            except Exception as _ex:
+                _avisar_ex("wallet_analyzer:analyze_token:sin_precio", _ex)
+            return 0
+        _SIN_PRECIO_INTENTOS.pop(mint, None)
+        print(f"  ⚠️ {symbol} lleva {n} ciclos sin precio actual: se marca "
+              f"como analizado SIN registrar compradores (no se puede "
+              f"medir quien entro antes de la subida).")
+        mark_analyzed(conn, mint)
+        return 0
+    _SIN_PRECIO_INTENTOS.pop(mint, None)
 
     txs, historial_completo = fetch_earliest_txs(mint, con_estado=True)
     # (Ola 18-D) Un fallo de descarga NO es lo mismo que un historial
