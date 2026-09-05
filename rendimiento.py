@@ -113,9 +113,11 @@ def rendimiento_text() -> str:
         out.append("\n*Mejores billeteras (≥3 señales):*")
         for wwr, wn, wm, alias, e in stats[:5]:
             out.append(f"  {e}{alias}: {wwr:.0f}% de {wn} ({wm:+.1f}%)")
+        # (19-AR) "Peores" solo con las que NO salieron ya en "Mejores":
+        # con 6-7 billeteras las listas se solapaban.
         if len(stats) > 5:
             out.append("\n*Peores:*")
-            for wwr, wn, wm, alias, e in stats[-3:]:
+            for wwr, wn, wm, alias, e in stats[5:][-3:]:
                 out.append(f"  {e}{alias}: {wwr:.0f}% de {wn} ({wm:+.1f}%)")
 
     out.append("\n_Usa /backtest [monto] para simular copiar las señales._")

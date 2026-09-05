@@ -106,7 +106,12 @@ def errores_text(horas: int = 24) -> str:
         hace = (time.time() - (f["ultimo"] or 0)) / 3600
         out.append(f"• *{f['modulo']}* · `{f['tipo']}` ×{f['n']} "
                    f"(hace {hace:.0f} h)")
-        ej = (f["ejemplo"] or "")[:110].replace("`", "'")
+        # (19-AR) El mensaje de error es texto ajeno: un `_` o `*` (un
+        # KeyError 'chg_24h', una ruta) tumbaba el Markdown de /errores.
+        ej = (f["ejemplo"] or "")[:110]
+        for _c in ("`", "_", "*", "["):
+            ej = ej.replace(_c, "'" if _c == "`" else " ")
+        ej = ej.strip()
         if ej:
             out.append(f"   _{ej}_")
     return "\n".join(out)

@@ -13,7 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from db import get_conn, top_wallets
 from realtime import sync_helius_webhook
 
-TOP_SIZES = (10, 20, 30)
+TOP_SIZES = (10, 20, 30, 50)   # (19-AR) 50 = el conjunto que alerta
 
 
 def discard_wallet(address: str) -> str:
@@ -43,8 +43,19 @@ def discard_wallet(address: str) -> str:
         invalidar_vigiladas()
     except Exception as e:
         print(f"· No pude invalidar cachés tras descartar: {e}")
-    hook = sync_helius_webhook()
-    return f"❌ {address[:8]}… descartada. {hook}"
+    hook = _hook_legible(sync_helius_webhook())
+    return f"❌ {address[:8]}… descartada.{hook}"
+
+
+def _hook_legible(hook: str) -> str:
+    """(19-AR) En la PC no hay PUBLIC_URL por diseño y la ingesta es
+    LaserStream, que se re-suscribe sola: "PUBLIC_URL no configurada;
+    webhook no sincronizado" al final de cada /descartar y /rastrear
+    sonaba a fallo sin serlo. Ese caso no se muestra; los demas si."""
+    h = (hook or "").strip()
+    if not h or "PUBLIC_URL no configurada" in h:
+        return ""
+    return " " + h
 
 
 def _y(items) -> str:
@@ -198,7 +209,7 @@ def restore_wallet(address: str) -> str:
         invalidar_vigiladas()
     except Exception as e:
         print(f"· No pude invalidar cachés tras restaurar: {e}")
-    hook = sync_helius_webhook()
+    hook = _hook_legible(sync_helius_webhook())
     # EL MENSAJE DICE LA VERDAD, TODA Y SOLO LA VERDAD. Es lo único que
     # el dueño ve de este mando, y la ola nació justamente porque el bot
     # deshacía en silencio lo que él acababa de pedir.
@@ -260,7 +271,7 @@ def restore_wallet(address: str) -> str:
                   "conocida, que una hermana de su familia puntúe mejor, "
                   "o que no quepa en el presupuesto de atención.)")
     aviso = "\n\n" + "\n\n".join(f"· {p}" for p in partes)
-    return f"⭐ {address[:8]}… vuelve a rastrearse. {hook}{aviso}"
+    return f"⭐ {address[:8]}… vuelve a rastrearse.{hook}{aviso}"
 
 
 def _campo(row, key):
@@ -270,23 +281,58 @@ def _campo(row, key):
         return None
 
 
-def build_top_message(limit: int = 10):
-    """Arma el texto y el teclado inline del /top."""
+def _linea_compacta(i, w) -> str:
+    """(19-AR) Una fila por billetera para ver hasta el puesto 50: con la
+    linea 📐 el formato largo solo dejaba ver ~16 filas de 4.096."""
+    flag = "⭐" if w["is_tracked"] else "·"
+    alias = _campo(w, "alias") or w["address"][:8]
+    ws = _campo(w, "wallet_score")
+    n, sc = _campo(w, "copi_n"), _campo(w, "copi_score")
+    if n and n >= 5 and sc is not None:
+        medida = f"📐 {sc:+.0f}% n{n}"
+    elif n:
+        medida = f"📐 n{n}"
+    else:
+        medida = "📐 —"
+    return (f"{i}. {flag} {alias} `{w['address'][:6]}…` "
+            f"🧮{ws:.0f} {medida}" if ws is not None else
+            f"{i}. {flag} {alias} `{w['address'][:6]}…` {medida}")
+
+
+def build_top_message(limit: int = 10, compacto: bool | None = None):
+    """Arma el texto y el teclado inline del /top. `compacto` (19-AR):
+    una fila por billetera; por defecto se activa a partir de 20."""
     conn = get_conn()
     rows = top_wallets(conn, limit)
     conn.close()
     if not rows:
         return ("Aún no hay billeteras. Espera el próximo ciclo o corre /ciclo.",
                 None)
+    if compacto is None:
+        compacto = limit > 20
     lines = [f"🏆 *Top {len(rows)} billeteras candidatas:*\n"
              "_Orden: primero las ⭐ cuyo historial de COPIA gana "
              "(📐 copiable), luego las aún sin medir, al final las que "
              "copiarlas pierde._\n"]
     buttons, row_btns = [], []
+    if compacto:
+        lines.append("_Formato corto (📐 = copiable: nota y nº de medidas). "
+                     "Direcciones completas: /top 10 o /evidencia._\n")
     for i, w in enumerate(rows, 1):
+        if compacto:
+            lines.append(_linea_compacta(i, w))
+            row_btns.append(InlineKeyboardButton(
+                f"❌ {i}", callback_data=f"d:{limit}:{w['address']}"))
+            if len(row_btns) == 5:
+                buttons.append(row_btns)
+                row_btns = []
+            continue
         flag = " ⭐" if w["is_tracked"] else ""
         ai_class = _campo(w, "ai_class")
-        ai = f" · 🧠 {ai_class}" if ai_class else ""
+        # (19-AR) 'sin_datos', 'wallet_espejo'…: un `_` impar tumba el
+        # Markdown del /top entero (cae a texto plano, sin copiar con un
+        # toque). Se muestra sin el guion bajo.
+        ai = f" · 🧠 {str(ai_class).replace('_', ' ')}" if ai_class else ""
         alias = _campo(w, "alias")
         ws = _campo(w, "wallet_score")
         etiqueta_ws = f" · 🧮 {ws:.0f}/100" if ws is not None else ""

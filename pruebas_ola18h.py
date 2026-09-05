@@ -11682,10 +11682,13 @@ def prueba_19ac():
     conn.execute("DELETE FROM settings WHERE key LIKE 'job_%:daily_summary'")
     conn.commit()
     comprobar("sin marca: toca mandarlo", tb._toca_resumen_diario(conn, ahora))
+    # (19-AR) el dia lo sella el EXITO (job_ts), no el intento.
+    set_setting(conn, "job_ts:daily_summary", str(hoy13 + 10))
     set_setting(conn, "job_intento:daily_summary", str(hoy13 + 10))
     conn.commit()
     comprobar("ya mandado tras el ancla de hoy: NO toca",
               not tb._toca_resumen_diario(conn, ahora))
+    set_setting(conn, "job_ts:daily_summary", str(hoy13 - 10))
     set_setting(conn, "job_intento:daily_summary", str(hoy13 - 10))
     conn.commit()
     comprobar("mandado ANTES del ancla (un reinicio a las 12:59 lo "
@@ -14071,6 +14074,142 @@ def prueba_19aq():
         conn.close()
 
 
+def prueba_19ar():
+    bloque("19-AR - bajos de Telegram: Markdown a salvo, doble toque, "
+           "PUBLIC_URL fuera de /descartar, resumen diario reintenta, "
+           "/top corto hasta 50, /copiapura lee los ajustes reales, "
+           "rendimiento sin solapar")
+    import contextlib
+    import io
+    import inspect as _insp
+    import time as _t
+    from db import get_conn, set_setting, get_setting
+    import telegram_bot as tb
+    import wallet_admin as wa
+    import errores as _err
+    import rendimiento as rd
+
+    conn = get_conn()
+    for t in ("wallets", "signals", "positions", "paper_trades"):
+        conn.execute(f"DELETE FROM {t}")
+    now = int(_t.time())
+    # 55 ⭐ para /top 50, con ai_class con guion bajo
+    for i in range(55):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, confirmada, is_bot, "
+                     "wallet_score, pnl_total, score, winning_tokens_count, ai_class, "
+                     "copi_score, copi_n) VALUES (?,?,1,1,0,?,1.0,1.0,1,'sin_datos',?,?)",
+                     (f"TOPAR{i:02d}" + "x" * 37, f"Alias {i}", 90 - i, 10.0 + i, 6))
+        conn.execute("INSERT INTO positions (wallet, mint, last_ts) VALUES (?,?,?)",
+                     (f"TOPAR{i:02d}" + "x" * 37, "M", now))
+    conn.commit()
+    conn.close()
+
+    # ── /top: Markdown válido con ai_class 'sin_datos'; corto hasta 50 ──
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt10, kb10 = wa.build_top_message(10)
+        txt50, kb50 = wa.build_top_message(50)
+        txt20l, _ = wa.build_top_message(20, compacto=False)
+    comprobar("/top 10 (largo): la clase 'sin_datos' sale sin guion bajo y el "
+              "Markdown queda cerrado",
+              "sin datos" in txt10 and "sin_datos" not in txt10
+              and tb._cerrar_markdown(txt10) == txt10, txt10[:200])
+    comprobar("/top 50: formato corto, cabe en un mensaje y muestra las 50 filas",
+              "50." in txt50 and tb._largo_tg(txt50) <= tb.TG_MAX_CHARS
+              and "Formato corto" in txt50 and len(kb50.inline_keyboard) >= 11, tb._largo_tg(txt50))
+    comprobar("/top 20 largo: sigue el formato detallado a peticion",
+              "Formato corto" not in txt20l and "📐 copiable" in txt20l)
+    comprobar("el teclado del top ofrece Top 50",
+              any(b.callback_data == "t:50" for fila in kb10.inline_keyboard for b in fila))
+    conn = get_conn()
+    for t in ("wallets", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit(); conn.close()
+
+    # ── /errores: el ejemplo va sin marcadores ────────────────────────
+    conn = get_conn()
+    _err._ensure(conn)
+    conn.execute("DELETE FROM errors")
+    conn.commit(); conn.close()
+    _err.record("prueba.md", KeyError("chg_24h"), "ruta_con_guion_bajo *y* asterisco")
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt = _err.errores_text(24)
+    _lineas_ej = [l for l in txt.split("\n") if l.startswith("   _")]
+    _dentro = _lineas_ej[0].strip()[1:-1] if _lineas_ej else "SIN LINEA"
+    comprobar("/errores: el mensaje de error va sin _ ni * dentro de las cursivas",
+              _lineas_ej and "_" not in _dentro and "*" not in _dentro
+              and "guion bajo" in _dentro, _dentro)
+    conn = get_conn()
+    conn.execute("DELETE FROM errors")
+    conn.commit(); conn.close()
+
+    # ── hook legible ─────────────────────────────────────────────────
+    comprobar("descartar/rastrear: 'PUBLIC_URL no configurada' no se enseña; "
+              "otro texto sí",
+              wa._hook_legible("PUBLIC_URL no configurada; webhook no sincronizado") == ""
+              and wa._hook_legible("webhook actualizado") == " webhook actualizado")
+
+    # ── doble toque: home/help/ask/reiniciar por _edit_md ─────────────
+    src = _insp.getsource(tb.handle_hub)
+    comprobar("handle_hub: home, help y ask editan por _edit_md (doble toque sin 'Algo falló')",
+              src.count("_edit_md(q, hub_text()") == 1 and "_edit_md(q, HELP_TEXT" in src
+              and "_edit_md(q, ASK_PROMPTS.get" in src
+              and "q.edit_message_text(hub_text()" not in src)
+    src2 = _insp.getsource(tb.on_callback)
+    comprobar("pap:pedir edita por _edit_md",
+              "await _edit_md(\n                q,\n                f\"🗑 *Reiniciar paper trading*" in src2
+              or "_edit_md(\n                q,\n                f\"🗑" in src2)
+
+    # ── resumen diario: un intento fallido se reintenta a la hora ─────
+    conn = get_conn()
+    ahora = _t.time()
+    hoy13 = tb._ancla_diaria(ahora)
+    conn.execute("DELETE FROM settings WHERE key LIKE 'job_%:daily_summary'")
+    set_setting(conn, "job_intento:daily_summary", str(ahora - 600))
+    conn.commit()
+    t1 = tb._toca_resumen_diario(conn, ahora)
+    set_setting(conn, "job_intento:daily_summary", str(ahora - 7200))
+    conn.commit()
+    t2 = tb._toca_resumen_diario(conn, ahora)
+    set_setting(conn, "job_ts:daily_summary", str(max(hoy13 + 5, ahora - 7200)))
+    conn.commit()
+    t3 = tb._toca_resumen_diario(conn, ahora)
+    conn.execute("DELETE FROM settings WHERE key LIKE 'job_%:daily_summary'")
+    conn.commit(); conn.close()
+    comprobar("resumen diario: intento fallido hace 10 min → espera; hace 2 h → "
+              "reintenta; éxito de hoy → no toca",
+              t1 is False and t2 is True and t3 is False, (t1, t2, t3))
+    src3 = _insp.getsource(tb.daily_summary_job)
+    comprobar("daily_summary_job propaga el fallo (raise) para no sellar el día",
+              "raise" in src3.split("resumen diario falló")[-1])
+
+    # ── /copiapura estado con ajustes desviados ───────────────────────
+    conn = get_conn()
+    _prev = {k: get_setting(conn, k, None) for k in list(tb._COPIA_PURA)}
+    try:
+        for k, v in tb._COPIA_PURA.items():
+            set_setting(conn, k, v)
+        conn.commit()
+        e1 = tb._copia_pura_estado_encendida(conn)
+        set_setting(conn, "ia_local_activa", "1")
+        conn.commit()
+        e2 = tb._copia_pura_estado_encendida(conn)
+    finally:
+        for k, v in _prev.items():
+            if v is None:
+                conn.execute("DELETE FROM settings WHERE key=?", (k,))
+            else:
+                set_setting(conn, k, v)
+        conn.commit(); conn.close()
+    comprobar("/copiapura (estado): con el preset intacto dice ENCENDIDA; con "
+              "ia_local_activa=1 avisa 'desviada' y nombra la clave",
+              "desviada" not in e1 and "desviada" in e2 and "ia_local_activa" in e2, (e1[:60], e2[:160]))
+
+    # ── rendimiento: Mejores y Peores no se solapan ──────────────────
+    src5 = _insp.getsource(rd.rendimiento_text)
+    comprobar("rendimiento: 'Peores' toma de las que no salieron en 'Mejores' (stats[5:])",
+              "stats[5:][-3:]" in src5)
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14140,6 +14279,7 @@ def main():
     prueba_19ao()
     prueba_19ap()
     prueba_19aq()
+    prueba_19ar()
 
     print("\n" + "─" * 60)
     if _FALLOS:

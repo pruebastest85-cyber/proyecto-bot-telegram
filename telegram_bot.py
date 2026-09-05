@@ -158,13 +158,15 @@ def _toca_resumen_diario(conn=None, ahora=None,
     if conn is None or get_conn_cerrando:
         _propia = conn = get_conn()
     try:
-        ultimo = max(
-            float(get_setting(conn, "job_ts:daily_summary", 0) or 0),
-            float(get_setting(conn, "job_intento:daily_summary", 0) or 0))
+        exito = float(get_setting(conn, "job_ts:daily_summary", 0) or 0)
+        intento = float(get_setting(conn, "job_intento:daily_summary", 0) or 0)
     finally:
         if _propia is not None:
             _propia.close()
-    return ultimo < ancla
+    # (19-AR) El dia lo sella el EXITO. Un intento fallido (Telegram
+    # caido a las 13:00) se reintenta pasada una hora, no mañana; antes
+    # `max(exito, intento)` daba el dia por hecho con el primer intento.
+    return exito < ancla and (ahora - intento) > 3600
 
 
 def _texto_resultado_accion(resultado) -> str:
@@ -876,7 +878,7 @@ def _ia_text(address: str) -> str:
             f"Clasificación: *{v['clasificacion'].upper()}*\n"
             f"Recomendación: {icono}\n"
             f"Confianza: {v.get('confianza', '?')}%\n\n"
-            f"_{v.get('razon', '')}_")
+            f"_{_md_escapar(v.get('razon', ''))}_")
 
 
 def app_keyboard():
@@ -1185,7 +1187,11 @@ async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
             print(f"· resumen diario: Markdown rechazado ({e}); texto plano")
             await ctx.bot.send_message(chat_id=ADMIN_ID, text=txt)
     except Exception as e:
+        # (19-AR) Se PROPAGA: si se traga, `_con_reloj` sella el dia como
+        # enviado y el sondeo de 10 min no vuelve a intentarlo hasta
+        # mañana — un corte de red a las 13:00 perdia el resumen.
         print(f"· resumen diario falló: {e}")
+        raise
 
 
 async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
@@ -1354,12 +1360,13 @@ async def handle_hub(q, ctx: ContextTypes.DEFAULT_TYPE):
     action = (q.data or "")[2:]
     if action == "home":
         await q.answer()
-        await q.edit_message_text(hub_text(), parse_mode="Markdown",
-                                  reply_markup=kb_home())
+        # (19-AR) _edit_md: el segundo toque (Telegram reintenta
+        # callbacks) editaba con el mismo texto → "not modified" → on_error
+        # → "Algo falló" + una fila en errors. _edit_md ya lo trata.
+        await _edit_md(q, hub_text(), reply_markup=kb_home())
     elif action == "help":
         await q.answer()
-        await q.edit_message_text(HELP_TEXT, parse_mode="Markdown",
-                                  reply_markup=kb_solo_inicio())
+        await _edit_md(q, HELP_TEXT, reply_markup=kb_solo_inicio())
     elif action in SECCIONES:
         texto, kb = SECCIONES[action]
         await q.answer()
@@ -1379,9 +1386,8 @@ async def handle_hub(q, ctx: ContextTypes.DEFAULT_TYPE):
         cmd = action[4:]
         AWAITING[q.from_user.id] = cmd
         await q.answer()
-        await q.edit_message_text(
-            ASK_PROMPTS.get(cmd, "Envíame el dato:"),
-            parse_mode="Markdown", reply_markup=kb_cancelar())
+        await _edit_md(q, ASK_PROMPTS.get(cmd, "Envíame el dato:"),
+                       reply_markup=kb_cancelar())
     else:
         await q.answer()
 
@@ -1426,12 +1432,12 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await q.answer("No hay nada que reiniciar.", show_alert=True)
                 return
             await q.answer()
-            await q.edit_message_text(
+            await _edit_md(
+                q,
                 f"🗑 *Reiniciar paper trading*\n\n"
                 f"Se borrarán *{abiertas}* posiciones abiertas y "
                 f"*{cerradas}* cerradas.\n"
                 f"⚠️ No se puede deshacer.",
-                parse_mode="Markdown",
                 reply_markup=kb_paper_confirmar(abiertas, cerradas))
             return
         if accion == "reset":
@@ -1658,12 +1664,20 @@ async def cmd_ciclo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @solo_admin
 async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     limit = 10
+    compacto = None
     if ctx.args:
         try:
-            limit = max(5, min(30, int(ctx.args[0])))
+            limit = max(5, min(50, int(ctx.args[0])))   # (19-AR) hasta 50
         except ValueError:
             pass
-    text, kb = await asyncio.to_thread(build_top_message, limit)
+        # (19-AR) `/top 20 corto` fuerza el formato de una fila; `largo`
+        # fuerza el detallado (por defecto: corto a partir de 20).
+        _m = " ".join(ctx.args[1:]).lower()
+        if "corto" in _m:
+            compacto = True
+        elif "largo" in _m:
+            compacto = False
+    text, kb = await asyncio.to_thread(build_top_message, limit, compacto)
     # (19-F) Por `_send_md`: recorta al tope y reintenta en texto plano.
     # `/top 30` son ~6.100 caracteres y Telegram lo rechazaba entero.
     await _send_md(update.message.chat, text, reply_markup=kb)
@@ -1839,6 +1853,26 @@ def _mismo_ajuste(a, b) -> bool:
         return str(a).strip() == str(b).strip()
 
 
+def _copia_pura_estado_encendida(conn) -> str:
+    """(19-AR) El estado se lee de los AJUSTES REALES, no solo de la foto
+    `copia_pura_previo`: un /ialocal on o /paper max posterior dejaba el
+    preset desviado y /copiapura seguia anunciando "sin IA" mientras la
+    mitad de las salidas iban a la IA."""
+    from db import get_setting
+    desviados = [f"`{k}` = {get_setting(conn, k, None)}"
+                 for k, v in _COPIA_PURA.items()
+                 if not _mismo_ajuste(get_setting(conn, k, None), v)]
+    if desviados:
+        return ("🧬 *Copia pura: ENCENDIDA, pero desviada*\n"
+                "Desde que se encendió cambiaron estos ajustes:\n"
+                + "\n".join("· " + d for d in desviados)
+                + "\nRe-aplicar el preset: `/copiapura on` · "
+                  "Apagar: `/copiapura off`")
+    return ("🧬 *Copia pura: ENCENDIDA*\nEl paper compra cuando la ⭐ "
+            "compra y vende cuando ella vende. Sin TP, sin SL, sin reloj, "
+            "sin hold extra.\nApagar: `/copiapura off`")
+
+
 def _copia_pura_desc_apagada(conn) -> str:
     """(19-AD) Describe lo que el paper hace de verdad con la copia pura
     apagada. Antes decia "la IA decide la mitad de las salidas" sin mirar
@@ -1874,10 +1908,7 @@ async def cmd_copia_pura(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             activo = bool(previo_raw)
             if not accion:
                 if activo:
-                    return ("🧬 *Copia pura: ENCENDIDA*\nEl paper compra "
-                            "cuando la ⭐ compra y vende cuando ella vende. "
-                            "Sin TP, sin SL, sin reloj, sin hold extra.\n"
-                            "Apagar: `/copiapura off`")
+                    return _copia_pura_estado_encendida(conn)   # (19-AR)
                 return _copia_pura_desc_apagada(conn)     # (19-AD)
             if accion == "on":
                 if activo:
