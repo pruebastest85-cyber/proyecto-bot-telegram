@@ -100,6 +100,22 @@ def _conc(p) -> float | None:
     return (max(gains) / sum(gains)) if gains else None
 
 
+def _reciente_casado(p: dict, dias: int = 30):
+    """(19-AQ) Suma del pnl casado de los tokens con compra Y venta cuya
+    primera venta cae en los ultimos `dias`. None si no hay ninguno."""
+    toks = p.get("tokens") or {}
+    desde = time.time() - dias * 86400
+    tot = None
+    for t in toks.values():
+        try:
+            if ((t.get("buys") or 0) > 0 and (t.get("sells") or 0) > 0
+                    and (t.get("first_sell_ts") or 0) >= desde):
+                tot = (tot or 0.0) + float(t.get("pnl_sol") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return tot
+
+
 def consistency_score(p) -> int:
     """0-100: estabilidad del rendimiento (lo que separa a los buenos de
     los que tuvieron suerte). Combina Profit Factor, drawdown,
@@ -117,7 +133,14 @@ def consistency_score(p) -> int:
     f_div = 1 - min(1.0, conc) if conc is not None else 0.0
     f_sh = min(1.0, max(0.0, (sharpe or 0) / 2)) if sharpe is not None else 0.4
     f_rmed = 1.0 if (rmed or 0) > 0 else 0.0
-    f_recent = 1.0 if (net30 or 0) > 0 else 0.3
+    # (19-AQ) "Rendimiento reciente" con el PnL CASADO de las posiciones
+    # cerradas en 30 dias, no con pnl_30d (flujo de caja: acumular
+    # ganadoras sin vender daba negativo; liquidar bolsas viejas a
+    # perdida daba positivo). Si no hay cerradas en 30 dias, se cae al
+    # flujo como antes.
+    _rec = _reciente_casado(p)
+    _ref = _rec if _rec is not None else net30
+    f_recent = 1.0 if (_ref or 0) > 0 else 0.3
 
     # Metricas PERFECTAS descontadas por confianza estadistica (v2,
     # auditoria 19/8): una billetera SIN perdidas cerradas recibe el

@@ -22,6 +22,13 @@ from avisos import aviso as _avisar_ex   # (19-AE)
 _BUF: dict = {}
 _LAST = [0.0]
 _LOCK = threading.Lock()
+# (19-AQ) Cuenta de EVENTOS pendientes: el "volcar cada 25" comparaba la
+# suma del bufer, que mezcla llamadas (1) y creditos (10-100), asi que un
+# solo record("helius_credits", 100) ya volcaba — un INSERT + commit en
+# settings por casi cada llamada a Helius desde el hilo de perfilado,
+# compitiendo con el tiempo real por el candado de SQLite.
+_EVENTOS = [0]
+EVENTOS_VOLCADO = 25
 
 # (Ola 15 - M3) El búfer vive en memoria hasta 60 s: sin esto, cada
 # reinicio (deploy o excepción) tiraba los conteos pendientes — otro
@@ -55,8 +62,9 @@ def record(api: str, n: int = 1) -> None:
     try:
         with _LOCK:
             _BUF[api] = _BUF.get(api, 0) + n
+            _EVENTOS[0] += 1
             flush_now = (time.time() - _LAST[0] > 60
-                         or sum(_BUF.values()) >= 25)
+                         or _EVENTOS[0] >= EVENTOS_VOLCADO)
         if flush_now:
             flush()
     except Exception as _ex:
@@ -94,6 +102,7 @@ def flush() -> None:
     with _LOCK:
         items = dict(_BUF)
         _BUF.clear()
+        _EVENTOS[0] = 0
         _LAST[0] = time.time()
     if not items:
         return

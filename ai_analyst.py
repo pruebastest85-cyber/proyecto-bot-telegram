@@ -418,9 +418,13 @@ def cupo_evaluaciones(conn, base: int) -> tuple[int, str]:
                f"{ciclos_dia:.0f} ciclos/día, {coste:,.0f} créd./perfilado "
                f"{origen})")
     else:
+        # (19-AQ) El recorte puede venir del MARGEN o del COSTE medido
+        # por perfilado (que incluye tiempo real, radar y tokens): se
+        # dicen los dos, no "solo quedan X" con 7,5 M de margen.
         por = (f"{cupo} (adaptativo RECORTADO por debajo de "
-               f"MAX_EVAL_PER_CYCLE={base}: solo quedan {margen:,.0f} "
-               f"créditos hasta el freno)")
+               f"MAX_EVAL_PER_CYCLE={base}: quedan {margen:,.0f} créditos "
+               f"hasta el freno para {dias_quedan} día(s) × {ciclos_dia:.0f} "
+               f"ciclos/día a {coste:,.0f} créd./perfilado {origen})")
     return cupo, por
 
 

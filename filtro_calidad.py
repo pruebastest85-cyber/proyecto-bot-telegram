@@ -783,6 +783,27 @@ def promocion(conn, ejecutar: bool = False) -> dict:
         except Exception as e:
             print(f"· promoción: guarda no evaluable para {w[:8]}… ({e})")
             _g = None
+        if not _g:
+            # (19-AQ) Tambien las guardas de FONDEO que aplica
+            # evaluate_tracked: una billetera desechable (fondeada horas
+            # antes de operar) o una hermana de una ⭐ mejor subia con
+            # /promover, se re-perfilaba (creditos) y la depuracion la
+            # bajaba en el ciclo siguiente. La cache de fondeo ya esta
+            # pagada de su evaluacion: aqui no cuesta creditos.
+            try:
+                from wallet_funding import (recien_creada as _rc,
+                                            hermana_con_estrella as _hce)
+                if _rc(w)[0]:
+                    _g = "desechable"
+                else:
+                    _ws = conn.execute(
+                        "SELECT wallet_score FROM wallets WHERE address=?",
+                        (w,)).fetchone()
+                    if _hce(conn, w, _ws["wallet_score"] if _ws else None):
+                        _g = "hermana con ⭐"
+            except Exception as e:
+                print(f"· promoción: guarda de fondeo no evaluable para "
+                      f"{w[:8]}… ({e})")
         if _g:
             frenadas_por_guarda += 1
             continue

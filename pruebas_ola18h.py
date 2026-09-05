@@ -9296,9 +9296,11 @@ def prueba_19r():
             if not vc.corriendo():
                 break
             _tt.sleep(0.05)
+        # (19-AQ) Ahora queda en None ("sin leer") y el bucle lo fija al
+        # arrancar; lo que NO puede ser es el 1.000 heredado.
         comprobar("sin lectura de presupuesto, el contador de partida "
                   "no se hereda del vaciado anterior",
-                  _ci == 0, f"creditos_inicio={_ci} (deberia ser 0)")
+                  _ci in (0, None), f"creditos_inicio={_ci} (deberia ser 0 o None)")
         hb.creditos_usados = _usados_real
 
         # ── 7) El arranque del bot lo llama DE VERDAD ────────────────
@@ -13926,6 +13928,149 @@ def prueba_19ap():
         ip.completar_ex = _cex0
 
 
+def prueba_19aq():
+    bloque("19-AQ - bajos del embudo y creditos: volcado por eventos, "
+           "/promover con guardas de fondeo, consistencia con PnL casado, "
+           "techo del vaciado sin partida, mensaje del cupo")
+    import contextlib
+    import io
+    import time as _t
+    from db import get_conn
+    import api_usage
+    import filtro_calidad as fc
+    import grading
+    import vaciar_cola as vc
+    import ai_analyst as aa
+    import wallet_funding as wf
+
+    # ── 1) api_usage vuelca por EVENTOS ───────────────────────────────
+    volcados = []
+    _fl0 = api_usage.flush
+    api_usage.flush = lambda: volcados.append(1)
+    try:
+        with api_usage._LOCK:
+            api_usage._BUF.clear()
+            api_usage._EVENTOS[0] = 0
+            api_usage._LAST[0] = _t.time()
+        for _ in range(10):
+            api_usage.record("helius_credits", 100)
+        n10 = len(volcados)
+        for _ in range(api_usage.EVENTOS_VOLCADO - 10):
+            api_usage.record("dexscreener", 1)
+        comprobar(f"api_usage: 10 apuntes de 100 créditos no vuelcan; al "
+                  f"{api_usage.EVENTOS_VOLCADO}º evento sí",
+                  n10 == 0 and len(volcados) == 1, (n10, len(volcados)))
+    finally:
+        api_usage.flush = _fl0
+        with api_usage._LOCK:
+            api_usage._BUF.clear()
+            api_usage._EVENTOS[0] = 0
+
+    # ── 2) promocion con guardas de fondeo ───────────────────────────
+    conn = get_conn()
+    import trades_store as ts
+    ts._ensure(conn)
+    for t in ("wallets", "trades", "signals", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    now = int(_t.time())
+    def _hist_buena(w):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, is_bot, score, "
+                     "wallet_score) VALUES (?,?,0,0,1.0,50)", (w, w))
+        for i in range(12):
+            conn.execute("INSERT INTO trades (wallet, signature, mint, side, sol, tokens, ts) "
+                         "VALUES (?,?,?,'compra',1.0,100,?)", (w, f"{w}b{i}", f"M{w}{i}", now - 86400 * 20 - 7200 * i))
+            conn.execute("INSERT INTO trades (wallet, signature, mint, side, sol, tokens, ts) "
+                         "VALUES (?,?,?,'venta',2.5,100,?)", (w, f"{w}s{i}", f"M{w}{i}", now - 86400 * 20 - 7200 * i + 3600))
+    for w in ("PLIMPIA", "PDESECH", "PHERMANA"):
+        _hist_buena(w)
+    conn.commit()
+    _rc0, _hce0 = wf.recien_creada, wf.hermana_con_estrella
+    wf.recien_creada = lambda a, ts_referencia=None: ((a == "PDESECH"), 2.0, "fondeada hace 2 h")
+    wf.hermana_con_estrella = lambda c, a, sc: ("JEFA" if a == "PHERMANA" else None)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = fc.promocion(conn)
+        cands = {d[0] for d in res["detalle"]}
+        comprobar("/promover: la desechable y la hermana de una ⭐ se frenan; "
+                  "la limpia sube",
+                  cands == {"PLIMPIA"} and res["frenadas_por_guarda"] == 2, (cands, res.get("frenadas_por_guarda")))
+    finally:
+        wf.recien_creada, wf.hermana_con_estrella = _rc0, _hce0
+    for t in ("wallets", "trades", "signals", "positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+    # ── 3) grading: f_recent con PnL casado ──────────────────────────
+    base = {"metrics": {"profit_factor": 3.0, "max_drawdown_pct": 10.0, "sharpe": 1.0,
+                        "roi_median": 20.0}, "tokens": {}, "closed_positions": 12}
+    acumula = dict(base, pnl_30d_sol=-0.5,
+                   tokens={"A": {"buys": 1, "sells": 1, "pnl_sol": 2.0, "first_sell_ts": now - 86400 * 3},
+                           "B": {"buys": 1, "sells": 0, "pnl_sol": -1.0, "first_sell_ts": None}})
+    liquida = dict(base, pnl_30d_sol=+0.5,
+                   tokens={"A": {"buys": 1, "sells": 1, "pnl_sol": -2.0, "first_sell_ts": now - 86400 * 3}})
+    sin_cerradas = dict(base, pnl_30d_sol=+0.5, tokens={"A": {"buys": 1, "sells": 0, "pnl_sol": 0.0}})
+    ca, cl, cs = (grading.consistency_score(acumula), grading.consistency_score(liquida),
+                  grading.consistency_score(sin_cerradas))
+    comprobar("consistencia: acumular ganadoras sin vender (flujo −) ya NO resta; "
+              "liquidar a pérdida (flujo +) ya NO suma",
+              ca > cl, (ca, cl))
+    comprobar("consistencia: sin cerradas en 30 días se usa el flujo como antes",
+              cs >= ca - 0.01, (cs, ca))
+
+    # ── 4) vaciar_cola: partida no leida → se fija al arrancar el bucle ─
+    import helius_budget as hb
+    _cu0 = hb.creditos_usados
+    _pl0 = hb.puede_llamar
+    hb.puede_llamar = lambda conn=None: True
+    hb.creditos_usados = lambda conn=None: 1_200_000
+    _trozo0 = vc._un_trozo
+    trozos = []
+    def _falso_trozo(n):
+        trozos.append(n)
+        with vc._lock:
+            vc._estado["parar"] = True           # un trozo y paramos
+        return 0
+    vc._un_trozo = _falso_trozo
+    try:
+        with vc._lock:
+            vc._estado.update({"corriendo": True, "parar": False, "hechas": 0, "trozos": 0,
+                               "creditos_inicio": None, "motivo_fin": "", "techo": 500_000})
+        with contextlib.redirect_stdout(io.StringIO()):
+            vc._bucle(500_000, lambda *a, **k: None)
+        est = vc.estado()
+        comprobar("vaciarcola: con partida no leída al arrancar, el bucle la fija "
+                  "(1.200.000) y NO para por 'techo alcanzado'",
+                  est["creditos_inicio"] == 1_200_000 and "techo" not in est["motivo_fin"]
+                  and len(trozos) == 1, (est["creditos_inicio"], est["motivo_fin"], trozos))
+    finally:
+        vc._un_trozo = _trozo0
+        hb.creditos_usados, hb.puede_llamar = _cu0, _pl0
+        with vc._lock:
+            vc._estado.update({"corriendo": False, "parar": False, "creditos_inicio": 0})
+
+    # ── 5) cupo: el mensaje de recorte dice el coste y su origen ─────
+    conn = get_conn()
+    _cu0 = hb.creditos_usados
+    hb.creditos_usados = lambda conn=None: 1_000_000
+    try:
+        conn.execute("DELETE FROM wallets")
+        for i in range(60):
+            conn.execute("INSERT INTO wallets (address, pnl_updated, score) VALUES (?, ?, 1.0)",
+                         (f"CUPO{i}", _t.strftime("%Y-%m-%dT%H:%M:%S+00:00")))
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cupo, por = aa.cupo_evaluaciones(conn, 25)
+        comprobar("cupo: cuando recorta, el mensaje incluye el coste por perfilado y su origen",
+                  "RECORTADO" in por and "créd./perfilado" in por
+                  and ("medido sobre" in por or "estimado" in por), por)
+    finally:
+        hb.creditos_usados = _cu0
+        conn.execute("DELETE FROM wallets")
+        conn.commit()
+        conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -13994,6 +14139,7 @@ def main():
     prueba_19an()
     prueba_19ao()
     prueba_19ap()
+    prueba_19aq()
 
     print("\n" + "─" * 60)
     if _FALLOS:

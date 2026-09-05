@@ -195,8 +195,14 @@ def _bucle(techo_creditos: int, avisar) -> None:
                     import helius_budget as hb
                     conn = get_conn()
                     try:
-                        gastado = (hb.creditos_usados(conn)
-                                   - _estado["creditos_inicio"])
+                        _usados_ahora = hb.creditos_usados(conn)
+                        with _lock:
+                            if _estado["creditos_inicio"] is None:
+                                # (19-AQ) partida no leida al arrancar:
+                                # se fija ahora, antes de gastar nada.
+                                _estado["creditos_inicio"] = _usados_ahora
+                            _cred_ini = _estado["creditos_inicio"]
+                        gastado = _usados_ahora - _cred_ini
                     finally:
                         conn.close()
                     if gastado >= techo_creditos:
@@ -246,7 +252,7 @@ def _bucle(techo_creditos: int, avisar) -> None:
                 _estado["hechas"] += n
                 _estado["trozos"] += 1
                 hechas, trozos = _estado["hechas"], _estado["trozos"]
-                _cred0 = _estado["creditos_inicio"]
+                _cred0 = _estado["creditos_inicio"] or 0
             # (19-R) El avance se guarda en CADA trozo. Si el bot se
             # reinicia a mitad, la reanudacion sabe cuantas llevaba y
             # -sobre todo- desde que credito se mide el techo.
@@ -415,8 +421,15 @@ def arrancar(techo_creditos: int = 0, avisar=None,
         finally:
             conn.close()
     except Exception as e:
+        # (19-AQ) Antes: "no se podra aplicar" y creditos_inicio en 0, con
+        # lo que el bucle medía el gasto del CICLO ENTERO contra el techo y
+        # paraba en el primer trozo con "alcanzado el techo que pusiste".
+        # Ahora queda en None y el bucle lo mide al arrancar; si no puede,
+        # para diciendo por que.
+        with _lock:
+            _estado["creditos_inicio"] = None
         print(f"· vaciarcola: sin contador de partida ({e}); "
-              f"el techo de créditos no se podrá aplicar")
+              f"se intentará medir al arrancar el bucle")
     threading.Thread(target=_bucle, args=(techo_creditos, avisar),
                      daemon=True, name="vaciar_cola").start()
     return True
