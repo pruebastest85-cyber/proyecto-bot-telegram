@@ -312,8 +312,9 @@ def build_top_message(limit: int = 10, compacto: bool | None = None):
         compacto = limit > 20
     lines = [f"🏆 *Top {len(rows)} billeteras candidatas:*\n"
              "_Orden: primero las ⭐ cuyo historial de COPIA gana "
-             "(📐 copiable), luego las aún sin medir, al final las que "
-             "copiarlas pierde._\n"]
+             "(📐 copiable, de mayor a menor nota), luego las aún sin "
+             "medir (confirmadas y por perfil), al final las que copiarlas "
+             "pierde. Las dormidas caen al fondo de su grupo._\n"]
     buttons, row_btns = [], []
     if compacto:
         lines.append("_Formato corto (📐 = copiable: nota y nº de medidas). "

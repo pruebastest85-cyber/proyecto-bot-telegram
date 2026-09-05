@@ -12580,9 +12580,9 @@ def prueba_19ah():
     with contextlib.redirect_stdout(io.StringIO()):
         txt, _kb = wa.build_top_message(5)
     comprobar("/top muestra la línea 📐 copiable con n y PF para BUENA y "
-              "'sin medidas (en prueba)' para SINMEDIR",
+              "'sin medidas' para SINMEDIR",
               "📐 copiable: +" in txt and "n 8 (3 reales)" in txt
-              and "sin medidas (en prueba)" in txt and "mueve el pool" in txt,
+              and "sin medidas" in txt and "mueve el pool" in txt,
               txt[:600])
     import signal_tracker as st
     comprobar("track_outcomes recalcula la copiabilidad cada pasada",
@@ -14210,6 +14210,128 @@ def prueba_19ar():
               "stats[5:][-3:]" in src5)
 
 
+def prueba_19as():
+    bloque("19-AS - el top ordena por lo medido ANTES que por confirmada/pnl "
+           "del perfil; 'en prueba' es la fase; la tarjeta xN dice POR QUE "
+           "no se copio")
+    import contextlib
+    import io
+    import inspect as _insp
+    import time as _t
+    from db import get_conn, set_setting
+    import db as _db
+    import copiabilidad as cp
+    import paper_trading as pt
+    import wallet_admin as wa
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+
+    # ── 0) migracion en las DOS listas ────────────────────────────────
+    _src_db = _insp.getsource(_db)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(signals)")]
+    comprobar("signals.paper_motivo esta en las dos listas de migracion y en la base",
+              _src_db.count('"paper_motivo"') >= 2 and "paper_motivo" in cols)
+
+    # ── 1) orden: lo medido manda sobre confirmada y pnl_total ────────
+    def star(addr, ws, pnl, conf, cn=None, cs=None, cm=None):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, confirmada, wallet_score, "
+                     "pnl_total, is_bot, score, winning_tokens_count, copi_n, copi_score, copi_media) "
+                     "VALUES (?,?,1,?,?,?,0,1.0,1,?,?,?)",
+                     (addr, addr.title(), conf, ws, pnl, cn, cs, cs if cm is None else cm))
+        conn.execute("INSERT INTO positions (wallet, mint, last_ts) VALUES (?,?,?)", (addr, "M" + addr, ahora))
+    star("GANA_PNLNEG", 60, -0.5, 1, 10, 40.0)    # medida gana, pnl del perfil negativo
+    star("GANA_PRUEBA", 60, 1.0, 0, 10, 35.0)     # medida gana, en prueba
+    star("GANA_MENOS", 95, 5.0, 1, 10, 30.0)      # medida gana menos, perfil altisimo
+    star("SINMEDIR_CONF", 90, 9.0, 1)             # sin medir, confirmada
+    star("SINMEDIR_PRUEBA", 99, 9.0, 0)           # sin medir, en prueba (mejor perfil)
+    star("EMPUJADA", 99, 9.0, 1, 6, 4.3, -10.0)   # nota +4 por el encogimiento, media −10: PIERDE
+    star("PIERDE_CONF", 99, 9.0, 1, 10, -30.0)    # medida pierde, todo lo demas perfecto
+    conn.commit()
+    orden = [r["address"] for r in _db.top_wallets(conn, 10)]
+    comprobar("orden: las medidas que ganan van PRIMERO por nota (+40, +35, +30) "
+              "aunque tengan pnl_total<0 o esten en prueba; luego sin medir "
+              "(confirmada antes aunque la de prueba tenga mejor perfil); al final "
+              "las medidas que pierden, incluida la de media −10 % 'empujada' a +4 %",
+              orden == ["GANA_PNLNEG", "GANA_PRUEBA", "GANA_MENOS", "SINMEDIR_CONF",
+                        "SINMEDIR_PRUEBA", "EMPUJADA", "PIERDE_CONF"], orden)
+    import wallet_ident as wi
+    comprobar("los espejos siguen de acuerdo con el orden nuevo (la de prueba "
+              "ocupa puesto pero no opera)",
+              [wi.posicion(conn, a, 10) for a in orden] == list(range(1, 8))
+              and _db._operativas(conn, 3) == {"GANA_PNLNEG", "GANA_MENOS"},
+              (_db._operativas(conn, 3),))
+
+    # ── 2) linea_top: 'en prueba' es la fase, no 'sin medidas' ────────
+    filas = {r["address"]: r for r in _db.top_wallets(conn, 10)}
+    l_prueba = cp.linea_top(filas["SINMEDIR_PRUEBA"])
+    l_conf = cp.linea_top(filas["SINMEDIR_CONF"])
+    l_med_prueba = cp.linea_top(filas["GANA_PRUEBA"])
+    comprobar("linea_top: sin medir+en prueba dice 'sin medidas · en prueba (aún no alerta)'; "
+              "sin medir+confirmada solo 'sin medidas'; medida+en prueba lo añade a la nota",
+              "en prueba (aún no alerta)" in l_prueba and "sin medidas" in l_prueba
+              and "en prueba" not in l_conf and "sin medidas" in l_conf
+              and "+35%" in l_med_prueba and "en prueba (aún no alerta)" in l_med_prueba,
+              (l_prueba, l_conf, l_med_prueba))
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt, _ = wa.build_top_message(10)
+    comprobar("/top: la cabecera describe el orden nuevo",
+              "de mayor a menor nota" in txt and "confirmadas y por perfil" in txt)
+
+    # ── 3) el paper deja escrito por que no copia y la tarjeta lo dice ──
+    for k, v in (("paper_max_sol", "1"), ("paper_reentrada_h", "6"), ("paper_max_abiertas", "50"),
+                 ("paper_enabled", "1")):
+        set_setting(conn, k, v)
+    M = "MINTAS" + "y" * 38
+    conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, side, price_usd) "
+                 "VALUES ('AS_B1', 'GANA_PNLNEG', ?, 1.0, ?, 'compra', 0.001)", (M, ahora - 3600))
+    conn.execute("INSERT INTO paper_trades (signature, wallet, mint, symbol, stake_sol, stake_usd, "
+                 "entry_price, entry_ts, status, fraccion_restante) VALUES "
+                 "('AS_B1', 'GANA_PNLNEG', ?, 'S', 1.0, 100.0, 0.001, ?, 'abierta', 0.07)", (M, ahora - 3600))
+    conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, side, price_usd) "
+                 "VALUES ('AS_B2', 'GANA_MENOS', ?, 1.0, ?, 'compra', 0.002)", (M, ahora - 60))
+    conn.commit()
+    tr = {"signature": "AS_B2", "wallet": "GANA_MENOS", "mint": M, "sol": 1.0, "ts": ahora - 60}
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok = pt.open_trade(conn, tr, {"price": 0.002, "liq": 50000.0, "symbol": "S"}, None)
+    mot = conn.execute("SELECT paper_motivo FROM signals WHERE signature='AS_B2'").fetchone()["paper_motivo"]
+    comprobar("otra ⭐ compra un token con posicion abierta (resto 7 %): no se abre y la señal "
+              "guarda el motivo con la ⭐, la antigüedad y el resto",
+              ok is False and mot and "ya había posición abierta" in mot and "queda el 7%" in mot, mot)
+    M2 = "MINTAS2" + "y" * 37
+    conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, side, price_usd) "
+                 "VALUES ('AS_B3', 'GANA_MENOS', ?, 1.0, ?, 'compra', NULL)", (M2, ahora - 30))
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok3 = pt.open_trade(conn, {"signature": "AS_B3", "wallet": "GANA_MENOS", "mint": M2,
+                                   "sol": 1.0, "ts": ahora - 30}, {"price": None}, None)
+    mot3 = conn.execute("SELECT paper_motivo FROM signals WHERE signature='AS_B3'").fetchone()["paper_motivo"]
+    comprobar("sin precio: motivo 'sin precio del token'",
+              ok3 is False and mot3 and "sin precio" in mot3, mot3)
+    with contextlib.redirect_stdout(io.StringIO()):
+        linea = pt.linea_paper_tarjeta(conn, M2, None)
+    comprobar("la tarjeta xN de un token no copiado dice el motivo",
+              "no se copió — sin precio" in linea, linea)
+    with contextlib.redirect_stdout(io.StringIO()):
+        linea0 = pt.linea_paper_tarjeta(conn, "MINTNADA" + "z" * 36, None)
+    comprobar("…y si no hay motivo registrado, lo dice",
+              "sin motivo registrado" in linea0, linea0)
+    # el primer motivo no se pisa
+    with contextlib.redirect_stdout(io.StringIO()):
+        pt.open_trade(conn, {"signature": "AS_B3", "wallet": "GANA_MENOS", "mint": M2,
+                             "sol": 1.0, "ts": ahora - 30}, {"price": 0.01, "liq": 10.0}, None)
+    mot3b = conn.execute("SELECT paper_motivo FROM signals WHERE signature='AS_B3'").fetchone()["paper_motivo"]
+    comprobar("el primer motivo (del primer pase) se conserva", mot3b == mot3, mot3b)
+
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14280,6 +14402,7 @@ def main():
     prueba_19ap()
     prueba_19aq()
     prueba_19ar()
+    prueba_19as()
 
     print("\n" + "─" * 60)
     if _FALLOS:

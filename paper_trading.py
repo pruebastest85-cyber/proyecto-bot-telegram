@@ -210,23 +210,43 @@ def _symbol_rapido(mint: str) -> str | None:
     return None
 
 
+def _no_copia(conn, trade, motivo: str) -> bool:
+    """(19-AS) Deja escrito en la señal POR QUE el paper no la copio (el
+    dueño el 05/09: «las tarjetas dicen "no se copió" y no entiendo por
+    qué, si está alertando»). Medido ese dia en 7 dias: 44 de 109 compras
+    alertadas sin copia — 22 porque ya habia posicion en el token, 16 sin
+    precio (tokens de segundos), 6 por enfriamiento. Solo se escribe la
+    primera razon (la del primer pase). Devuelve False para poder usarse
+    como `return _no_copia(...)`."""
+    print(f"· Paper: {motivo}; no se abre posición")
+    try:
+        sig = trade.get("signature") if isinstance(trade, dict) else None
+        if sig:
+            conn.execute(
+                "UPDATE signals SET paper_motivo=? WHERE signature=? "
+                "AND paper_motivo IS NULL", (motivo[:120], sig))
+            conn.commit()
+    except Exception as e:
+        print(f"· Paper: no pude anotar el motivo de no-copia ({e})")
+    return False
+
+
 def open_trade(conn, trade: dict, token: dict, score,
                origen: str = "top") -> bool:
     """Abre una posición simulada a partir de una señal de compra alertada.
     Devuelve True si se abrió."""
     if not _enabled(conn):
-        return False
+        return _no_copia(conn, trade, "paper apagado")
     price = token.get("price")
     if not price or price <= 0:
-        print("· Paper: sin precio del token; no se abre posición")
-        return False
+        return _no_copia(conn, trade, "sin precio del token (DexScreener "
+                                      "aún no lo cotizaba)")
     # (Ola 15) Suelo de liquidez tambien en ESTA via: el camino caliente
     # ya rechazaba abrir con liquidez de polvo, pero la via normal abria
     # la misma posicion segundos despues a un precio sin mercado real.
     _liq = token.get("liq")
     if _liq is not None and _liq < 1000:
-        print(f"· Paper: liquidez de polvo (${_liq:,.0f}); no se abre")
-        return False
+        return _no_copia(conn, trade, f"liquidez de polvo (${_liq:,.0f})")
     if _liq is None:
         # (Ola 18-H) La liquidez DESCONOCIDA se dice en voz alta.
         #
@@ -250,18 +270,28 @@ def open_trade(conn, trade: dict, token: dict, score,
         # Pero es una decision del dueño, no una ley: con
         # `paper_liq_desconocida = 0` en `settings` se rechaza.
         if str(_g(conn, "paper_liq_desconocida", "1") or "1").strip() == "0":
-            print("· Paper: no se pudo comprobar la liquidez y el ajuste "
-                  "`paper_liq_desconocida` esta en 0; no se abre")
-            return False
+            return _no_copia(conn, trade, "liquidez desconocida y "
+                                          "paper_liq_desconocida=0")
         print("· Paper: liquidez NO comprobada (DexScreener no la dio); "
               "se abre igual, pero el dato no esta medido")
 
     # Una posición abierta por token
     ya = conn.execute(
-        "SELECT id FROM paper_trades WHERE mint=? AND status='abierta'",
+        "SELECT id, wallet, entry_ts, fraccion_restante FROM paper_trades "
+        "WHERE mint=? AND status='abierta'",
         (trade["mint"],)).fetchone()
     if ya:
-        return False
+        if ya["wallet"] == trade.get("wallet"):
+            # la misma ⭐ acumulando: no es un freno, es la misma posicion
+            return _no_copia(conn, trade, "la misma ⭐ está acumulando: la "
+                                          "posición ya está abierta")
+        _fr = ya["fraccion_restante"]
+        _resto = (f", queda el {float(_fr) * 100:.0f}%"
+                  if _fr is not None and 0 < float(_fr) < 1 else "")
+        return _no_copia(conn, trade,
+                         f"ya había posición abierta en el token (de otra "
+                         f"⭐, hace {(time.time() - (ya['entry_ts'] or 0)) / 3600:.0f} h"
+                         f"{_resto})")
 
     # ── Enfriamiento por token ────────────────────────────────────────
     # La posicion de un token la abre la PRIMERA ⭐ que lo compra y la
@@ -277,10 +307,9 @@ def open_trade(conn, trade: dict, token: dict, score,
             "WHERE mint=? AND status<>'abierta'",
             (trade["mint"],)).fetchone()
         if ult and ult["t"] and time.time() - ult["t"] < reent_h * 3600:
-            print(f"· Paper: {trade['mint'][:8]}… ya se jugó hace "
-                  f"{(time.time()-ult['t'])/3600:.1f}h (enfriamiento "
-                  f"{reent_h:g}h); no se reabre")
-            return False
+            return _no_copia(conn, trade,
+                             f"ya se jugó hace {(time.time()-ult['t'])/3600:.1f} h "
+                             f"(enfriamiento {reent_h:g} h)")
 
     # Máximo de posiciones abiertas
     max_abiertas = _tope_abiertas(conn)
@@ -288,15 +317,14 @@ def open_trade(conn, trade: dict, token: dict, score,
     # ver el comentario de `_abiertas_que_ocupan`.
     n = _abiertas_que_ocupan(conn)
     if n >= max_abiertas:
-        print(f"· Paper: {n} posiciones abiertas (máx {max_abiertas}); "
-              "no se abre otra")
-        return False
+        return _no_copia(conn, trade,
+                         f"{n} posiciones abiertas (máx {max_abiertas})")
 
     # Tope de monto por señal
     max_sol = _f(conn, "paper_max_sol", 1.0)
     stake = min(float(trade.get("sol") or 0) or max_sol, max_sol)
     if stake <= 0:
-        return False
+        return _no_copia(conn, trade, "importe cero")
 
     # El camino caliente abre antes de conocer el ticker y la tarjeta
     # salia con el pedazo de contrato ("7xKq4B"). Consulta relampago del
@@ -723,7 +751,21 @@ def linea_paper_tarjeta(conn, mint: str, price_now) -> str:
         print(f"· Paper: no pude leer la posición de {str(mint)[:8]} ({e})")
         return ""
     if not r:
-        return "🧪 Paper: sin posición (no se copió)"
+        # (19-AS) Se dice POR QUE: el motivo que dejo el freno del paper
+        # en la ultima compra de ⭐ de ese token.
+        try:
+            m = conn.execute(
+                """SELECT s.paper_motivo FROM signals s
+                   JOIN wallets w ON w.address = s.wallet AND w.is_tracked = 1
+                   WHERE s.mint=? AND s.side='compra'
+                   ORDER BY s.ts DESC LIMIT 1""", (mint,)).fetchone()
+            motivo = m["paper_motivo"] if m else None
+        except Exception as e:
+            print(f"· Paper: no pude leer el motivo de no-copia ({e})")
+            motivo = None
+        if motivo:
+            return f"🧪 Paper: no se copió — {motivo}"
+        return "🧪 Paper: sin posición (no se copió; sin motivo registrado)"
     _liq0, mc0 = _liq_entrada(conn, r["signature"])
     ahora = time.time()
     if r["status"] == "abierta":

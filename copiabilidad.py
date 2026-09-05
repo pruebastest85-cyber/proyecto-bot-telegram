@@ -39,9 +39,11 @@ Cómo se calcula (todo en % sobre el importe):
   n / n_real     observaciones totales / de ellas, copias reales.
 
 Solo cuenta como MEDIDA una ⭐ con al menos MIN_N observaciones; el
-orden del top pone primero las medidas con score > 0, luego las no
-medidas (por wallet_score, como antes) y al final las medidas con score
-<= 0 (se sabe que copiarlas pierde). Ver `db.orden_top`.
+orden del top pone primero las medidas con score > 0 Y media > 0 (por
+score; la media propia tiene que ser positiva por si misma, sin el
+empujon del encogimiento), luego
+las no medidas (confirmadas primero, por perfil) y al final las medidas
+con score <= 0 (se sabe que copiarlas pierde). Ver `db.orden_top`.
 """
 
 import statistics
@@ -224,8 +226,12 @@ def linea_top(w) -> str:
         except (KeyError, IndexError, TypeError):
             return None
     n = _c("copi_n")
+    # (19-AS) "en prueba" es la FASE de la estrella (confirmada=0: aun no
+    # alerta ni se copia), no "sin medidas": se dicen por separado.
+    _conf = _c("confirmada")
+    prueba = " · en prueba (aún no alerta)" if _conf is not None and not _conf else ""
     if not n:
-        return "   📐 copiable: sin medidas (en prueba)"
+        return "   📐 copiable: sin medidas" + prueba
     score, pf, br, nr = _c("copi_score"), _c("copi_pf"), _c("copi_brecha"), _c("copi_n_real") or 0
     txt = (f"   📐 copiable: {score:+.0f}% · n {n}"
            + (f" ({nr} reales)" if nr else "")
@@ -235,4 +241,4 @@ def linea_top(w) -> str:
         txt += f" · faltan {MIN_N - n} para contar"
     elif br is not None and br > BRECHA_MAX_PCT:
         txt += " ⚠️ mueve el pool"
-    return txt
+    return txt + prueba

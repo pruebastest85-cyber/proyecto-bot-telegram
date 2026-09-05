@@ -800,7 +800,10 @@ def _preparar_pg(pg):
             ("signals", "price_lag_s", "INTEGER"),
             # (Ola 17-M) Intento de alerta (llegue o no). Ver el bloque
             # de SQLite: los topes anti-spam cuentan esto, no `alerted`.
-            ("signals", "alert_intento", "INTEGER DEFAULT 0")]:
+            ("signals", "alert_intento", "INTEGER DEFAULT 0"),
+            # (19-AS) Por que NO se copio una compra alertada (freno del
+            # paper). La tarjeta xN lo enseña en vez de "no se copio".
+            ("signals", "paper_motivo", "TEXT")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -911,7 +914,8 @@ def _preparar_sqlite(conn):
                      # que frena la tormenta se apagaba justo cuando hace
                      # falta. Los topes cuentan ahora los INTENTOS y
                      # `alerted` se queda para "llego de verdad".
-                     ("alert_intento", "INTEGER DEFAULT 0")]:
+                     ("alert_intento", "INTEGER DEFAULT 0"),
+                     ("paper_motivo", "TEXT")]:          # (19-AS)
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -1425,24 +1429,42 @@ MIN_N_MEDIDA = 5
 
 
 def orden_top() -> str:
+    # (19-AS, 05/09) Decision del dueño: "la numero 1 la mejor en todos
+    # los aspectos, luego la segunda…". Manda lo MEDIDO al copiar: entre
+    # las medidas decide la nota copiable (ni `confirmada` ni el PnL del
+    # perfil de Helius la adelantan — antes una medida ganadora en prueba
+    # o con pnl_total<0 caia bajo las medidas perdedoras). Entre las NO
+    # medidas siguen las reglas de siempre: confirmada, PnL del perfil
+    # no negativo (decision del 19/8: una perdedora activa va detras de
+    # las dormidas), nota del perfil.
     return f"""w.is_tracked DESC,
-               COALESCE(w.confirmada, 0) DESC,
-               CASE WHEN w.pnl_total IS NOT NULL AND w.pnl_total < 0
-                    THEN 1 ELSE 0 END,
                -- (19-AH) Bandas: 0 = medida y copiarla GANA, 1 = sin medir
-               -- (por wallet_score, como siempre), 2 = medida y copiarla
-               -- PIERDE (se sabe: va al final).
+               -- (por perfil), 2 = medida y copiarla PIERDE (al final).
+               -- (19-AS) "Gana" exige nota > 0 Y media > 0: el
+               -- encogimiento hacia la media poblacional (+22 % el 05/09)
+               -- convertia una billetera con media −10 % en 6 copias
+               -- reales en "+4 %" y la ponia 2ª del top. Lo medido a
+               -- ella tiene que ser positivo por si mismo.
                CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
                          AND w.copi_score IS NOT NULL
-                    THEN (CASE WHEN w.copi_score > 0 THEN 0 ELSE 2 END)
+                    THEN (CASE WHEN w.copi_score > 0
+                                    AND COALESCE(w.copi_media, 0) > 0
+                               THEN 0 ELSE 2 END)
                     ELSE 1 END,
+               -- Solo entre las NO medidas: confirmada primero y las que
+               -- pierden segun Helius al fondo de su banda.
+               CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA} THEN 1
+                    ELSE COALESCE(w.confirmada, 0) END DESC,
+               CASE WHEN COALESCE(w.copi_n, 0) < {MIN_N_MEDIDA}
+                         AND w.pnl_total IS NOT NULL AND w.pnl_total < 0
+                    THEN 1 ELSE 0 END,
                -- Dormidas al fondo de su banda: 7 dias si esta medida,
                -- 48 h si no (ver corte_medidas / corte_actividad).
                CASE WHEN COALESCE(actividad.ult, 0) <
                          (CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
                                THEN ? ELSE ? END)
                     THEN 1 ELSE 0 END,
-               -- Dentro de las medidas: mejor score copiable primero.
+               -- Dentro de las medidas: mejor nota copiable primero.
                CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
                     THEN -COALESCE(w.copi_score, 0) ELSE 0 END,
                CASE WHEN w.wallet_score IS NULL THEN 1 ELSE 0 END,
@@ -1479,7 +1501,7 @@ def top_wallets(conn, limit=20):
                   w.score, w.is_tracked, w.ai_class, w.alias, w.pnl_30d,
                   w.pnl_total, w.wallet_score,
                   w.copi_score, w.copi_n, w.copi_n_real, w.copi_pf,
-                  w.copi_brecha
+                  w.copi_brecha, COALESCE(w.confirmada, 0) AS confirmada
            FROM wallets w
            LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                       GROUP BY wallet) actividad
