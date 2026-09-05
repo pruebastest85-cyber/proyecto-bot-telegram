@@ -173,7 +173,12 @@ def _local(prompt: str, system: str | None, max_tokens: int,
             # LLAMADOR (paciencia=True: decisiones en hilos de fondo);
             # timeout >= 60 se mantiene como señal implicita para los
             # jobs periodicos que ya llamaban asi.
-            if not _reintento and (paciencia or timeout >= 60):
+            # (19-AP) …y solo si el primer intento LLEVABA tope: con el
+            # modelo pensante ya aprendido el primer POST va sin tope, y
+            # repetirlo identico (2 × 90 s bajo el candado del mint en
+            # decidir_salida) solo puede devolver el mismo vacio.
+            if (not _reintento and (paciencia or timeout >= 60)
+                    and "max_tokens" in cuerpo):
                 if fin == "length":
                     _aprender_pensante(conn)
                 print(f"· IA local vacia (finish={fin}); "

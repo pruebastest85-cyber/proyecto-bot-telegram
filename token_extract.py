@@ -70,6 +70,22 @@ def _rate_ok() -> bool:
     return True
 
 
+def _devolver_cupo() -> None:
+    """(19-AP) Un intento que NO analizo nada (Helius caido, sin precio)
+    no gasta cupo: antes, con Helius caido, al 6º intento el dueño leia
+    "Alcancé el límite" sin que se hubiera registrado nada."""
+    hour = time.strftime("%Y%m%d%H")
+    key = f"tokxrate:{hour}"
+    conn = get_conn()
+    try:
+        n = int(float(get_setting(conn, key, "0") or 0))
+        set_setting(conn, key, max(0, n - 1))
+    except (TypeError, ValueError) as e:
+        print(f"· token_extract: no pude devolver el cupo ({e})")
+    finally:
+        conn.close()
+
+
 def extract_buyers(mint: str, symbol: str | None = None,
                    price_change_24h=None) -> tuple[str, int]:
     """
@@ -115,10 +131,12 @@ def extract_buyers(mint: str, symbol: str | None = None,
             # y pueda volver a pegar el mint mas tarde.
             print("· extract_buyers: sin precio actual en DexScreener; "
                   "no se analiza ni se cachea")
+            _devolver_cupo()
             return ("sin_precio", 0)
         if _motivo:
             print(f"· extract_buyers: descarga incompleta ({_motivo}); "
                   f"no se cachea, se puede reintentar")
+            _devolver_cupo()
             return ("descarga", 0)
         _mark(mint)
         return ("ok", registradas)

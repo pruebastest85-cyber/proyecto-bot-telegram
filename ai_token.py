@@ -62,10 +62,14 @@ def _call(prompt: str) -> dict | None:
         text, _prov = completar_ex(prompt, max_tokens=250, timeout=60)
         if not text:
             return None
-        text = text.replace("```json", "").replace("```", "").strip()
-        import re as _re
-        m = _re.search(r"\{.*\}", text, flags=_re.S)
-        v = json.loads(m.group(0) if m else text)
+        # (19-AP) El regex voraz `\{.*\}` fallaba si el modelo añadia
+        # una linea con llaves tras el JSON (la ficha salia sin veredicto
+        # y sin rastro); el puente ya tiene el extractor bueno.
+        from ia_puente import extraer_json
+        v = extraer_json(text)
+        if not isinstance(v, dict):
+            print(f"· ai_token: la IA contestó sin JSON usable: {text[:120]}")
+            return None
         if v.get("nivel"):
             v["modelo"] = f"puente:{_prov or '?'}"
             return v

@@ -20,7 +20,7 @@ falla, se acabó el presupuesto), no errores de criterio.
 import os
 import time
 
-from db import get_conn, get_setting
+from db import get_conn, get_setting, set_setting
 from avisos import aviso as _avisar_ex   # (19-AE)
 
 OK, WARN, CRIT = "ok", "warn", "crit"
@@ -1212,6 +1212,17 @@ def interpretar(checks) -> str | None:
         return None
     if not txt:
         return None
+    # (19-AP) La guarda "una interpretacion al dia" leia `salud_ia_dia`
+    # pero NADIE la escribia: era codigo muerto y cada /salud ia y cada
+    # aviso CRIT llamaban al modelo. Se escribe aqui, tras obtener texto.
+    try:
+        _c_dia = get_conn()
+        try:
+            set_setting(_c_dia, "salud_ia_dia", hoy)
+        finally:
+            _c_dia.close()
+    except Exception as e:
+        print(f"· /salud: no pude anotar salud_ia_dia ({e})")
     # (Ola 18-Q) El texto de la IA es el ÚNICO que entraba crudo en el
     # mensaje, y encima `revisar_y_avisar` lo pide SIEMPRE: un `_` impar
     # en la respuesta del modelo (y las hay: "falta PUBLIC_URL",

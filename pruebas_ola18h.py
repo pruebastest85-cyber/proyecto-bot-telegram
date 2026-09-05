@@ -13724,6 +13724,208 @@ def prueba_19ao():
     conn.close()
 
 
+def prueba_19ap():
+    bloque("19-AP - bajos de IA y agente: salud_ia_dia real, max_min finito, "
+           "reintento solo con tope, agente ocupado no escala a la nube, "
+           "Infinity, cupo devuelto, ai_token con extraer_json")
+    import contextlib
+    import io
+    import time as _t
+    import requests
+    from db import get_conn, get_setting, set_setting
+    import salud
+    import decision_ia as di
+    import ia_puente as ip
+    import ai_agent as ag
+    import token_extract as te
+    import ai_token as at
+
+    # ── 1) salud.interpretar escribe salud_ia_dia y no repite ─────────
+    conn = get_conn()
+    conn.execute("DELETE FROM settings WHERE key='salud_ia_dia'")
+    conn.commit(); conn.close()
+    llamadas = []
+    _comp0, _hay0, _can0 = ip.completar, ip.hay_ia, None
+    import ai_budget as ab
+    _can0 = ab.can_call
+    ip.completar = lambda *a, **k: (llamadas.append(1) or "todo bien")
+    ip.hay_ia = lambda: True
+    ab.can_call = lambda conn=None: True
+    try:
+        checks = [{"nombre": "x", "estado": salud.WARN, "detalle": "d"}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            t1 = salud.interpretar(checks)
+            t2 = salud.interpretar(checks)
+        conn = get_conn()
+        dia = get_setting(conn, "salud_ia_dia", "")
+        conn.close()
+        comprobar("salud: la primera interpretacion llama al modelo y anota el dia; "
+                  "la segunda del mismo dia NO llama",
+                  t1 == "todo bien" and t2 is None and len(llamadas) == 1
+                  and dia == _t.strftime("%Y-%m-%d"), (t1, t2, llamadas, dia))
+    finally:
+        ip.completar, ip.hay_ia, ab.can_call = _comp0, _hay0, _can0
+        conn = get_conn()
+        conn.execute("DELETE FROM settings WHERE key='salud_ia_dia'")
+        conn.commit(); conn.close()
+
+    # ── 2) decision_ia: max_min nan/inf → reglas ──────────────────────
+    _post0 = requests.post
+    class _R:
+        def __init__(self, txt):
+            self.status_code = 200
+            self._t = txt
+        def json(self):
+            return {"choices": [{"message": {"content": self._t}, "finish_reason": "stop"}]}
+    RESP = {"t": ""}
+    requests.post = lambda *a, **k: _R(RESP["t"])
+    _hay0b, _pens0b = ip.hay_ia, ip._MODELO_PENSANTE
+    ip.hay_ia = lambda: True
+    ip._MODELO_PENSANTE = False
+    conn = get_conn()
+    _url_prev = get_setting(conn, "local_ai_url", None)
+    set_setting(conn, "local_ai_url", "http://127.0.0.1:1")
+    conn.close()
+    try:
+        out = {}
+        for etiqueta, mm in (("nan", '"nan"'), ("inf", '"inf"'), ("ok", "45")):
+            RESP["t"] = '{"salida":"holdear","max_min":%s,"razon":"r"}' % mm
+            conn = get_conn()
+            with contextlib.redirect_stdout(io.StringIO()):
+                out[etiqueta] = di.decidir_salida(conn, {"symbol": "S", "entry_price": 1.0,
+                                                         "price_now": 1.1, "pnl_pct": 10,
+                                                         "age_min": 5, "mint": "M", "wallet": "W"})
+            conn.close()
+        comprobar("decision_ia: max_min 'nan'/'inf' caen a reglas (invalida_max_min); 45 vale",
+                  out["nan"]["decidido_por"] == "reglas_fallback:invalida_max_min"
+                  and out["inf"]["decidido_por"] == "reglas_fallback:invalida_max_min"
+                  and out["ok"]["salida"] == "holdear" and out["ok"]["max_min"] == 45.0, out)
+    finally:
+        requests.post = _post0
+        ip.hay_ia, ip._MODELO_PENSANTE = _hay0b, _pens0b
+        conn = get_conn()
+        if _url_prev is None:
+            conn.execute("DELETE FROM settings WHERE key='local_ai_url'")
+        else:
+            set_setting(conn, "local_ai_url", _url_prev)
+        conn.commit(); conn.close()
+
+    # ── 3) ia_puente: sin tope en el primer intento → sin segundo POST ─
+    posts = []
+    class _RV:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"choices": [{"message": {"content": "<think>sin cerrar"}, "finish_reason": "length"}]}
+    requests.post = lambda *a, **k: (posts.append(k.get("json", {})) or _RV())
+    conn = get_conn()
+    _pens0 = get_setting(conn, "modelo_pensante", None)
+    set_setting(conn, "modelo_pensante", "1")
+    _url_prev = get_setting(conn, "local_ai_url", None)
+    set_setting(conn, "local_ai_url", "http://127.0.0.1:1")
+    conn.close()
+    _pens_mem0 = ip._MODELO_PENSANTE
+    ip._MODELO_PENSANTE = True
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = ip._local("hola", None, 100, 90, None, paciencia=True)
+        comprobar("ia_puente: con modelo_pensante=1 el primer POST va sin tope y NO "
+                  "se repite identico si vuelve vacio",
+                  r is None and len(posts) == 1 and "max_tokens" not in posts[0], (r, len(posts)))
+        posts.clear()
+        ip._MODELO_PENSANTE = False
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = ip._local("hola", None, 100, 90, None, paciencia=True)
+        comprobar("ia_puente: con tope en el primer POST, el vacio SI dispara el "
+                  "reintento sin tope (2 POST)",
+                  len(posts) == 2 and "max_tokens" in posts[0] and "max_tokens" not in posts[1],
+                  (len(posts), [("max_tokens" in p_) for p_ in posts]))
+    finally:
+        requests.post = _post0
+        ip._MODELO_PENSANTE = _pens_mem0
+        conn = get_conn()
+        if _pens0 is None:
+            conn.execute("DELETE FROM settings WHERE key='modelo_pensante'")
+        else:
+            set_setting(conn, "modelo_pensante", _pens0)
+        if _url_prev is None:
+            conn.execute("DELETE FROM settings WHERE key='local_ai_url'")
+        else:
+            set_setting(conn, "local_ai_url", _url_prev)
+        conn.commit(); conn.close()
+
+    # ── 4) agente: ReadTimeout de la local = ocupada, no None ─────────
+    def _timeout(*a, **k):
+        raise requests.exceptions.ReadTimeout("simulado")
+    requests.post = _timeout
+    conn = get_conn()
+    _url_prev = get_setting(conn, "local_ai_url", None)
+    set_setting(conn, "local_ai_url", "http://127.0.0.1:1")
+    conn.close()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = ag._chat_local([{"role": "user", "content": "hola"}])
+        comprobar("agente: la local OCUPADA contesta un aviso (no None → no escala a la nube)",
+                  isinstance(res, tuple) and "ocupada" in res[0].lower() and res[1] is None, res)
+    finally:
+        requests.post = _post0
+        conn = get_conn()
+        if _url_prev is None:
+            conn.execute("DELETE FROM settings WHERE key='local_ai_url'")
+        else:
+            set_setting(conn, "local_ai_url", _url_prev)
+        conn.commit(); conn.close()
+
+    # ── 5) Infinity en n ──────────────────────────────────────────────
+    acc = {"tool": "cambiar_top_alertas", "args": {"n": float("inf")}}
+    try:
+        d = ag.describe_action(acc)
+        ok_desc = "TODAS" in d
+    except Exception as e:
+        ok_desc, d = False, repr(e)
+    comprobar("agente: n=Infinity no revienta describe_action", ok_desc, d)
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = ag.execute_action(acc)
+    comprobar("agente: n=Infinity en execute_action devuelve 'Valor inválido'",
+              "inválido" in str(r).lower(), r)
+
+    # ── 6) token_extract devuelve el cupo si no analizo ───────────────
+    import wallet_analyzer as wa
+    hour = _t.strftime("%Y%m%d%H")
+    conn = get_conn()
+    set_setting(conn, f"tokxrate:{hour}", "0")
+    conn.close()
+    _an0, _pre0 = wa.analyze_token, wa._precio_actual
+    wa.analyze_token = lambda conn, token: 0
+    wa._local.sin_precio = True
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            st_, n = te.extract_buyers("MINTAP" + "z" * 38, "TOK", 100.0)
+        conn = get_conn()
+        cupo = int(float(get_setting(conn, f"tokxrate:{hour}", "0") or 0))
+        conn.close()
+        comprobar("token_extract: un intento sin precio devuelve el cupo (sigue en 0)",
+                  st_ == "sin_precio" and cupo == 0, (st_, cupo))
+    finally:
+        wa.analyze_token, wa._precio_actual = _an0, _pre0
+        wa._local.sin_precio = False
+        conn = get_conn()
+        conn.execute("DELETE FROM settings WHERE key=?", (f"tokxrate:{hour}",))
+        conn.commit(); conn.close()
+
+    # ── 7) ai_token usa extraer_json ─────────────────────────────────
+    _cex0 = ip.completar_ex
+    ip.completar_ex = lambda *a, **k: ('{"nivel":"riesgo alto","seguro":false,"confianza":80,'
+                                       '"razon":"x"}\nNota: los campos {mint_auth} eran nulos.', "local")
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            v = at._call("prompt")
+        comprobar("ai_token: JSON seguido de una linea con llaves se extrae bien",
+                  isinstance(v, dict) and v.get("nivel") == "riesgo alto", v)
+    finally:
+        ip.completar_ex = _cex0
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -13791,6 +13993,7 @@ def main():
     prueba_19am()
     prueba_19an()
     prueba_19ao()
+    prueba_19ap()
 
     print("\n" + "─" * 60)
     if _FALLOS:

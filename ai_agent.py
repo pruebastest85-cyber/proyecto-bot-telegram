@@ -569,9 +569,20 @@ def _chat_local(messages: list[dict]):
                 # +200 de colchon por si el modelo ignora /no_think
                 # y razona igual (mismo criterio que ia_puente).
                 cuerpo["max_tokens"] = 900
-            r = requests.post(
-                f"{url}/v1/chat/completions", json=cuerpo,
-                timeout=150 if sin_tope else 90)
+            try:
+                r = requests.post(
+                    f"{url}/v1/chat/completions", json=cuerpo,
+                    timeout=150 if sin_tope else 90)
+            except requests.exceptions.ReadTimeout as e:
+                # (19-AP) OCUPADA no es APAGADA (la 19-AA lo arreglo en
+                # el puente, no aqui): mientras el analista tiene el
+                # modelo 30-90 s, un chat agotaba el timeout, devolvia
+                # None y _chat_serializado se iba a la NUBE de pago con
+                # hasta 4 peticiones caras. Se contesta en vez de escalar.
+                print(f"· Agente local OCUPADO (no contestó a tiempo): "
+                      f"no se pasa a la nube ({str(e)[:80]})")
+                return ("⏳ La IA local está ocupada ahora mismo (probablemente "
+                        "evaluando billeteras). Prueba en un par de minutos.", None)
             if r.status_code >= 400:
                 print(f"· Agente local HTTP {r.status_code}: {r.text[:200]}")
                 return None
@@ -917,7 +928,7 @@ def describe_action(action: dict) -> str:
     if tool == "cambiar_top_alertas":
         try:
             n = int(float(args.get("n", 0)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):   # (19-AP) Infinity
             n = 0
         return ("📡 Quitar el límite: alertarán TODAS las ⭐" if n == 0
                 else f"📡 Que alerten solo las top {n} billeteras")
@@ -981,7 +992,7 @@ def _execute_action_serializado(action: dict) -> str:
             from db import get_setting, set_setting
             try:
                 n = max(0, min(100, int(float(args.get("n", 0)))))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):   # (19-AP) Infinity
                 return "Valor inválido para top de alertas (usa 0-100)."
             conn = get_conn()
             try:

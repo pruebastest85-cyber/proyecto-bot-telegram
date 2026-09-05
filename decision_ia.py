@@ -282,6 +282,11 @@ def decidir_salida(conn, contexto: dict) -> dict:
     # una respuesta incompleta cae a reglas con su motivo.
     try:
         mins = float(v.get("max_min"))
+        # (19-AP) "nan"/"inf" pasan float() y max(5, min(120, nan)) da
+        # 120: un valor que no es un numero se volvia el hold MAXIMO
+        # firmado ia_local y contaminaba el A/B.
+        if mins != mins or mins in (float("inf"), float("-inf")):
+            raise ValueError("max_min no es un numero finito")
     except (TypeError, ValueError):
         return {"salida": "vender",
                 "decidido_por": "reglas_fallback:invalida_max_min"}
