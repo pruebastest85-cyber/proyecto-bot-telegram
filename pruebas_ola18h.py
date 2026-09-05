@@ -13480,6 +13480,250 @@ def prueba_19an():
         au.fallos.clear()
 
 
+def prueba_19ao():
+    bloque("19-AO - bajos de datos: exit_liq NULL sin sondeo, respaldo del "
+           "consenso sin precio caliente, apply_sell con tokens=0, racha "
+           "sin contar el 0.0, radar libera 'examinando', dev_watch sin "
+           "LIMIT 15, migrate sin huella si falla una tabla")
+    import contextlib
+    import io
+    import inspect as _insp
+    import json as _json
+    import time as _t
+    import requests
+    import config as _cfg
+    from db import get_conn, set_setting
+    import db as _db
+    import paper_trading as pt
+    import signal_tracker as st
+    import realtime as rt
+    import radar as rd
+    import dev_watch as dw
+    import migrate_to_pg as mpg
+    import token_check as tc
+    import trades_store as ts
+
+    # ── 1) _mc_liq_salida ─────────────────────────────────────────────
+    _pmx0 = st._price_mc_ex
+    try:
+        st._price_mc_ex = lambda mint: (None, None, False, 0.0)
+        comprobar("exit_liq: sin sondeo (red/429) → (None, None), no 0.0",
+                  pt._mc_liq_salida("M") == (None, None), pt._mc_liq_salida("M"))
+        st._price_mc_ex = lambda mint: (None, None, True, 0.0)
+        comprobar("exit_liq: token MUERTO → la liquidez leida (0.0) se conserva",
+                  pt._mc_liq_salida("M") == (None, 0.0), pt._mc_liq_salida("M"))
+        st._price_mc_ex = lambda mint: (0.01, 5000.0, False, 900.0)
+        comprobar("exit_liq: con precio → (mc, liq) normales",
+                  pt._mc_liq_salida("M") == (5000.0, 900.0))
+    finally:
+        st._price_mc_ex = _pmx0
+
+    # ── 3) apply_sell con tokens = 0 ──────────────────────────────────
+    conn = get_conn()
+    ts._ensure(conn)
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills", "trades", "radar_tokens"):
+        try:
+            conn.execute(f"DELETE FROM {t}")
+        except Exception as e:
+            print(f"· limpieza {t}: {e}")
+    conn.commit()
+    _db.apply_buy(conn, "WAO", "MAO", sol=1.0, tokens=1000.0, ts=1)
+    r0 = _db.apply_sell(conn, "WAO", "MAO", sol=0.5, tokens=0.0, ts=2)
+    pos = dict(conn.execute("SELECT tokens, realized_sol FROM positions WHERE wallet='WAO'").fetchone())
+    comprobar("apply_sell con tokens=0: known=False, sin profit inventado, "
+              "posicion intacta",
+              r0["known"] is False and r0["realized_this"] is None
+              and pos["tokens"] == 1000.0 and (pos["realized_sol"] or 0) == 0, (r0, pos))
+    r1 = _db.apply_sell(conn, "WAO", "MAO", sol=0.9, tokens=1000.0, ts=3)
+    comprobar("…y la venta real posterior liquida bien (−0,1 SOL)",
+              r1["known"] is True and abs(r1["realized_this"] + 0.1) < 1e-9, r1)
+
+    # ── 4) racha: 3 rojas + 0.0 NO degrada; 4 rojas si ────────────────
+    now = int(_t.time())
+    _tg0 = rt.tg_send
+    rt.tg_send = lambda *a, **k: True
+    try:
+        for w in ("W_ROJA", "W_CERO"):
+            conn.execute("INSERT INTO wallets (address, is_tracked, is_bot, ai_follow, alias, "
+                         "confirmada) VALUES (?,1,0,1,?,1)", (w, w))
+            for i, chg in enumerate((-5, -10, -20, (0.0 if w == "W_CERO" else -30))):
+                conn.execute("INSERT INTO signals (signature, wallet, mint, ts, side, price_usd, "
+                             "chg_24h) VALUES (?,?,?,?,'compra',1,?)",
+                             (f"{w}{i}", w, f"M{i}", now - 86400 * (5 - i), chg))
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            st._check_streaks(conn)
+        f = {r["address"]: r["is_tracked"] for r in conn.execute(
+            "SELECT address, is_tracked FROM wallets WHERE address IN ('W_ROJA','W_CERO')")}
+        comprobar("racha: 4 en negativo pierde la ⭐; 3 en negativo + una a 0,0 % la conserva",
+                  f["W_ROJA"] == 0 and f["W_CERO"] == 1, f)
+    finally:
+        rt.tg_send = _tg0
+
+    # ── 5) radar: reservas 'examinando' colgadas ─────────────────────
+    conn.execute("INSERT INTO radar_tokens (mint, ts, symbol, liq, resultado) VALUES "
+                 "('RCOLGADA', ?, 'X', 100, 'examinando')", (now - 7200,))
+    conn.execute("INSERT INTO radar_tokens (mint, ts, symbol, liq, resultado) VALUES "
+                 "('RFRESCA', ?, 'Y', 100, 'examinando')", (now - 60,))
+    conn.execute("INSERT INTO radar_tokens (mint, ts, symbol, liq, resultado) VALUES "
+                 "('RHECHA', ?, 'Z', 100, 'sin_conocidas:3')", (now - 7200,))
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        n = rd._liberar_colgadas(conn)
+    quedan = {r["mint"] for r in conn.execute("SELECT mint FROM radar_tokens")}
+    comprobar("radar: la reserva colgada de 2 h se libera; la fresca y la "
+              "terminada se quedan", n == 1 and quedan == {"RFRESCA", "RHECHA"}, (n, quedan))
+    _fr0 = rd._frescos
+    rd._frescos = lambda: []
+    try:
+        conn.execute("INSERT INTO radar_tokens (mint, ts, symbol, liq, resultado) VALUES "
+                     "('RCOLGADA2', ?, 'X', 100, 'examinando')", (now - 7200,))
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            rd.escanear()
+        comprobar("radar: escanear sin candidatos tambien libera las colgadas",
+                  conn.execute("SELECT COUNT(*) c FROM radar_tokens WHERE mint='RCOLGADA2'").fetchone()["c"] == 0)
+    finally:
+        rd._frescos = _fr0
+
+    # ── 6) dev_watch: revisa hasta paper_max_abiertas, no 15 ─────────
+    set_setting(conn, "paper_max_abiertas", "50")
+    for i in range(20):
+        conn.execute("INSERT INTO paper_trades (signature, wallet, mint, symbol, stake_sol, "
+                     "stake_usd, entry_price, entry_ts, status, dev_wallet) VALUES "
+                     "(?,?,?,?,1.0,100.0,0.01,?,'abierta',?)",
+                     (f"sdw{i}", "WAO", f"MDW{i}", "S", now - i * 60, f"DEV{i}"))
+    conn.commit()
+    vistos = []
+    _dv0 = dw._dev_vendio
+    dw._dev_vendio = lambda dev, mint, desde_ts=None, **k: (vistos.append(mint) or False)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            dw.revisar_devs()
+    finally:
+        dw._dev_vendio = _dv0
+    comprobar("dev_watch: con 20 abiertas revisa las 20 (antes solo 15)",
+              len(vistos) == 20, len(vistos))
+
+    # ── 2) consenso: respaldo cuando el camino caliente no tiene precio ──
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    A, B, Z = ("A" + "a" * 43), ("B" + "b" * 43), ("Z" + "z" * 43)
+    for w, ws in ((A, 80), (B, 80), (Z, 99)):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, confirmada, is_bot, "
+                     "wallet_score, pnl_total, score, winning_tokens_count) "
+                     "VALUES (?,?,1,1,0,?,5,90,3)", (w, w[:1], ws))
+    conn.execute("INSERT INTO positions (wallet, mint, first_ts, last_ts, tokens) "
+                 "VALUES (?,?,?,?,0)", (Z, "ACTIVIDAD", now, now))
+    for k, v in (("top_alertas", "1"), ("paper_max_sol", "1"), ("paper_tp_pct", "999999"),
+                 ("paper_sl_pct", "999999"), ("paper_timeout_h", "999999"),
+                 ("consenso_copia_n", "2"), ("min_signal_score", "0"),
+                 ("umbral_manual", "1"), ("ia_local_activa", "0")):
+        set_setting(conn, k, v)
+    conn.commit()
+    conn.close()
+
+    class _R:
+        def __init__(self, st_, data):
+            self.status_code, self._d, self.ok = st_, data, 200 <= st_ < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+    ESTADO = {"sol_usd": 200.0, "px": 0.001}
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            mint = url.rsplit("/", 1)[-1]
+            if mint.startswith("So1111"):
+                return _R(200, {"pairs": [{"priceUsd": str(ESTADO["sol_usd"]),
+                                          "baseToken": {"address": mint, "symbol": "SOL"}}]})
+            return _R(200, {"pairs": [{"priceUsd": str(ESTADO["px"]),
+                                      "baseToken": {"address": mint, "symbol": "TOK"},
+                                      "liquidity": {"usd": 50000.0}, "marketCap": 1_000_000.0,
+                                      "pairAddress": "PAIR", "chainId": "solana",
+                                      "txns": {"m5": {"buys": 1, "sells": 1}},
+                                      "volume": {"h24": 1000}, "priceChange": {"h1": 0, "h24": 0}}]})
+        if "jup.ag" in url:
+            p = params or {}
+            amt = int(p.get("amount"))
+            if str(p.get("inputMint", "")).startswith("So1111"):
+                out = int(amt / 1e9 * ESTADO["sol_usd"] / ESTADO["px"] * 1e6)
+            else:
+                out = int(amt / 1e6 * ESTADO["px"] / ESTADO["sol_usd"] * 1e9)
+            return _R(200, {"inAmount": str(amt), "outAmount": str(out), "priceImpactPct": "0.5"})
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+    def _post(url, *a, **kw):
+        return _R(200, {"ok": True, "result": None})
+    def _tx(wallet, mint, side, sol, tokens, ts, sig):
+        delta = -int(sol * 1e9) if side == "compra" else int(sol * 1e9)
+        tt = {"mint": mint, "toUserAccount": wallet, "fromUserAccount": None, "tokenAmount": tokens}
+        return {"signature": sig, "timestamp": ts, "feePayer": wallet, "transactionError": None,
+                "tokenTransfers": [tt], "nativeTransfers": [],
+                "accountData": [{"account": wallet, "nativeBalanceChange": delta}]}
+    _g0, _p0 = requests.get, requests.post
+    _d0, _h0 = _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY
+    requests.get, requests.post = _get, _post
+    _cfg.DEXSCREENER_DELAY = 0.0
+    _cfg.HELIUS_DELAY = 0.0
+    rt.invalidar_vigiladas()
+    try:
+        _db.invalidar_copiables()
+    except Exception as e:
+        print(f"· no pude invalidar copiables: {e}")
+    tc._dex_cache.clear()
+    # el camino caliente NO consigue precio (sondeo fresco caido); la via
+    # normal (analyze_token, cacheado) si.
+    _pmx0 = st._price_mc_ex
+    st._price_mc_ex = lambda mint: (None, None, False, 0.0)
+    try:
+        M = "MINTAO" + "y" * 38
+        T = now - 300
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(A, M, "compra", 1.0, 1_000_000, T, "AO_A_BUY")])
+            rt.process_transactions([_tx(B, M, "compra", 1.0, 1_000_000, T + 60, "AO_B_BUY")])
+        conn = get_conn()
+        filas = [dict(r) for r in conn.execute(
+            "SELECT wallet, origen, status FROM paper_trades WHERE mint=?", (M,)).fetchall()]
+        conn.close()
+        comprobar("consenso: sin precio en el camino caliente, la via normal "
+                  "abre igual la copia por consenso a nombre de la lider",
+                  len(filas) == 1 and filas[0]["origen"] == "consenso"
+                  and filas[0]["wallet"] == A, filas)
+    finally:
+        st._price_mc_ex = _pmx0
+        requests.get, requests.post = _g0, _p0
+        _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY = _d0, _h0
+        tc._dex_cache.clear()
+
+    # ── 7) migrate_to_pg: sin huella si una tabla fallo ──────────────
+    class _Cur:
+        def __init__(self):
+            self.sql = []
+        def execute(self, q, p=()):
+            self.sql.append(q)
+    c1, c2 = _Cur(), _Cur()
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok1 = mpg._marca_migracion(c1, "h", [])
+        ok2 = mpg._marca_migracion(c2, "h", ["signals"])
+    comprobar("migrate_to_pg: la marca se guarda solo si NINGUNA tabla fallo",
+              ok1 is True and len(c1.sql) == 1 and ok2 is False and c2.sql == [],
+              (ok1, c1.sql, ok2, c2.sql))
+    src = _insp.getsource(mpg._run)
+    comprobar("migrate_to_pg: _run recoge las tablas fallidas y las pasa a la marca",
+              "tablas_fallidas.append(t)" in src and "_marca_migracion(cur, huella, tablas_fallidas)" in src
+              and "MIGRACIÓN INCOMPLETA" in src)
+
+    conn = get_conn()
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills", "trades", "radar_tokens"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -13546,6 +13790,7 @@ def main():
     prueba_19al()
     prueba_19am()
     prueba_19an()
+    prueba_19ao()
 
     print("\n" + "─" * 60)
     if _FALLOS:

@@ -936,6 +936,12 @@ def _proc(txs: list[dict], conn):
         # Copia TODA operacion de una ⭐ del top (asi funciona copiar
         # billeteras); el umbral de score solo gobierna las ALERTAS.
         # Apagable sin codigo: setting paper_rapido = 0.
+        # (19-AO) Si el camino caliente decidio ABRIR por consenso pero
+        # no consiguio precio (429 de DexScreener), se reintenta abajo con
+        # el precio de `analyze_token` — el mismo respaldo que 19-Y dio a
+        # las ⭐ del top (`_copia_silenciada`). Sin esto el quorum, que
+        # solo se evalua en compras, se perdia para siempre.
+        _consenso_pendiente = None
         if trade["wallet"] in stars:
             try:
                 if int(float(get_setting(conn, "paper_rapido", "1") or 1)):
@@ -1032,6 +1038,8 @@ def _proc(txs: list[dict], conn):
                         # teniendo el dato bueno en esta misma variable.
                         if _p0 and _p0 > 0:
                             _px_caliente = (_p0, _mc0, _liq0)
+                        elif _accion[0] == "abrir" and _accion[2] == "consenso":
+                            _consenso_pendiente = _accion[1]
                         if _p0 and _p0 > 0:
                             _t0 = {"price": _p0, "symbol": trade["mint"][:6],
                                    "mc": _mc0, "liq": _liq0}
@@ -1055,6 +1063,15 @@ def _proc(txs: list[dict], conn):
             (trade["mint"], since, trade["side"])).fetchone()["c"]
 
         t = analyze_token(trade["mint"])
+        if _consenso_pendiente is not None and t.get("price"):
+            try:
+                import paper_trading as _pt_c
+                with _lock_mint(trade["mint"]):
+                    _pt_c.open_trade(conn, _consenso_pendiente, t, None,
+                                     origen="consenso")
+            except Exception as e:
+                print(f"· Paper (consenso, respaldo sin precio caliente) "
+                      f"falló: {e}")
         w = conn.execute(
             "SELECT ai_class, score, alias, pnl_30d, pnl_total, "
             "wallet_score, hold_median_min, roi_median "

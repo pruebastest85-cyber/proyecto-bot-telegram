@@ -53,6 +53,26 @@ def _diag_volumen():
             print(f"{TAG} no pude listar {d}: {e}")
 
 
+def _marca_migracion(cur, huella: str, tablas_fallidas: list) -> bool:
+    """(19-AO) Guarda la marca 'ya migrado' SOLO si ninguna tabla fallo.
+    Con la huella igual, la proxima ejecucion no copiaria nada y el
+    historico quedaria a medias en Postgres con el log diciendo
+    "MIGRACION COMPLETA". Devuelve True si se guardo."""
+    if tablas_fallidas:
+        print(f"{TAG} ⚠️ {len(tablas_fallidas)} tabla(s) fallaron "
+              f"({', '.join(tablas_fallidas)}): NO se guarda la marca de "
+              f"migración; se reintentará en el próximo arranque.")
+        return False
+    try:
+        cur.execute(
+            "INSERT INTO settings (key, value) VALUES ('migracion_sqlite', %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (huella,))
+        return True
+    except Exception as e:
+        print(f"{TAG} no pude guardar la marca de migración: {e}")
+        return False
+
+
 def _run():
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
@@ -149,6 +169,7 @@ def _run():
     s.row_factory = sqlite3.Row
 
     total = 0
+    tablas_fallidas = []
     for t in TABLES:
         try:
             rows = s.execute(f"SELECT * FROM {t}").fetchall()
@@ -187,6 +208,7 @@ def _run():
             total += len(rows)
         except Exception as e:
             print(f"{TAG} tabla {t}: ERROR insertando: {e}")
+            tablas_fallidas.append(t)
 
     for t, idcol in SERIAL_TABLES:
         try:
@@ -197,14 +219,13 @@ def _run():
             print(f"{TAG} secuencia {t}: aviso: {e}")
 
     s.close()
-    try:
-        cur.execute(
-            "INSERT INTO settings (key, value) VALUES ('migracion_sqlite', %s) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (huella,))
-    except Exception as e:
-        print(f"{TAG} no pude guardar la marca de migración: {e}")
+    _marca_migracion(cur, huella, tablas_fallidas)
     pg.close()
-    print(f"{TAG} MIGRACIÓN COMPLETA: {total} filas procesadas.")
+    if tablas_fallidas:
+        print(f"{TAG} MIGRACIÓN INCOMPLETA: {total} filas procesadas; "
+              f"fallaron {', '.join(tablas_fallidas)}.")
+    else:
+        print(f"{TAG} MIGRACIÓN COMPLETA: {total} filas procesadas.")
 
 
 def main():

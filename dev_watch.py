@@ -190,12 +190,21 @@ def revisar_devs() -> int:
     alerta previa. Devuelve cuántas alertas mandó."""
     conn = get_conn()
     try:
+        # (19-AO) Antes LIMIT 15 fijo por entry_ts DESC: con mas de 15
+        # abiertas (19 medidas el 05/09) las mas viejas NUNCA entraban en
+        # el respaldo. El tope es el de abiertas del paper (min. 15).
+        try:
+            from db import get_setting as _gs
+            _tope = max(15, int(float(_gs(conn, "paper_max_abiertas", "10") or 10)))
+        except (TypeError, ValueError) as e:
+            print(f"· dev_watch: paper_max_abiertas ilegible ({e}); uso 15")
+            _tope = 15
         rows = conn.execute(
             """SELECT id, symbol, mint, dev_wallet, entry_ts
                FROM paper_trades
                WHERE status='abierta' AND dev_wallet IS NOT NULL
                  AND COALESCE(dev_alerted, 0) = 0
-               ORDER BY entry_ts DESC LIMIT 15""").fetchall()
+               ORDER BY entry_ts DESC LIMIT ?""", (_tope,)).fetchall()
     finally:
         conn.close()
     avisadas = 0

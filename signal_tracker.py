@@ -685,7 +685,10 @@ def _check_streaks(conn):
             "SELECT chg_24h FROM signals WHERE wallet=? AND side='compra' "
             "AND chg_24h IS NOT NULL AND ts>=? ORDER BY ts DESC LIMIT ?",
             (w, desde, STREAK_N)).fetchall()
-        if len(ult) < STREAK_N or any(r["chg_24h"] > 0 for r in ult):
+        # (19-AO) Solo cuenta como roja una señal en NEGATIVO: un token
+        # sin operaciones en 24 h da chg_24h = 0.0 exacto y no es una
+        # perdida (el aviso dice "cerraron en negativo").
+        if len(ult) < STREAK_N or any(r["chg_24h"] >= 0 for r in ult):
             continue
         # RACHA ≠ RUINA (19/8): con el win rate tipico de memecoins
         # (~25%), CUALQUIER billetera rentable encadena 4 rojas un

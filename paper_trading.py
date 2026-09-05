@@ -695,6 +695,11 @@ def _mc_liq_salida(mint):
     try:
         from signal_tracker import _price_mc_ex
         _px, mc, _muerto, liq = _price_mc_ex(mint)
+        if _px is None and not _muerto:
+            # (19-AO) El sondeo no trajo nada (red/429/sin dato): la
+            # liquidez no se sabe. Antes se grababa exit_liq=0.0 — la
+            # mentira "no lo se = vale 0" que la 18-E quito de signals.
+            return None, None
         return mc, liq
     except Exception as e:
         print(f"· Paper: no pude leer MC/liquidez de salida de "

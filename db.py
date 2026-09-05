@@ -1120,8 +1120,10 @@ def apply_sell(conn, wallet: str, mint: str, sol: float, tokens: float,
         conn.execute(
             "INSERT OR IGNORE INTO positions (wallet, mint, first_ts) "
             "VALUES (?,?,?)", (wallet, mint, ts))
-    if tokens0 <= 0:
-        # No conocemos su compra: registramos la venta sin PnL fiable.
+    if tokens0 <= 0 or (tokens or 0) <= 0:
+        # No conocemos su compra — o (19-AO) no se pudo leer CUANTO vendio
+        # (tokens=0): antes eso contaba como "vendio el 0 %" y el ingreso
+        # entero pasaba a realized_sol como beneficio puro. Sin PnL fiable.
         conn.execute(
             "UPDATE positions SET sells=COALESCE(sells,0)+1, last_ts=? "
             "WHERE wallet=? AND mint=?", (ts, wallet, mint))

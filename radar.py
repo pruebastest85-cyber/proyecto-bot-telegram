@@ -258,6 +258,23 @@ def _semaforo(t: dict) -> tuple[bool, str]:
     return aprueba, linea
 
 
+def _liberar_colgadas(conn) -> int:
+    """(19-AO) Reservas 'examinando' colgadas: si una pasada revento a
+    mitad (candado de SQLite, fallo distinto de los previstos), la fila
+    quedaba en 'examinando' 14 dias, el INSERT OR IGNORE no la dejaba
+    re-examinar y /radar la enseñaba "en curso". Medido el 05/09: 3
+    tokens asi desde el 21/08. Una pasada dura minutos; a la hora, la
+    reserva se libera (si el token sigue fresco, vuelve a la cola)."""
+    _sueltas = conn.execute(
+        "DELETE FROM radar_tokens WHERE resultado='examinando' AND ts < ?",
+        (int(time.time()) - 3600,)).rowcount or 0
+    if _sueltas:
+        conn.commit()
+        print(f"· Radar: {_sueltas} reserva(s) 'examinando' colgada(s) "
+              f"liberada(s)")
+    return _sueltas
+
+
 def escanear() -> int:
     """Una pasada del radar. Devuelve cuántos HALLAZGOS hubo (tokens
     nuevos con billeteras conocidas dentro), se hayan avisado o no: en
@@ -279,6 +296,15 @@ def escanear() -> int:
         print(f"· Radar: new_pools falló ({e})")
         return 0
     if not candidatos:
+        # (19-AO) Aun sin candidatos se liberan las reservas colgadas.
+        try:
+            _c0 = get_conn()
+            try:
+                _liberar_colgadas(_c0)
+            finally:
+                _c0.close()
+        except Exception as e:
+            print(f"· Radar: no pude liberar reservas colgadas ({e})")
         return 0
 
     conn = get_conn()
@@ -295,6 +321,7 @@ def escanear() -> int:
         # Poda de registros viejos (14 días): la tabla no crece sin tope.
         conn.execute("DELETE FROM radar_tokens WHERE ts < ?",
                      (int(time.time()) - 14 * 86400,))
+        _liberar_colgadas(conn)
         conn.commit()
         examinados = 0
         for c in candidatos:
