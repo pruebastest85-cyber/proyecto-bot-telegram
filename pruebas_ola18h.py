@@ -14614,6 +14614,140 @@ def prueba_19au():
         _db.invalidar_copiables()
 
 
+def prueba_19av():
+    bloque("19-AV - una ⭐ que DESPIERTA alerta y se copia en su primera compra "
+           "(el conjunto operativo se recalcula contando esa compra)")
+    import contextlib
+    import io
+    import inspect as _insp
+    import json as _json
+    import time as _t
+    import requests
+    import config as _cfg
+    import db as _db
+    from db import get_conn, set_setting
+    import realtime as rt
+    import token_check as tc
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    _db.invalidar_copiables()
+    reciente = ahora - 600
+
+    def star(addr, ws, pnl, ult=None):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, is_bot, confirmada, "
+                     "wallet_score, pnl_total, score, winning_tokens_count) VALUES (?,?,1,0,1,?,?,0,1)",
+                     (addr, addr[:6], ws, pnl))
+        if ult:
+            conn.execute("INSERT INTO positions (wallet, mint, tokens, last_ts) VALUES (?,?,0,?)",
+                         (addr, "M" + addr, ult))
+    ACT = "AV_ACTIVA" + "a" * 35
+    DESP = "AV_DESPIERTA" + "w" * 32     # mejor perfil, pero SIN actividad previa
+    PERD = "AV_PERDEDORA" + "p" * 32     # activa, pnl<0: fuera por PUESTO
+    star(ACT, 80, 10.0, ult=reciente)
+    star(DESP, 95, 20.0)
+    star(PERD, 60, -3.0, ult=reciente)
+    set_setting(conn, "top_alertas", "2")
+    for k, v in (("paper_max_sol", "1"), ("min_signal_score", "0"), ("umbral_manual", "1"),
+                 ("ia_local_activa", "0"), ("consenso_copia_n", "0"), ("paper_rapido", "1")):
+        set_setting(conn, k, v)
+    conn.commit()
+    op0 = _db.top_addresses(conn, 2)
+    comprobar("montaje: la que despierta NO esta en el conjunto operativo antes de comprar "
+              "(dormida), aunque por perfil sea la #1 de /top",
+              DESP not in op0 and ACT in op0
+              and _db.top_wallets(conn, 5)[0]["address"] == ACT, (sorted(op0),))
+    conn.close()
+
+    class _R:
+        def __init__(self, st_, data):
+            self.status_code, self._d, self.ok = st_, data, 200 <= st_ < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            mint = url.rsplit("/", 1)[-1]
+            sym = "SOL" if mint.startswith("So1111") else "TOK"
+            px = "200.0" if sym == "SOL" else "0.001"
+            return _R(200, {"pairs": [{"priceUsd": px, "baseToken": {"address": mint, "symbol": sym},
+                                      "liquidity": {"usd": 50000.0}, "marketCap": 1_000_000.0,
+                                      "pairAddress": "PAIR", "chainId": "solana",
+                                      "txns": {"m5": {"buys": 1, "sells": 1}},
+                                      "volume": {"h24": 1000}, "priceChange": {"h1": 0, "h24": 0}}]})
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+
+    def _post(url, *a, **kw):
+        return _R(200, {"ok": True, "result": None})
+
+    def _tx(wallet, mint, sol, tokens, ts, sig):
+        tt = {"mint": mint, "toUserAccount": wallet, "fromUserAccount": None, "tokenAmount": tokens}
+        return {"signature": sig, "timestamp": ts, "feePayer": wallet, "transactionError": None,
+                "tokenTransfers": [tt], "nativeTransfers": [],
+                "accountData": [{"account": wallet, "nativeBalanceChange": -int(sol * 1e9)}]}
+
+    _g0, _p0 = requests.get, requests.post
+    _d0, _h0 = _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY
+    requests.get, requests.post = _get, _post
+    _cfg.DEXSCREENER_DELAY = 0.0
+    _cfg.HELIUS_DELAY = 0.0
+    rt.invalidar_vigiladas()
+    tc._dex_cache.clear()
+    try:
+        # la cache del conjunto operativo esta CALIENTE y sin la que despierta
+        _db.invalidar_copiables()
+        conn = get_conn()
+        _db.top_addresses(conn, 2)
+        conn.close()
+        M = "MINTAV1" + "y" * 37
+        salida = io.StringIO()
+        with contextlib.redirect_stdout(salida):
+            rt.process_transactions([_tx(DESP, M, 1.0, 1_000_000, ahora - 30, "AV_BUY_DESP")])
+        conn = get_conn()
+        fila = conn.execute("SELECT alert_intento, paper_motivo FROM signals WHERE signature='AV_BUY_DESP'").fetchone()
+        n = conn.execute("SELECT COUNT(*) c FROM paper_trades WHERE mint=? AND wallet=?", (M, DESP)).fetchone()["c"]
+        comprobar("la ⭐ que despierta ALERTA y SE COPIA en su primera compra (antes: muda, "
+                  "'registrada sin alertar')",
+                  fila is not None and (fila["alert_intento"] or 0) == 1 and n == 1
+                  and fila["paper_motivo"] is None, (dict(fila) if fila else None, n))
+        comprobar("y lo dice por consola", "despierta con esta compra" in salida.getvalue())
+        # control: la excluida por PUESTO (pnl<0) sigue fuera aunque compre
+        M2 = "MINTAV2" + "y" * 37
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(PERD, M2, 1.0, 1_000_000, ahora - 20, "AV_BUY_PERD")])
+        fila2 = conn.execute("SELECT alert_intento, paper_motivo FROM signals WHERE signature='AV_BUY_PERD'").fetchone()
+        n2 = conn.execute("SELECT COUNT(*) c FROM paper_trades WHERE mint=?", (M2,)).fetchone()["c"]
+        comprobar("control: la ⭐ fuera por PUESTO sigue sin alertar ni copiarse, con su motivo",
+                  fila2 is not None and not (fila2["alert_intento"] or 0) and n2 == 0
+                  and fila2["paper_motivo"] and fila2["paper_motivo"].startswith("la ⭐ iba #"),
+                  (dict(fila2) if fila2 else None, n2))
+        _src = _insp.getsource(rt._proc)
+        comprobar("el recalculo va DESPUES de apply_buy y ANTES del camino caliente, solo "
+                  "para compras de ⭐ fuera del conjunto",
+                  _src.find("apply_buy(conn") < _src.find("_inv_cop()") < _src.find("CAMINO CALIENTE")
+                  and 'and trade["wallet"] not in top' in _src)
+        conn.close()
+    finally:
+        requests.get, requests.post = _g0, _p0
+        _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY = _d0, _h0
+        rt.invalidar_vigiladas()
+        tc._dex_cache.clear()
+        conn = get_conn()
+        for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+        conn.close()
+        _db.invalidar_copiables()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14687,6 +14821,7 @@ def main():
     prueba_19as()
     prueba_19at()
     prueba_19au()
+    prueba_19av()
 
     print("\n" + "─" * 60)
     if _FALLOS:

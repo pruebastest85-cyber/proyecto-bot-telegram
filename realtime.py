@@ -922,6 +922,28 @@ def _proc(txs: list[dict], conn):
                                  trade["sol"], tokens_tx, trade["ts"])
         es_acum = bool(es_compra and pos.get("is_accumulation"))
 
+        # ── (19-AV, 06/09) DESPERTAR ─────────────────────────────────
+        # El conjunto operativo excluye a las ⭐ "dormidas" (sin
+        # actividad en positions en 48 h / 7 d) y se calculo ANTES de
+        # apply_buy, con cache de 60 s. Una ⭐ que despierta tras dos dias
+        # quedaba muda justo en su PRIMERA compra —que es la actividad
+        # que la despierta— y en las de los 60 s siguientes. Medido en la
+        # base el 06/09: 23 de 52 compras de ⭐ confirmadas sin alerta en
+        # 7 dias eran exactamente eso. Si una ⭐ compra y no esta en el
+        # conjunto, se recalcula UNA vez contando esta compra (positions
+        # ya la tiene). Si la excluye el puesto o la prueba, sigue fuera.
+        if (es_compra and trade["wallet"] in stars and top is not None
+                and trade["wallet"] not in top):
+            try:
+                from db import invalidar_copiables as _inv_cop
+                _inv_cop()
+                top = top_addresses(conn)
+                if _en_top(top, trade["wallet"]):
+                    print(f"⏰ ⭐ {trade['wallet'][:8]}… despierta con esta "
+                          f"compra: vuelve al conjunto operativo")
+            except Exception as _ex:
+                _avisar_ex("realtime:_proc:despertar", _ex)
+
         # ── CAMINO CALIENTE (copy trading rápido) ────────────────────
         # Si la operacion es de una ⭐ del top, el paper actua YA con una
         # sola consulta ligera de precio (~0,5 s). El analisis completo
