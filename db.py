@@ -737,6 +737,10 @@ def _preparar_pg(pg):
             # liquidez de salida.
             ("paper_trades", "exit_mc", "DOUBLE PRECISION"),
             ("paper_trades", "exit_liq", "DOUBLE PRECISION"),
+            # (19-AT) Puesto del top de la ⭐ al abrir la copia: el top se
+            # reordena a diario y no se puede reconstruir hacia atras; sin
+            # esto no se puede comparar "top 10 vs 30 vs 50".
+            ("paper_trades", "top_pos", "INTEGER"),
             # (Ola 18-E) Rendimiento ya realizado por los trozos, en
             # FRACCION del importe invertido, no en dolares. Existe porque
             # el PnL de una venta parcial no depende de saber el cambio
@@ -943,7 +947,8 @@ def _preparar_sqlite(conn):
                      ("ia_entrada", "TEXT"), ("ia_entrada_razon", "TEXT"),
                      ("origen", "TEXT"), ("ultima_venta_sig", "TEXT"),
                      ("dev_wallet", "TEXT"), ("dev_alerted", "INTEGER"),
-                     ("muerto_desde", "INTEGER")]:
+                     ("muerto_desde", "INTEGER"),
+                     ("top_pos", "INTEGER")]:                 # (19-AT)
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

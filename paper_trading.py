@@ -100,6 +100,11 @@ from ejecucion_simulada import FEE_SOL_DEFECTO
 # solo cubre unos milisegundos.
 import threading as _threading_ap
 _APERTURA_LOCK = _threading_ap.Lock()
+# (19-AT) Hasta que puesto del top se anota en cada copia. 200 cubre de
+# sobra el mayor tope de /top (50); mas alla queda NULL = "sin puesto".
+TOP_POS_TOPE = 200
+# Bandas del desglose "por puesto" de /paper (limite superior incluido).
+TOP_POS_BANDAS = ((1, 10), (11, 30), (31, 50))
 
 
 def _enabled(conn) -> bool:
@@ -376,6 +381,18 @@ def open_trade(conn, trade: dict, token: dict, score,
     except Exception as _ex:
         _avisar_ex("paper_trading:open_trade:341", _ex)
         pass
+    # (19-AT) Puesto del top de la ⭐ en ESTE momento, guardado en la fila.
+    # Antes solo se calculaba (tope 30) para la tarjeta y se perdia; el
+    # top se reordena a diario (copiabilidad, actividad) y el puesto no
+    # se puede reconstruir después. Es lo que permite responder "¿rinde
+    # copiar al top 10, al 30 o al 50?" (decisión del dueño, 05/09). En
+    # una copia por consenso la fila es de la LÍDER: su puesto.
+    top_pos = None
+    try:
+        from wallet_ident import posicion
+        top_pos = posicion(conn, trade["wallet"], TOP_POS_TOPE)
+    except Exception as _ex:
+        _avisar_ex("paper_trading:open_trade:top_pos", _ex)
     # (19-D) El INSERT puede chocar ahora con el índice ÚNICO PARCIAL
     # `idx_paper_abierta_unica` (una fila abierta por mint). Ese choque
     # NO es un error: significa que otro hilo abrió la posición mientras
@@ -408,13 +425,13 @@ def open_trade(conn, trade: dict, token: dict, score,
                    (signature, wallet, mint, symbol, stake_sol, stake_usd,
                     entry_price, entry_ts, signal_score, status,
                     tokens_raw, slippage_entrada_pct, costos_usd, demora_s,
-                    gestion, origen)
-                   VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?)""",
+                    gestion, origen, top_pos)
+                   VALUES (?,?,?,?,?,?,?,?,?, 'abierta', ?,?,?,?,?,?,?)""",
                 (trade["signature"], trade["wallet"], trade["mint"], sym,
                  stake, stake_usd, price, trade["ts"], score,
                  str(cot["tokens_raw"]) if cot else None,
                  cot.get("slippage_pct") if cot else None,
-                 costo_entrada, round(demora, 2), gestion, origen))
+                 costo_entrada, round(demora, 2), gestion, origen, top_pos))
             conn.commit()
     except Exception as e:
         _nombre = type(e).__name__
@@ -457,13 +474,7 @@ def open_trade(conn, trade: dict, token: dict, score,
                            (trade["wallet"],)).fetchone()
         _nom = (_rw["alias"] if _rw and _rw["alias"]
                 else trade["wallet"][:8] + "…")
-        _pos = None
-        try:
-            from wallet_ident import posicion
-            _pos = posicion(conn, trade["wallet"], 30)
-        except Exception as _ex:
-            _avisar_ex("paper_trading:open_trade:427", _ex)
-            pass
+        _pos = top_pos          # (19-AT) el mismo que quedó en la fila
         linea_star = (f"\n⭐ Copiando a *{_md(_nom)}*"
                       + (f" (#{_pos} del top)" if _pos else "")
                       + (f" · compró {float(trade.get('sol') or 0):.2f} SOL"
@@ -2330,6 +2341,52 @@ def bloque_ventana(conn, horas: float = VENTANA_H) -> list:
     return out
 
 
+def bloque_por_puesto(conn, desde: float = 0) -> list:
+    """(19-AT) Trozos "1-10: 12 ops +$40.1 (wr 58%)" por banda de puesto
+    del top al abrir (TOP_POS_BANDAS), más ">50" y "sin puesto" si hay.
+    Solo cerradas desde `desde`; neto = SUM(pnl_usd_neto) sobre las filas
+    que lo tienen. Lista vacía si ninguna copia cerrada tiene top_pos."""
+    filas = conn.execute(
+        "SELECT top_pos, pnl_usd_neto FROM paper_trades "
+        "WHERE status<>'abierta' AND COALESCE(exit_ts, 0) >= ? "
+        "AND top_pos IS NOT NULL", (desde,)).fetchall()
+    if not filas:
+        return []
+    ultimo = TOP_POS_BANDAS[-1][1]
+    grupos = {}
+    for r in filas:
+        if r["top_pos"] is None:      # defensa: la consulta ya los excluye
+            continue
+        pos = int(r["top_pos"])
+        etiqueta = f">{ultimo}"
+        for lo, hi in TOP_POS_BANDAS:
+            if lo <= pos <= hi:
+                etiqueta = f"{lo}-{hi}"
+                break
+        g = grupos.setdefault(etiqueta, {"n": 0, "neto": 0.0, "n_neto": 0,
+                                         "wins": 0})
+        g["n"] += 1
+        if r["pnl_usd_neto"] is not None:
+            g["n_neto"] += 1
+            g["neto"] += float(r["pnl_usd_neto"])
+            if r["pnl_usd_neto"] > 0:
+                g["wins"] += 1
+    orden = [f"{lo}-{hi}" for lo, hi in TOP_POS_BANDAS] + [f">{ultimo}"]
+    out = []
+    for et in orden:
+        g = grupos.get(et)
+        if not g:
+            continue
+        if g["n_neto"]:
+            wr = f"wr {100 * g['wins'] / g['n_neto']:.0f}%"
+            if g["n_neto"] < g["n"]:
+                wr += f" de {g['n_neto']}"
+            out.append(f"{et}: {g['n']} ops {_usd_firmado(g['neto'])} ({wr})")
+        else:
+            out.append(f"{et}: {g['n']} ops s/d")
+    return out
+
+
 def resumen_text() -> str:
     conn = get_conn()
     tp = _f(conn, "paper_tp_pct", 100.0)
@@ -2463,6 +2520,14 @@ def resumen_text() -> str:
     except Exception as e:
         print(f"· Resumen origen falló: {e}")
         org = []
+    # (19-AT) ¿Rinde copiar al top 10, al 30 o al 50? Por puesto de la ⭐
+    # AL ABRIR (paper_trades.top_pos). NETO real (pnl_usd_neto), que es
+    # lo que decide si se pone dinero; wr sobre las filas con neto.
+    try:
+        puesto = bloque_por_puesto(conn, desde)
+    except Exception as e:
+        print(f"· Resumen por puesto falló: {e}")
+        puesto = []
     conn.close()
 
     # (19-S) Un TP o SL en 999999 no es un tope: está APAGADO. Escribirlo
@@ -2586,6 +2651,8 @@ def resumen_text() -> str:
                     out.append("🤝 Origen · " + "  vs  ".join(trozos_o))
         except Exception as e:
             print(f"· Resumen origen (formato) falló: {e}")
+        if puesto:
+            out.append("🏅 Por puesto del top (neto) · " + "  ·  ".join(puesto))
         if filtro:
             fmap = {r["ia_entrada"]: r for r in filtro}
             rech = fmap.get("rechazar")

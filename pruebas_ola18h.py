@@ -14332,6 +14332,121 @@ def prueba_19as():
     conn.close()
 
 
+def prueba_19at():
+    bloque("19-AT - cada copia guarda el PUESTO del top de la ⭐ al abrir "
+           "(top_pos) y /paper desglosa el neto por banda 1-10 / 11-30 / 31-50")
+    import contextlib
+    import io
+    import inspect as _insp
+    import time as _t
+    from db import get_conn, set_setting
+    import db as _db
+    import paper_trading as pt
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+
+    # ── 0) migracion en las DOS listas ────────────────────────────────
+    _src_db = _insp.getsource(_db)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(paper_trades)")]
+    comprobar("paper_trades.top_pos esta en las dos listas de migracion y en la base",
+              _src_db.count('"top_pos"') >= 2 and "top_pos" in cols)
+    _src_ot = _insp.getsource(pt.open_trade)
+    comprobar("open_trade calcula el puesto UNA vez (tope TOP_POS_TOPE, no 30) "
+              "y la tarjeta usa ese mismo valor",
+              'posicion(conn, trade["wallet"], 30)' not in _src_ot
+              and 'posicion(conn, trade["wallet"], TOP_POS_TOPE)' in _src_ot
+              and "_pos = top_pos" in _src_ot and pt.TOP_POS_TOPE >= 50)
+
+    # ── 1) el puesto queda en la fila ─────────────────────────────────
+    for k, v in (("paper_max_sol", "1"), ("paper_reentrada_h", "6"),
+                 ("paper_max_abiertas", "50"), ("paper_enabled", "1"),
+                 ("paper_liq_desconocida", "1")):
+        set_setting(conn, k, v)
+    for addr, ws in (("AT_UNO", 90.0), ("AT_DOS", 80.0), ("AT_TRES", 70.0)):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, confirmada, wallet_score, "
+                     "pnl_total, is_bot, score, winning_tokens_count) VALUES (?,?,1,1,?,5.0,0,1.0,1)",
+                     (addr, addr, ws))
+        conn.execute("INSERT INTO positions (wallet, mint, last_ts) VALUES (?,?,?)",
+                     (addr, "M" + addr, ahora))
+    conn.commit()
+    import wallet_ident as wi
+    comprobar("fixture: AT_DOS es la #2 del top", wi.posicion(conn, "AT_DOS", 10) == 2)
+    M = "MINTAT" + "y" * 38
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok = pt.open_trade(conn, {"signature": "AT_S1", "wallet": "AT_DOS", "mint": M,
+                                  "sol": 1.0, "ts": ahora - 5},
+                           {"price": 0.002, "liq": 50000.0, "symbol": "S"}, None)
+    fila = conn.execute("SELECT top_pos, status FROM paper_trades WHERE signature='AT_S1'").fetchone()
+    comprobar("la copia de la #2 se abre con top_pos = 2",
+              ok is True and fila and fila["top_pos"] == 2 and fila["status"] == "abierta",
+              dict(fila) if fila else ok)
+    M2 = "MINTAT2" + "y" * 37
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok2 = pt.open_trade(conn, {"signature": "AT_S2", "wallet": "AT_NADIE", "mint": M2,
+                                   "sol": 1.0, "ts": ahora - 5},
+                            {"price": 0.002, "liq": 50000.0, "symbol": "S"}, None)
+    fila2 = conn.execute("SELECT top_pos FROM paper_trades WHERE signature='AT_S2'").fetchone()
+    comprobar("una billetera que no esta en el top abre con top_pos NULL (sin puesto), "
+              "no revienta",
+              ok2 is True and fila2 and fila2["top_pos"] is None, dict(fila2) if fila2 else ok2)
+
+    # ── 2) bloque_por_puesto ──────────────────────────────────────────
+    conn.execute("DELETE FROM paper_trades")
+    def cerrada(sig, pos, neto, exit_ts=None):
+        conn.execute("INSERT INTO paper_trades (signature, wallet, mint, symbol, stake_sol, "
+                     "stake_usd, entry_price, entry_ts, exit_ts, status, top_pos, pnl_usd_neto) "
+                     "VALUES (?,?,?,?,1.0,100.0,0.001,?,?,'cerrada',?,?)",
+                     (sig, "W", "M" + sig, "S", ahora - 7200, exit_ts or ahora - 3600, pos, neto))
+    cerrada("C1", 3, 10.0)
+    cerrada("C2", 7, -4.0)
+    cerrada("C3", 10, 0.0)                 # limite superior INCLUIDO en 1-10; 0 no es win
+    cerrada("C4", 11, 20.0)                # limite inferior de 11-30
+    cerrada("C5", 30, -1.0)
+    cerrada("C6", 40, None)                # sin neto: cuenta la op, no el wr
+    cerrada("C7", 120, 5.0)                # > 50
+    cerrada("C8", None, 99.0)              # sin puesto: fuera del desglose
+    cerrada("C9", 2, 500.0, ahora - 10 * 86400)   # antes de `desde`: fuera
+    conn.commit()
+    trozos = pt.bloque_por_puesto(conn, ahora - 86400)
+    comprobar("bandas: 1-10 → 3 ops +$6 wr 33 % · 11-30 → 2 ops +$19 wr 50 % · "
+              "31-50 → 1 op s/d · >50 → 1 op +$5 wr 100 %; sin puesto y anteriores "
+              "a `desde` fuera",
+              trozos == ["1-10: 3 ops +$6.00 (wr 33%)",
+                         "11-30: 2 ops +$19.00 (wr 50%)",
+                         "31-50: 1 ops s/d",
+                         ">50: 1 ops +$5.00 (wr 100%)"], trozos)
+    cerrada("C10", 40, -2.0)
+    conn.commit()
+    trozos2 = pt.bloque_por_puesto(conn, ahora - 86400)
+    comprobar("una banda con neto en parte de sus ops dice 'de N'",
+              "31-50: 2 ops -$2.00 (wr 0% de 1)" in trozos2, trozos2)
+    conn.execute("DELETE FROM paper_trades WHERE top_pos IS NOT NULL")
+    conn.commit()
+    comprobar("sin ninguna cerrada con puesto: lista vacia (la linea no sale)",
+              pt.bloque_por_puesto(conn, 0) == [])
+
+    # ── 3) /paper la enseña, antes del conn.close() ──────────────────
+    cerrada("C11", 5, 12.0)
+    conn.commit()
+    set_setting(conn, "paper_desde_ts", "0")
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt = pt.resumen_text()
+    comprobar("/paper lleva la linea '🏅 Por puesto del top (neto)' con la banda",
+              "🏅 Por puesto del top (neto) · 1-10: 1 ops +$12.00 (wr 100%)" in txt, txt[-600:])
+    _src_rt = _insp.getsource(pt.resumen_text)
+    comprobar("la consulta corre ANTES del conn.close() (leccion del bloque origen)",
+              0 <= _src_rt.find("bloque_por_puesto(conn") < _src_rt.find("\n    conn.close()"))
+
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14403,6 +14518,7 @@ def main():
     prueba_19aq()
     prueba_19ar()
     prueba_19as()
+    prueba_19at()
 
     print("\n" + "─" * 60)
     if _FALLOS:
