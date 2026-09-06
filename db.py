@@ -807,7 +807,11 @@ def _preparar_pg(pg):
             ("signals", "alert_intento", "INTEGER DEFAULT 0"),
             # (19-AS) Por que NO se copio una compra alertada (freno del
             # paper). La tarjeta xN lo enseña en vez de "no se copio".
-            ("signals", "paper_motivo", "TEXT")]:
+            ("signals", "paper_motivo", "TEXT"),
+            # (19-AW) De donde salio price_usd: 'dex' (DexScreener) o 'tx'
+            # (SOL gastados / tokens recibidos de la propia operacion,
+            # cuando DexScreener aun no cotizaba el token). NULL = legado.
+            ("signals", "price_origen", "TEXT")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -919,7 +923,8 @@ def _preparar_sqlite(conn):
                      # falta. Los topes cuentan ahora los INTENTOS y
                      # `alerted` se queda para "llego de verdad".
                      ("alert_intento", "INTEGER DEFAULT 0"),
-                     ("paper_motivo", "TEXT")]:          # (19-AS)
+                     ("paper_motivo", "TEXT"),           # (19-AS)
+                     ("price_origen", "TEXT")]:          # (19-AW)
         try:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:

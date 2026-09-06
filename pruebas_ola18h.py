@@ -14748,6 +14748,159 @@ def prueba_19av():
         _db.invalidar_copiables()
 
 
+def prueba_19aw():
+    bloque("19-AW - sin precio en DexScreener, el precio base sale de la propia "
+           "operacion (SOL / tokens) y la señal SI se puede medir")
+    import contextlib
+    import io
+    import inspect as _insp
+    import json as _json
+    import time as _t
+    import requests
+    import config as _cfg
+    import db as _db
+    from db import get_conn, set_setting
+    import realtime as rt
+    import token_check as tc
+    import unrealized_pnl as up
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    _src_db = _insp.getsource(_db)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(signals)")]
+    comprobar("signals.price_origen esta en las dos listas de migracion y en la base",
+              _src_db.count('"price_origen"') >= 2 and "price_origen" in cols)
+
+    # ── 1) la formula, con SOL/USD fijado ─────────────────────────────
+    _c0 = dict(up._SOL_CACHE)
+    up._SOL_CACHE["px"], up._SOL_CACHE["ts"] = 100.0, _t.time()
+    try:
+        comprobar("compra: 2 SOL x 100 $/SOL / 1.000.000 tokens = 0,0002 $",
+                  abs(rt._precio_desde_tx({"sol": 2.0, "tokens": 1_000_000}) - 0.0002) < 1e-12)
+        comprobar("sin tokens (0) o sin SOL: None, sin reventar",
+                  rt._precio_desde_tx({"sol": 2.0, "tokens": 0}) is None
+                  and rt._precio_desde_tx({"sol": 0, "tokens": 5}) is None
+                  and rt._precio_desde_tx({}) is None)
+        up._SOL_CACHE["px"] = None
+        up._SOL_CACHE["reintento"] = _t.time()     # respaldo caducado y sin red: None
+        _ts0 = up._SOL_CACHE["ts"]; up._SOL_CACHE["ts"] = 0
+        _g_ = requests.get
+        requests.get = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sin red"))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                sin = rt._precio_desde_tx({"sol": 2.0, "tokens": 10})
+        finally:
+            requests.get = _g_
+            up._SOL_CACHE["ts"] = _ts0
+        comprobar("sin SOL/USD disponible: None (no se inventa un precio)", sin is None, sin)
+    finally:
+        up._SOL_CACHE.clear(); up._SOL_CACHE.update(_c0)
+
+    # ── 2) punta a punta ──────────────────────────────────────────────
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    _db.invalidar_copiables()
+    W = "AW_STAR" + "s" * 37
+    conn.execute("INSERT INTO wallets (address, alias, is_tracked, is_bot, confirmada, wallet_score, "
+                 "pnl_total, score, winning_tokens_count) VALUES (?,?,1,0,1,90,10,0,1)", (W, "AW"))
+    conn.execute("INSERT INTO positions (wallet, mint, tokens, last_ts) VALUES (?,?,0,?)", (W, "MAW", ahora - 60))
+    for k, v in (("top_alertas", "5"), ("paper_max_sol", "1"), ("min_signal_score", "0"),
+                 ("umbral_manual", "1"), ("ia_local_activa", "0"), ("consenso_copia_n", "0")):
+        set_setting(conn, k, v)
+    conn.commit()
+    conn.close()
+
+    class _R:
+        def __init__(self, st_, data):
+            self.status_code, self._d, self.ok = st_, data, 200 <= st_ < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    NUEVO = "MINTAWNUEVO" + "n" * 33      # DexScreener: sin pares (acaba de nacer)
+    VIEJO = "MINTAWVIEJO" + "v" * 33      # DexScreener: cotiza
+
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            mint = url.rsplit("/", 1)[-1]
+            if mint.startswith("So1111"):
+                return _R(200, {"pairs": [{"priceUsd": "200.0", "baseToken": {"address": mint, "symbol": "SOL"},
+                                          "liquidity": {"usd": 1e9}}]})
+            if NUEVO in url:
+                return _R(200, {"pairs": []})
+            return _R(200, {"pairs": [{"priceUsd": "0.001", "baseToken": {"address": mint, "symbol": "TOK"},
+                                      "liquidity": {"usd": 50000.0}, "marketCap": 1_000_000.0,
+                                      "pairAddress": "PAIR", "chainId": "solana",
+                                      "txns": {"m5": {"buys": 1, "sells": 1}},
+                                      "volume": {"h24": 1000}, "priceChange": {"h1": 0, "h24": 0}}]})
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+
+    def _post(url, *a, **kw):
+        return _R(200, {"ok": True, "result": None})
+
+    def _tx(wallet, mint, side, sol, tokens, ts, sig):
+        if side == "compra":
+            tt = {"mint": mint, "toUserAccount": wallet, "fromUserAccount": None, "tokenAmount": tokens}
+            delta = -int(sol * 1e9)
+        else:
+            tt = {"mint": mint, "fromUserAccount": wallet, "toUserAccount": None, "tokenAmount": tokens}
+            delta = int(sol * 1e9)
+        return {"signature": sig, "timestamp": ts, "feePayer": wallet, "transactionError": None,
+                "tokenTransfers": [tt], "nativeTransfers": [],
+                "accountData": [{"account": wallet, "nativeBalanceChange": delta}]}
+
+    _g0, _p0 = requests.get, requests.post
+    _d0, _h0 = _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY
+    requests.get, requests.post = _get, _post
+    _cfg.DEXSCREENER_DELAY = 0.0
+    _cfg.HELIUS_DELAY = 0.0
+    rt.invalidar_vigiladas()
+    _db.invalidar_copiables()
+    tc._dex_cache.clear()
+    _c1 = dict(up._SOL_CACHE)
+    up._SOL_CACHE["px"], up._SOL_CACHE["ts"] = 200.0, _t.time()
+    try:
+        salida = io.StringIO()
+        with contextlib.redirect_stdout(salida):
+            rt.process_transactions([_tx(W, NUEVO, "compra", 2.0, 4_000_000, ahora - 30, "AW_BUY_NUEVO")])
+            rt.process_transactions([_tx(W, VIEJO, "compra", 1.0, 1_000_000, ahora - 20, "AW_BUY_VIEJO")])
+            rt.process_transactions([_tx(W, NUEVO, "venta", 1.0, 4_000_000, ahora - 10, "AW_SELL_NUEVO")])
+        conn = get_conn()
+        n = conn.execute("SELECT price_usd, price_origen, price_lag_s FROM signals WHERE signature='AW_BUY_NUEVO'").fetchone()
+        comprobar("token que DexScreener no lista: price_usd = 2 SOL x 200 / 4M = 0,0001 $, origen 'tx', lag 0",
+                  n and n["price_usd"] is not None and abs(n["price_usd"] - 0.0001) < 1e-12
+                  and n["price_origen"] == "tx" and n["price_lag_s"] == 0, dict(n) if n else n)
+        comprobar("…y queda dicho por consola", "precio de la propia operación" in salida.getvalue())
+        v = conn.execute("SELECT price_usd, price_origen, price_lag_s FROM signals WHERE signature='AW_BUY_VIEJO'").fetchone()
+        comprobar("token que cotiza: precio de DexScreener y origen 'dex'",
+                  v and abs(v["price_usd"] - 0.001) < 1e-12 and v["price_origen"] == "dex", dict(v) if v else v)
+        vn = conn.execute("SELECT price_usd, price_origen FROM signals WHERE signature='AW_SELL_NUEVO'").fetchone()
+        comprobar("la VENTA del token sin cotizar tambien lleva su precio (1 SOL x 200 / 4M = 0,00005 $)",
+                  vn and vn["price_usd"] is not None and abs(vn["price_usd"] - 0.00005) < 1e-12
+                  and vn["price_origen"] == "tx", dict(vn) if vn else vn)
+        # el medidor puede tomarla: entra en el conjunto de pendientes (price_usd no nulo)
+        pend = conn.execute("SELECT COUNT(*) c FROM signals WHERE price_usd IS NOT NULL AND chg_24h IS NULL").fetchone()["c"]
+        comprobar("las tres señales quedan medibles (precio base no nulo, chg_24h pendiente)", pend == 3, pend)
+        conn.close()
+    finally:
+        up._SOL_CACHE.clear(); up._SOL_CACHE.update(_c1)
+        requests.get, requests.post = _g0, _p0
+        _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY = _d0, _h0
+        rt.invalidar_vigiladas()
+        tc._dex_cache.clear()
+        conn = get_conn()
+        for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+        conn.close()
+        _db.invalidar_copiables()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14822,6 +14975,7 @@ def main():
     prueba_19at()
     prueba_19au()
     prueba_19av()
+    prueba_19aw()
 
     print("\n" + "─" * 60)
     if _FALLOS:

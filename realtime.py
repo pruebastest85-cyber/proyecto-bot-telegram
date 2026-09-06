@@ -617,6 +617,37 @@ def _tok_amount(transfer: dict) -> float:
         return 0.0
 
 
+def _precio_desde_tx(trade: dict) -> float | None:
+    """(19-AW, 06/09) Precio de entrada en USD sacado de la PROPIA
+    operacion: SOL movidos x SOL/USD / tokens movidos. Para cuando
+    DexScreener aun no cotiza el token.
+
+    Medido en la base del dueño: de 41 compras de ⭐ alertadas sin precio
+    en 7 dias, 31 eran tokens de 0 s de vida (la ⭐ es la primera
+    compradora que el bot ve) y 13 se vendieron en <60 s; 1.117 de 1.177
+    señales silenciosas sin precio, igual. NO es DexScreener fallando:
+    es que el token acaba de nacer. Sin precio base esas señales no se
+    median NUNCA, y como las que sobreviven hasta cotizar si se miden, el
+    historial de las snipers salia inflado. Contraste con 75 compras que
+    tenian los dos datos: mediana precio_tx/precio_dex = 1,08 (el
+    slippage real de la ⭐), 67 de 75 dentro de ±30 %.
+    None si falta cualquier dato; nunca lanza."""
+    try:
+        sol = float(trade.get("sol") or 0)
+        tokens = float(trade.get("tokens") or 0)
+        if sol <= 0 or tokens <= 0:
+            return None
+        from unrealized_pnl import _sol_usd
+        su = _sol_usd()
+        if not su or su <= 0:
+            return None
+        px = sol * su / tokens
+        return px if px > 0 else None
+    except Exception as e:
+        print(f"· Precio desde la transacción falló ({e})")
+        return None
+
+
 def _tok_total(tx: dict, mint: str, wallet: str, direction: str) -> float:
     """Suma TODOS los transfers del mint para la wallet en la tx: las rutas
     partidas de Jupiter generan varios transfers del mismo mint y antes solo
@@ -891,16 +922,20 @@ def _proc(txs: list[dict], conn):
                     (trade["signature"],)).fetchone()
                 if _f and _f["price_usd"] is None:
                     _t2 = analyze_token(trade["mint"])
-                    if _t2.get("price"):
+                    _px2 = _t2.get("price")
+                    _org2 = "dex" if _px2 else "tx"
+                    if not _px2:
+                        _px2 = _precio_desde_tx(trade)      # (19-AW)
+                    if _px2:
                         conn.execute(
                             "UPDATE signals SET price_usd=?, symbol=?, "
-                            "mc=?, liq=? WHERE signature=?",
-                            (_t2.get("price"), _t2.get("symbol"),
-                             _t2.get("mc"), _t2.get("liq"),
+                            "mc=?, liq=?, price_origen=? WHERE signature=?",
+                            (_px2, _t2.get("symbol"),
+                             _t2.get("mc"), _t2.get("liq"), _org2,
                              trade["signature"]))
                         conn.commit()
                         print(f"· Señal {trade['signature'][:8]}… quedo a "
-                              "medias; datos completados")
+                              f"medias; datos completados ({_org2})")
             except Exception as _e:
                 print(f"· Re-enriquecimiento falló: {_e}")
             continue  # ya procesada, no re-alertar
@@ -1120,11 +1155,27 @@ def _proc(txs: list[dict], conn):
             _px = _px_caliente[0]
             _mcv = _px_caliente[1] if _px_caliente[1] is not None else _mcv
             _liqv = _px_caliente[2] if _px_caliente[2] is not None else _liqv
+        _px_tx = None if _px else _precio_desde_tx(trade)
         if _px:
             conn.execute(
-                "UPDATE signals SET price_usd=?, symbol=?, mc=?, liq=? "
-                "WHERE signature=?",
+                "UPDATE signals SET price_usd=?, symbol=?, mc=?, liq=?, "
+                "price_origen='dex' WHERE signature=?",
                 (_px, t.get("symbol"), _mcv, _liqv, trade["signature"]))
+        elif _px_tx:
+            # (19-AW) DexScreener aun no cotiza el token (acaba de nacer):
+            # el precio base es el de la propia operacion de la ⭐. Asi la
+            # señal SI se mide (y si el token muere sin cotizar nunca, el
+            # medidor la cierra a -100 % como a cualquier otra).
+            conn.execute(
+                "UPDATE signals SET price_usd=?, price_origen='tx', "
+                "price_lag_s=0, symbol=COALESCE(?, symbol), "
+                "mc=COALESCE(?, mc), liq=COALESCE(?, liq) "
+                "WHERE signature=? AND (price_usd IS NULL OR price_usd <= 0)",
+                (_px_tx, t.get("symbol"), _mcv, _liqv, trade["signature"]))
+            print(f"· Señal {trade['signature'][:8]}… sin precio en "
+                  f"DexScreener: precio de la propia operación "
+                  f"({trade['sol']:.3f} SOL / {trade.get('tokens') or 0:,.0f} "
+                  f"tokens = ${_px_tx:.3g})")
         else:
             # Sin precio: se guarda lo demas y se deja constancia para
             # que el re-enriquecimiento periodico lo reintente.
