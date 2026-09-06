@@ -14447,6 +14447,173 @@ def prueba_19at():
     conn.close()
 
 
+def prueba_19au():
+    bloque("19-AU - la compra de una ⭐ FUERA del top deja escrito por que "
+           "(puesto, dormida o en prueba): la tarjeta ya no dice 'sin motivo'")
+    import contextlib
+    import io
+    import inspect as _insp
+    import json as _json
+    import time as _t
+    import requests
+    import config as _cfg
+    import db as _db
+    from db import get_conn, set_setting
+    import paper_trading as pt
+    import realtime as rt
+    import token_check as tc
+
+    conn = get_conn()
+    ahora = int(_t.time())
+    for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+        conn.execute(f"DELETE FROM {t}")
+    _db.invalidar_copiables()
+    reciente, viejo = ahora - 600, ahora - 10 * 86400
+
+    def star(addr, ws, pnl, conf=1, ult=reciente, cn=None, cs=None):
+        conn.execute("INSERT INTO wallets (address, alias, is_tracked, is_bot, confirmada, "
+                     "wallet_score, pnl_total, score, winning_tokens_count, copi_n, copi_score, copi_media) "
+                     "VALUES (?,?,1,0,?,?,?,0,1,?,?,?)", (addr, addr[:6], conf, ws, pnl, cn, cs, cs))
+        if ult:
+            conn.execute("INSERT INTO positions (wallet, mint, tokens, last_ts) VALUES (?,?,0,?)",
+                         (addr, "M" + addr, ult))
+    for i in range(3):
+        star(f"AU_BUENA{i}" + "b" * 34, 90 - i, 10.0)          # puestos 1-3
+    star("AU_DORMIDA" + "d" * 34, 99, 10.0, ult=viejo)          # gana, 10 d dormida
+    star("AU_PERDEDORA" + "p" * 32, 60, -0.71)                  # el caso real (Nutria, 06/09)
+    star("AU_PRUEBA" + "q" * 35, 95, 60.0, conf=0)
+    set_setting(conn, "top_alertas", "2")
+    conn.commit()
+    puestos = {r["address"]: i for i, r in enumerate(_db.top_wallets(conn, 50), 1)}
+    P = "AU_PERDEDORA" + "p" * 32
+    comprobar("montaje: la de pnl_total −0,71 sin medir cae al fondo (puesto > 2)",
+              puestos.get(P, 0) > 2, puestos.get(P))
+
+    # ── 1) motivo_fuera_top, caso por caso ────────────────────────────
+    m = pt.motivo_fuera_top(conn, P)
+    comprobar("puesto N > tope: 'iba #N del top y solo se copia hasta el #2'",
+              m == f"la ⭐ iba #{puestos[P]} del top y solo se copia hasta el #2", m)
+    m = pt.motivo_fuera_top(conn, "AU_DORMIDA" + "d" * 34)
+    comprobar("dormida: lo dice con los dias sin operar",
+              m.startswith("la ⭐ contaba como dormida") and "10 d sin operar" in m, m)
+    m = pt.motivo_fuera_top(conn, "AU_PRUEBA" + "q" * 35)
+    comprobar("en prueba: lo dice", "en prueba" in m, m)
+    m = pt.motivo_fuera_top(conn, "AU_NADIE" + "n" * 36)
+    comprobar("desconocida: 'no está en la base'", "no está en la base" in m, m)
+    m = pt.motivo_fuera_top(conn, "AU_BUENA0" + "b" * 34)
+    comprobar("una que SI esta dentro (llamada defensiva): motivo generico, sin reventar",
+              m == "la ⭐ estaba fuera del top operativo", m)
+    m = pt.motivo_fuera_top(conn, "AU_BUENA1" + "b" * 34)
+    comprobar("la que ocupa JUSTO el ultimo puesto del tope (#2 de 2) esta dentro: generico",
+              puestos.get("AU_BUENA1" + "b" * 34) == 2
+              and m == "la ⭐ estaba fuera del top operativo", (puestos.get("AU_BUENA1" + "b" * 34), m))
+
+    # ── 2) de punta a punta: la compra real pasa por realtime ─────────
+    class _R:
+        def __init__(self, st_, data):
+            self.status_code, self._d, self.ok = st_, data, 200 <= st_ < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            mint = url.rsplit("/", 1)[-1]
+            sym = "SOL" if mint.startswith("So1111") else "TOK"
+            px = "200.0" if sym == "SOL" else "0.001"
+            return _R(200, {"pairs": [{"priceUsd": px, "baseToken": {"address": mint, "symbol": sym},
+                                      "liquidity": {"usd": 50000.0}, "marketCap": 1_000_000.0,
+                                      "pairAddress": "PAIR", "chainId": "solana",
+                                      "txns": {"m5": {"buys": 1, "sells": 1}},
+                                      "volume": {"h24": 1000}, "priceChange": {"h1": 0, "h24": 0}}]})
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+
+    def _post(url, *a, **kw):
+        return _R(200, {"ok": True, "result": None})
+
+    def _tx(wallet, mint, side, sol, tokens, ts, sig):
+        delta = -int(sol * 1e9)
+        tt = {"mint": mint, "toUserAccount": wallet, "fromUserAccount": None, "tokenAmount": tokens}
+        return {"signature": sig, "timestamp": ts, "feePayer": wallet, "transactionError": None,
+                "tokenTransfers": [tt], "nativeTransfers": [],
+                "accountData": [{"account": wallet, "nativeBalanceChange": delta}]}
+
+    for k, v in (("paper_max_sol", "1"), ("min_signal_score", "0"), ("umbral_manual", "1"),
+                 ("ia_local_activa", "0"), ("consenso_copia_n", "0")):
+        set_setting(conn, k, v)
+    conn.commit()
+    conn.close()
+    _g0, _p0 = requests.get, requests.post
+    _d0, _h0 = _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY
+    requests.get, requests.post = _get, _post
+    _cfg.DEXSCREENER_DELAY = 0.0
+    _cfg.HELIUS_DELAY = 0.0
+    rt.invalidar_vigiladas()
+    _db.invalidar_copiables()
+    tc._dex_cache.clear()
+    try:
+        M = "MINTAU1" + "y" * 37
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(P, M, "compra", 4.0, 1_000_000, ahora - 60, "AU_BUY_P")])
+        conn = get_conn()
+        fila = conn.execute("SELECT alerted, alert_intento, paper_motivo FROM signals "
+                            "WHERE signature='AU_BUY_P'").fetchone()
+        n_paper = conn.execute("SELECT COUNT(*) c FROM paper_trades WHERE mint=?", (M,)).fetchone()["c"]
+        comprobar("la compra de la ⭐ fuera del top se registra sin alertar ni copiar Y la señal "
+                  "lleva el motivo con su puesto",
+                  fila is not None and not fila["alerted"] and not (fila["alert_intento"] or 0)
+                  and n_paper == 0 and fila["paper_motivo"]
+                  and fila["paper_motivo"].startswith("la ⭐ iba #") and "hasta el #2" in fila["paper_motivo"],
+                  dict(fila) if fila else fila)
+        with contextlib.redirect_stdout(io.StringIO()):
+            linea = pt.linea_paper_tarjeta(conn, M, None)
+        comprobar("la tarjeta xN de ese token ya no dice 'sin motivo registrado'",
+                  "no se copió — la ⭐ iba #" in linea and "sin motivo" not in linea, linea)
+        # la ⭐ dentro del top sigue copiandose como siempre
+        M2 = "MINTAU2" + "y" * 37
+        B0 = "AU_BUENA0" + "b" * 34
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(B0, M2, "compra", 1.0, 1_000_000, ahora - 50, "AU_BUY_B0")])
+        fila2 = conn.execute("SELECT alert_intento, paper_motivo FROM signals WHERE signature='AU_BUY_B0'").fetchone()
+        n2 = conn.execute("SELECT COUNT(*) c FROM paper_trades WHERE mint=?", (M2,)).fetchone()["c"]
+        comprobar("la #1 del top alerta y se copia, y su señal NO lleva motivo de no-copia "
+                  "(el segundo pase por la misma firma ya no la mancha con 'acumulando')",
+                  fila2 is not None and (fila2["alert_intento"] or 0) == 1 and n2 == 1
+                  and fila2["paper_motivo"] is None, (dict(fila2) if fila2 else None, n2))
+        # una SEGUNDA compra real (otra firma) de la misma ⭐ en el mismo token:
+        # esa si es una no-copia y lleva su motivo
+        with contextlib.redirect_stdout(io.StringIO()):
+            rt.process_transactions([_tx(B0, M2, "compra", 1.0, 1_000_000, ahora - 40, "AU_BUY_B0_2")])
+        fila3 = conn.execute("SELECT paper_motivo FROM signals WHERE signature='AU_BUY_B0_2'").fetchone()
+        n3 = conn.execute("SELECT COUNT(*) c FROM paper_trades WHERE mint=?", (M2,)).fetchone()["c"]
+        comprobar("una segunda compra real de la misma ⭐ (otra firma) no abre otra y SI lleva "
+                  "el motivo 'acumulando'",
+                  n3 == 1 and fila3 and fila3["paper_motivo"] and "acumulando" in fila3["paper_motivo"],
+                  (dict(fila3) if fila3 else None, n3))
+        _src = _insp.getsource(rt)
+        i_branch = _src.find("registrada sin alertar")
+        comprobar("realtime anota el motivo justo en la rama '⭐ fuera del top' (solo compras de ⭐)",
+                  0 <= i_branch < _src.find("motivo_fuera_top(conn, trade") < _src.find("continue", i_branch) + 2000
+                  and "if es_star and es_compra:" in _src[i_branch:i_branch + 1200])
+        conn.close()
+    finally:
+        requests.get, requests.post = _g0, _p0
+        _cfg.DEXSCREENER_DELAY, _cfg.HELIUS_DELAY = _d0, _h0
+        rt.invalidar_vigiladas()
+        tc._dex_cache.clear()
+        conn = get_conn()
+        for t in ("wallets", "signals", "paper_trades", "positions", "paper_fills"):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+        conn.close()
+        _db.invalidar_copiables()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14519,6 +14686,7 @@ def main():
     prueba_19ar()
     prueba_19as()
     prueba_19at()
+    prueba_19au()
 
     print("\n" + "─" * 60)
     if _FALLOS:

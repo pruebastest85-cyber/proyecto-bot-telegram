@@ -1253,6 +1253,18 @@ def _proc(txs: list[dict], conn):
                 quien = "Candidata" if not es_star else "⭐ fuera del top"
                 print(f"👁 {quien} {trade['wallet'][:8]}… {trade['side']} "
                       f"{trade['sol']:.2f} SOL — registrada sin alertar")
+                # (19-AU) La COMPRA de una ⭐ fuera del top es, con
+                # diferencia, el "no se copió" mas frecuente y era el
+                # unico sin motivo en la señal (la tarjeta decia "sin
+                # motivo registrado"). Se anota el porque concreto.
+                if es_star and es_compra:
+                    try:
+                        import paper_trading as _pt
+                        _pt.anotar_no_copia(
+                            conn, trade,
+                            _pt.motivo_fuera_top(conn, trade["wallet"]))
+                    except Exception as _ex:
+                        _avisar_ex("realtime:_proc:fuera_top", _ex)
                 continue
             motivo_h = ("ya no es ⭐" if not es_star
                         else "salió del top")

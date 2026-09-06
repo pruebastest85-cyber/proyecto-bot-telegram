@@ -227,13 +227,68 @@ def _no_copia(conn, trade, motivo: str) -> bool:
     try:
         sig = trade.get("signature") if isinstance(trade, dict) else None
         if sig:
+            # (19-AU) Nunca sobre una señal que SI se copio: el camino
+            # caliente abre la posicion y la via normal vuelve a pasar
+            # por open_trade con la MISMA firma, que choca con "la misma
+            # ⭐ esta acumulando" — medido el 06/09 en la base: señales
+            # copiadas con motivo de no-copia.
             conn.execute(
                 "UPDATE signals SET paper_motivo=? WHERE signature=? "
-                "AND paper_motivo IS NULL", (motivo[:120], sig))
+                "AND paper_motivo IS NULL AND NOT EXISTS ("
+                "SELECT 1 FROM paper_trades p WHERE p.signature = signals.signature)",
+                (motivo[:120], sig))
             conn.commit()
     except Exception as e:
         print(f"· Paper: no pude anotar el motivo de no-copia ({e})")
     return False
+
+
+def motivo_fuera_top(conn, wallet: str) -> str:
+    """(19-AU, 06/09) Por que una ⭐ NO esta en el conjunto operativo (las
+    N primeras de /top, confirmadas y activas), en una frase para la
+    señal. Medido el 06/09: la #2 de hoy paso 3 dias y 17 compras sin
+    alertar ni copiar —SNP500 hizo x2 en medio— porque con 4 observaciones
+    y pnl_total −0,71 caia al fondo de las no medidas, fuera del top 50; la
+    tarjeta solo decia "sin motivo registrado". Nunca lanza: si algo falla
+    devuelve el motivo generico."""
+    try:
+        from db import corte_actividad, corte_medidas, get_setting, TOP_ALERTAS_DEFAULT
+        w = conn.execute(
+            "SELECT COALESCE(w.confirmada, 0) AS confirmada, "
+            "COALESCE(w.copi_n, 0) AS copi_n, "
+            "(SELECT MAX(last_ts) FROM positions WHERE wallet = w.address) AS ult "
+            "FROM wallets w WHERE w.address = ?", (wallet,)).fetchone()
+        if w is None:
+            return "la billetera no está en la base"
+        if not w["confirmada"]:
+            return "la ⭐ está en prueba (aún no alerta ni se copia)"
+        try:
+            tope = int(float(get_setting(conn, "top_alertas",
+                                         str(TOP_ALERTAS_DEFAULT)) or 0))
+        except (TypeError, ValueError):
+            tope = TOP_ALERTAS_DEFAULT
+        corte = corte_medidas() if w["copi_n"] >= 5 else corte_actividad()
+        if (w["ult"] or 0) < corte:
+            horas = (time.time() - (w["ult"] or 0)) / 3600 if w["ult"] else None
+            return ("la ⭐ contaba como dormida"
+                    + (f" ({horas / 24:.0f} d sin operar)" if horas and horas >= 48
+                       else f" ({horas:.0f} h sin operar)" if horas else ""))
+        from wallet_ident import posicion
+        pos = posicion(conn, wallet, TOP_POS_TOPE)
+        if tope and pos and pos > tope:
+            return f"la ⭐ iba #{pos} del top y solo se copia hasta el #{tope}"
+        if tope and not pos:
+            return f"la ⭐ iba más allá del #{TOP_POS_TOPE} del top (se copia hasta el #{tope})"
+        return "la ⭐ estaba fuera del top operativo"
+    except Exception as e:
+        print(f"· Paper: no pude explicar por qué la ⭐ estaba fuera del top ({e})")
+        return "la ⭐ estaba fuera del top operativo"
+
+
+def anotar_no_copia(conn, trade, motivo: str) -> bool:
+    """(19-AU) Puerta publica de `_no_copia` para quien decide NO llamar a
+    open_trade (realtime: ⭐ fuera del top). Mismo contrato."""
+    return _no_copia(conn, trade, motivo)
 
 
 def open_trade(conn, trade: dict, token: dict, score,
