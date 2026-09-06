@@ -103,6 +103,11 @@ _APERTURA_LOCK = _threading_ap.Lock()
 # (19-AT) Hasta que puesto del top se anota en cada copia. 200 cubre de
 # sobra el mayor tope de /top (50); mas alla queda NULL = "sin puesto".
 TOP_POS_TOPE = 200
+# (19-AX) Un TP/SL/reloj en 999999 esta APAGADO (modismo de /copiapura).
+# Por encima de este valor no es un tope y no puede disparar: el 06/09
+# un precio ajeno (ver signal_tracker._price_mc_ex) dio +1.885.893 % y
+# supero el 999999 del "apagado".
+APAGADO_PCT = 100_000
 # Bandas del desglose "por puesto" de /paper (limite superior incluido).
 TOP_POS_BANDAS = ((1, 10), (11, 30), (31, 50))
 
@@ -2152,11 +2157,11 @@ def update_open_trades() -> int:
                     print(f"· Paper: no pude limpiar muerto_desde de "
                           f"{row['symbol']} ({_e_marca})")
             pct = (price / row["entry_price"] - 1) * 100
-            if pct >= tp:
+            if tp < APAGADO_PCT and pct >= tp:
                 _close(conn, row, price, "take-profit", "🎯",
                        liq_salida=_liq_salida)
                 cerradas += 1
-            elif pct <= sl:
+            elif sl > -APAGADO_PCT and pct <= sl:
                 _close(conn, row, price, "stop-loss", "🛑",
                        liq_salida=_liq_salida)
                 cerradas += 1
@@ -2588,12 +2593,12 @@ def resumen_text() -> str:
     # (19-S) Un TP o SL en 999999 no es un tope: está APAGADO. Escribirlo
     # como "TP +999999%" invita a leer que existe, y el histórico de
     # abajo enseña cierres por take-profit de cuando SÍ existía.
-    _tp_txt = "TP apagado" if tp >= 100_000 else f"TP +{tp:.0f}%"
-    _sl_txt = "SL apagado" if sl >= 100_000 else f"SL -{sl:.0f}%"
+    _tp_txt = "TP apagado" if tp >= APAGADO_PCT else f"TP +{tp:.0f}%"
+    _sl_txt = "SL apagado" if sl >= APAGADO_PCT else f"SL -{sl:.0f}%"
     out = [f"🧪 *Paper trading*  ·  {estado}",
            f"Config: tope {max_sol:g} SOL/señal · {_tp_txt} · "
            f"{_sl_txt} · "
-           + ("reloj apagado" if timeout >= 100_000 else f"máx {timeout:g}h"),
+           + ("reloj apagado" if timeout >= APAGADO_PCT else f"máx {timeout:g}h"),
            ""]
     out += ventana
     n_c = cer["n"] or 0

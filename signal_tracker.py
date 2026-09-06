@@ -119,7 +119,19 @@ def _price_mc_ex(mint: str):
         # chg_24h (medido: 6 señales de ⭐, todas flips al precio de
         # lanzamiento de pump.fun).
         _liq_sin_precio, _liq_sin_precio_sabida = 0.0, False
+        _ajenos = 0
         for p in pairs:
+            # (19-AX, 06/09) SOLO pares cuyo token BASE es este mint. El
+            # endpoint /latest/dex/tokens/{mint} devuelve tambien los
+            # pares donde el mint es la moneda de COTIZACION, y ahi
+            # `priceUsd` es el precio del OTRO token. Medido: JUPCAT
+            # (MC 47K $ al entrar) "salio" a 0,89 $ con MC 890 M$ y
+            # liquidez 197 M$ —cifras de otro token— y el paper cerro un
+            # +1.885.893 % que disparo hasta el take-profit "apagado".
+            # `_prices_mc_lote` ya filtraba por baseToken; esta ruta no.
+            if ((p.get("baseToken") or {}).get("address") or "") != mint:
+                _ajenos += 1
+                continue
             # (Ola 18-E) La liquidez tambien va DENTRO del try. Estaba
             # fuera, y si DexScreener mandaba `liquidity` como lista en
             # UN par (o `usd` como texto raro), reventaba el sondeo
@@ -180,6 +192,9 @@ def _price_mc_ex(mint: str):
                                                            mejor_liq_sabida):
                 mejor_liq, mejor = _cmp, p
                 mejor_liq_sabida = liq is not None
+        if _ajenos:
+            print(f"· Precio de {mint[:8]}…: {_ajenos} par(es) de OTRO token "
+                  f"ignorados (el mint era la moneda de cotización)")
         if not mejor:
             if _liq_sin_precio_sabida and _liq_sin_precio < LIQ_MUERTO_USD:
                 # (19-AN) Pares sin precio y con liquidez de polvo LEIDA:

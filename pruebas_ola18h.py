@@ -332,7 +332,15 @@ def prueba_grave3():
     bloque("GRAVE 3 · liquidez desconocida vs pool muerto")
     import signal_tracker as st
 
-    def _respuesta(pares):
+    def _respuesta(url, pares):
+        # (19-AX) El bot solo acepta pares cuyo baseToken.address es el
+        # mint pedido: la respuesta falsa lo rellena con el mint de la URL.
+        import copy as _copy
+        _mint = str(url).rsplit("/", 1)[-1]
+        pares = _copy.deepcopy(pares)
+        for _p in pares:
+            _p.setdefault("baseToken", {}).setdefault("address", _mint)
+
         class _R:
             status_code = 200
 
@@ -362,7 +370,7 @@ def prueba_grave3():
         # (a) El caso del hallazgo: par bueno SIN campo liquidez +
         #     pool residual con liquidez 0.
         st._DEX_CACHE.clear() if hasattr(st, "_DEX_CACHE") else None
-        st.requests.get = lambda *a, **k: _respuesta(
+        st.requests.get = lambda url, *a, **k: _respuesta(url, 
             [par_bueno_sin_liq, par_muerto])
         px, mc, muerto, liq = st._price_mc_ex("MINTA")
         comprobar("par bueno sin liquidez + pool muerto: NO se declara "
@@ -377,7 +385,7 @@ def prueba_grave3():
                   liq is None, f"liq = {liq!r}")
 
         # Si NINGÚN par dice la liquidez, lo mismo.
-        st.requests.get = lambda *a, **k: _respuesta([par_bueno_sin_liq])
+        st.requests.get = lambda url, *a, **k: _respuesta(url, [par_bueno_sin_liq])
         _px2, _mc2, _m2, _liq2 = st._price_mc_ex("MINTA2")
         comprobar("ningún par con liquidez legible: liquidez desconocida",
                   _liq2 is None and _m2 is False,
@@ -391,22 +399,22 @@ def prueba_grave3():
                       "baseToken": {"symbol": "XX"}}
         par_sin = {"chainId": "solana", "priceUsd": "2.0", "fdv": 1,
                    "marketCap": 1, "baseToken": {"symbol": "XX"}}
-        st.requests.get = lambda *a, **k: _respuesta([par_umbral, par_sin])
+        st.requests.get = lambda url, *a, **k: _respuesta(url, [par_umbral, par_sin])
         r1 = st._price_mc_ex("MINTA3")
-        st.requests.get = lambda *a, **k: _respuesta([par_sin, par_umbral])
+        st.requests.get = lambda url, *a, **k: _respuesta(url, [par_sin, par_umbral])
         r2 = st._price_mc_ex("MINTA4")
         comprobar("empate en el umbral: el resultado NO depende del orden "
                   "de los pares", r1 == r2, f"{r1} vs {r2}")
 
         # (b) Muerte de verdad: TODOS los pares con liquidez legible y
         #     por debajo del umbral. Esto SÍ tiene que seguir dando muerte.
-        st.requests.get = lambda *a, **k: _respuesta([par_muerto])
+        st.requests.get = lambda url, *a, **k: _respuesta(url, [par_muerto])
         px, mc, muerto, liq = st._price_mc_ex("MINTB")
         comprobar("solo pool muerto: SÍ se declara muerte", muerto is True,
                   f"(px={px}, muerto={muerto}, liq={liq})")
 
         # (c) Token vivo normal: sin cambios.
-        st.requests.get = lambda *a, **k: _respuesta([par_vivo, par_muerto])
+        st.requests.get = lambda url, *a, **k: _respuesta(url, [par_vivo, par_muerto])
         px, mc, muerto, liq = st._price_mc_ex("MINTC")
         comprobar("token vivo: gana el pool con liquidez de verdad",
                   muerto is False and liq == 50000,
@@ -415,7 +423,7 @@ def prueba_grave3():
         # (d) Ningún par: contrato de siempre — muerte confirmada, sin
         #     precio. (Es distinto de "no pude preguntar", que deja
         #     `ultimo_fallo_precio()` puesto y muerto=False.)
-        st.requests.get = lambda *a, **k: _respuesta([])
+        st.requests.get = lambda url, *a, **k: _respuesta(url, [])
         px, mc, muerto, liq = st._price_mc_ex("MINTD")
         comprobar("sin pares: sin precio y muerte, como siempre",
                   px is None and muerto is True,
@@ -13408,17 +13416,17 @@ def prueba_19an():
 
         # ── M11: pares sin precio con liquidez de polvo → muerto ──────
         tc._dex_cache.clear()
-        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MX", "symbol": "TOK"},
+        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MINTAN_POLVO", "symbol": "TOK"},
                                 "liquidity": {"usd": 3.0}, "chainId": "solana"}]
         p, mc, muerto, liq = st._price_mc_ex("MINTAN_POLVO")
         comprobar("M11: pares sin priceUsd y liquidez leida de 3 $ → muerto",
                   p is None and muerto is True, (p, mc, muerto, liq))
-        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MX", "symbol": "TOK"},
+        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MINTAN_SINDATO", "symbol": "TOK"},
                                 "chainId": "solana"}]
         p, mc, muerto, liq = st._price_mc_ex("MINTAN_SINDATO")
         comprobar("M11: pares sin priceUsd y SIN liquidez leida → sin dato, no muerto",
                   p is None and muerto is False, (p, mc, muerto, liq))
-        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MX", "symbol": "TOK"},
+        ESTADO["dex_pairs"] = [{"baseToken": {"address": "MINTAN_VIVO", "symbol": "TOK"},
                                 "liquidity": {"usd": 5000.0}, "chainId": "solana"}]
         p, mc, muerto, liq = st._price_mc_ex("MINTAN_VIVO")
         comprobar("M11: pares sin priceUsd pero con liquidez SANA → sin dato, no muerto",
@@ -14901,6 +14909,136 @@ def prueba_19aw():
         _db.invalidar_copiables()
 
 
+def prueba_19ax():
+    bloque("19-AX - el precio de un mint sale SOLO de pares donde es el token base "
+           "(caso JUPCAT: +1.885.893 % con el precio de otro token) y un TP/SL "
+           "'apagado' (999999) no dispara nunca")
+    import contextlib
+    import io
+    import json as _json
+    import time as _t
+    import requests
+    from db import get_conn, set_setting
+    import paper_trading as pt
+    import signal_tracker as st
+    import token_check as tc
+
+    class _R:
+        def __init__(self, st_, data):
+            self.status_code, self._d, self.ok = st_, data, 200 <= st_ < 300
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    MI = "MINTAXJUPCAT" + "j" * 32
+    OTRO = "MINTAXOTRO" + "o" * 34
+    # DexScreener devuelve DOS pares: el propio (0,00005 $, liq 19K) y uno
+    # donde MI es la moneda de cotizacion y el base es OTRO (0,89 $, liq 197M)
+    PARES = {"pairs": [
+        {"priceUsd": "0.89", "baseToken": {"address": OTRO, "symbol": "OTRO"},
+         "quoteToken": {"address": MI, "symbol": "JUPCAT"},
+         "liquidity": {"usd": 197104050.97}, "marketCap": 890065434.0, "pairAddress": "PAJENO",
+         "chainId": "solana", "txns": {"m5": {"buys": 1, "sells": 1}}, "volume": {"h24": 1000},
+         "priceChange": {"h1": 0, "h24": 0}},
+        {"priceUsd": "0.00005", "baseToken": {"address": MI, "symbol": "JUPCAT"},
+         "quoteToken": {"address": "So11111111111111111111111111111111111111112", "symbol": "SOL"},
+         "liquidity": {"usd": 19000.0}, "marketCap": 50000.0, "pairAddress": "PPROPIO",
+         "chainId": "solana", "txns": {"m5": {"buys": 1, "sells": 1}}, "volume": {"h24": 1000},
+         "priceChange": {"h1": 0, "h24": 0}}]}
+
+    def _get(url, params=None, timeout=None, **kw):
+        if "dexscreener" in url:
+            return _R(200, PARES)
+        if "rugcheck" in url:
+            return _R(404, {})
+        return _R(200, [])
+
+    _g0, _g1 = st.requests.get, tc.requests.get
+    st.requests.get = tc.requests.get = _get
+    tc._dex_cache.clear()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as sal:
+            px, mc, muerto, liq = st._price_mc_ex(MI)
+        comprobar("_price_mc_ex: el par AJENO (liq 197M, 0,89 $) se ignora; precio 0,00005 $ del par propio",
+                  px is not None and abs(px - 0.00005) < 1e-12 and mc == 50000.0 and liq == 19000.0
+                  and not muerto, (px, mc, muerto, liq))
+        comprobar("…y lo dice por consola", "de OTRO token ignorados" in sal.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            t = tc.analyze_token(MI)
+        comprobar("analyze_token (precio de ENTRADA): tambien ignora el par ajeno",
+                  t.get("price") is not None and abs(t["price"] - 0.00005) < 1e-12
+                  and t.get("symbol") == "JUPCAT" and t.get("pair") == "PPROPIO", (t.get("price"), t.get("pair")))
+        # solo pares ajenos → sin precio (no muerto: hay pares, pero no propios)
+        SOLO_AJENO = {"pairs": [PARES["pairs"][0]]}
+        st.requests.get = tc.requests.get = (lambda url, *a, **k: _R(200, SOLO_AJENO) if "dexscreener" in url else _R(200, []))
+        tc._dex_cache.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            px2 = st._price_mc_ex(MI)
+            t2 = tc.analyze_token(MI)
+        comprobar("si SOLO hay pares ajenos: sin precio y sin declarar muerte; analyze_token sin precio",
+                  px2[0] is None and px2[2] is False and t2.get("price") is None, (px2, t2.get("price")))
+    finally:
+        st.requests.get, tc.requests.get = _g0, _g1
+        tc._dex_cache.clear()
+
+    # ── TP/SL apagados (999999) no disparan aunque el precio sea absurdo ──
+    conn = get_conn()
+    conn.execute("DELETE FROM paper_trades")
+    conn.execute("INSERT INTO paper_trades (mint, symbol, wallet, entry_price, entry_ts, stake_sol, "
+                 "stake_usd, status, fraccion_restante) VALUES (?,?,'W',0.00004719,?,1.0,106.74,'abierta',1.0)",
+                 (MI, "JUPCAT", int(_t.time()) - 3600))
+    for k, v in (("paper_tp_pct", "999999"), ("paper_sl_pct", "999999"), ("paper_timeout_h", "999999")):
+        set_setting(conn, k, v)
+    conn.commit(); conn.close()
+
+    def _falso_pmx(mint):
+        st._set_fallo_precio(None)
+        return (0.89, 890065434.0, False, 197104050.97)     # el precio ajeno, tal cual llego
+    real_pmx = st._price_mc_ex
+    try:
+        st._price_mc_ex = _falso_pmx
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt.update_open_trades()
+        conn = get_conn()
+        fila = conn.execute("SELECT status, exit_reason FROM paper_trades WHERE mint=?", (MI,)).fetchone()
+        comprobar("TP apagado (999999): un +1.885.893 % NO cierra por take-profit",
+                  fila and fila["status"] == "abierta", dict(fila) if fila else fila)
+        conn.close()
+        # y con el SL apagado, un -99,9 % tampoco
+        st._price_mc_ex = lambda m: (st._set_fallo_precio(None) or (0.00004719 * 0.001, 47.0, False, 19000.0))
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt.update_open_trades()
+        conn = get_conn()
+        fila = conn.execute("SELECT status, exit_reason FROM paper_trades WHERE mint=?", (MI,)).fetchone()
+        comprobar("SL apagado (999999): un -99,9 % NO cierra por stop-loss",
+                  fila and fila["status"] == "abierta", dict(fila) if fila else fila)
+        # con TP normal (100 %), el x2 SI cierra
+        set_setting(conn, "paper_tp_pct", "100")
+        conn.commit(); conn.close()
+        st._price_mc_ex = lambda m: (st._set_fallo_precio(None) or (0.00004719 * 2.5, 120000.0, False, 19000.0))
+        with contextlib.redirect_stdout(io.StringIO()):
+            pt.update_open_trades()
+        conn = get_conn()
+        fila = conn.execute("SELECT status, exit_reason FROM paper_trades WHERE mint=?", (MI,)).fetchone()
+        comprobar("TP encendido (+100 %): un x2,5 SI cierra por take-profit",
+                  fila and fila["status"] == "cerrada" and fila["exit_reason"] == "take-profit", dict(fila) if fila else fila)
+        conn.close()
+    finally:
+        st._price_mc_ex = real_pmx
+        conn = get_conn()
+        conn.execute("DELETE FROM paper_trades")
+        for k, v in (("paper_tp_pct", "100"), ("paper_sl_pct", "50"), ("paper_timeout_h", "48")):
+            set_setting(conn, k, v)
+        conn.commit(); conn.close()
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt = pt.resumen_text()
+    comprobar("/paper sigue escribiendo la config con el mismo umbral (APAGADO_PCT) ",
+              pt.APAGADO_PCT == 100_000 and "TP +100%" in txt, txt[:200])
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -14976,6 +15114,7 @@ def main():
     prueba_19au()
     prueba_19av()
     prueba_19aw()
+    prueba_19ax()
 
     print("\n" + "─" * 60)
     if _FALLOS:

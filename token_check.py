@@ -143,6 +143,16 @@ def analyze_token(mint: str) -> dict:
         if _dex is not None and (_dex.get("pairs") or []):
             _cache_put(_dex_cache, mint, _dex)
     pairs = (_dex or {}).get("pairs") or []
+    # (19-AX, 06/09) Solo pares cuyo token BASE es este mint: el endpoint
+    # tambien devuelve los pares donde el mint es la moneda de COTIZACION,
+    # y en esos `priceUsd`, MC y liquidez son del OTRO token. Ver el caso
+    # JUPCAT en signal_tracker._price_mc_ex.
+    _n_antes = len(pairs)
+    pairs = [p for p in pairs
+             if ((p.get("baseToken") or {}).get("address") or "") == mint]
+    if _n_antes and not pairs:
+        print(f"· analyze_token({mint[:8]}…): {_n_antes} par(es) de OTRO token "
+              f"ignorados; ninguno propio")
     if pairs:
         # Par de MAYOR liquidez: precio mas fiable que pairs[0]
         def _liq(x):
