@@ -11696,10 +11696,13 @@ def prueba_19ac():
     conn.commit()
     comprobar("ya mandado tras el ancla de hoy: NO toca",
               not tb._toca_resumen_diario(conn, ahora))
-    set_setting(conn, "job_ts:daily_summary", str(hoy13 - 10))
-    set_setting(conn, "job_intento:daily_summary", str(hoy13 - 10))
+    # (19-AY) `- 3700`, no `- 10`: la regla 19-AR exige ademas que el
+    # ultimo INTENTO tenga mas de 1 h, y con `- 10` esta prueba fallaba
+    # solo si la suite corria entre las 13:00 y las 14:00 UTC (medido).
+    set_setting(conn, "job_ts:daily_summary", str(hoy13 - 3700))
+    set_setting(conn, "job_intento:daily_summary", str(hoy13 - 3700))
     conn.commit()
-    comprobar("mandado ANTES del ancla (un reinicio a las 12:59 lo "
+    comprobar("mandado ANTES del ancla (un reinicio a las 11:58 lo "
               "saltaba): SÍ toca", tb._toca_resumen_diario(conn, ahora))
     conn.execute("DELETE FROM settings WHERE key LIKE 'job_%:daily_summary'")
     conn.commit()
@@ -13448,6 +13451,30 @@ def prueba_19an():
         conn.close()
         comprobar("M11b: una señal de 33 h sin price_24h queda apuntada como "
                   "medicion de 24 h perdida", e24 == 1, e24)
+        # (19-AY) …y UNA sola vez: la segunda pasada no vuelve a anotarla
+        with contextlib.redirect_stdout(io.StringIO()):
+            st.track_outcomes()
+            st.track_outcomes()
+        conn = get_conn()
+        e24b = conn.execute("SELECT COUNT(*) c FROM errors WHERE modulo='medicion.fuera_de_ventana_24h'").fetchone()["c"]
+        # una señal NUEVA perdida a 1 h si se anota (una vez)
+        conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, side, price_usd) "
+                     "VALUES ('AN_PERDIDA1H', ?, 'MINTAN_P1', 1.0, ?, 'compra', 0.01)", (Z, ahora - 5 * 3600))
+        conn.commit(); conn.close()
+        with contextlib.redirect_stdout(io.StringIO()):
+            st.track_outcomes()
+            st.track_outcomes()
+        conn = get_conn()
+        e1 = conn.execute("SELECT COUNT(*) c FROM errors WHERE modulo='medicion.fuera_de_ventana'").fetchone()["c"]
+        conn.close()
+        comprobar("19-AY: la misma señal perdida NO se vuelve a anotar en cada pasada "
+                  "(24 h: sigue en 1; 1 h: una señal nueva → 1 registro tras dos pasadas)",
+                  e24b == 1 and e1 == 1, (e24b, e1))
+        comprobar("19-AY: la memoria de avisadas se poda al superar el tope",
+                  (lambda: (st._PERDIDAS_AVISADAS["1h"].update(f"X{i}" for i in range(st._PERDIDAS_TOPE + 1)),
+                            st._nuevas_perdidas([{"signature": "NUEVA"}], "1h"),
+                            len(st._PERDIDAS_AVISADAS["1h"]))[-1])() == 1)
+        st._PERDIDAS_AVISADAS["1h"].clear(); st._PERDIDAS_AVISADAS["24h"].clear()
 
         # ── M13: agente en la nube con dos tool_use ──────────────────
         _key0, _url0, _exec0 = ag.ANTHROPIC_API_KEY, ag.API_URL, ag._exec_read

@@ -825,6 +825,23 @@ def track_outcomes() -> int:
         conn.close()
 
 
+# (19-AY) Firmas ya avisadas como "fuera de ventana", por ventana ("1h" /
+# "24h"). Memoria de proceso: tras un reinicio se avisa de nuevo una vez,
+# que es aceptable (y verdadero). Se poda para que no crezca sin fin.
+_PERDIDAS_AVISADAS = {"1h": set(), "24h": set()}
+_PERDIDAS_TOPE = 5000
+
+
+def _nuevas_perdidas(filas, ventana: str) -> int:
+    """Cuantas de estas firmas NO se habian avisado aun; las anota."""
+    vistas = _PERDIDAS_AVISADAS[ventana]
+    nuevas = [r["signature"] for r in filas if r["signature"] not in vistas]
+    if len(vistas) > _PERDIDAS_TOPE:
+        vistas.clear()
+    vistas.update(nuevas)
+    return len(nuevas)
+
+
 def _track_outcomes(conn) -> int:
     now = time.time()
     # 1) Señales PENDIENTES de medicion, solo dentro de su ventana valida:
@@ -860,15 +877,20 @@ def _track_outcomes(conn) -> int:
     # ENTRAR JAMAS. No se puede arreglar midiendo tarde (el precio de
     # hace 5 h no es el de 1 h, y etiquetarlo como "1h" contaminaria el
     # track record), pero SI se puede dejar de perderlo en silencio.
-    _perdidas = conn.execute(
-        """SELECT COUNT(*) c FROM signals s
+    # (19-AY, 07/09) Se anota CADA señal perdida UNA vez. Antes era un
+    # COUNT sobre la ventana 3-9 h y se registraba en cada pasada de 15
+    # min: una sola señal sin medir producia 24 "errores" en /salud y la
+    # IA local lo leia como "DexScreener limitando". Medido: 466 de 467
+    # medidas y 18 errores por la misma firma.
+    _perdidas = _nuevas_perdidas(conn.execute(
+        """SELECT s.signature FROM signals s
            JOIN wallets w ON w.address = s.wallet
                 AND COALESCE(w.is_bot, 0) = 0
                 AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2)
            WHERE s.side='compra' AND s.price_usd IS NOT NULL
              AND s.price_usd > 0 AND s.price_1h IS NULL
              AND s.ts < ? AND s.ts >= ?""",
-        (int(now - 3 * HOUR), int(now - 9 * HOUR))).fetchone()["c"]
+        (int(now - 3 * HOUR), int(now - 9 * HOUR))).fetchall(), "1h")
     if _perdidas:
         print(f"· Medición: {_perdidas} señal(es) de las últimas 9 h se "
               f"quedaron sin medir a 1 h y ya están fuera de ventana")
@@ -884,15 +906,15 @@ def _track_outcomes(conn) -> int:
     # que alimenta rachas, umbral y copiabilidad: antes solo se avisaba
     # de la de 1 h y una parada de mas de 6 h dejaba señales sin chg_24h
     # en silencio.
-    _perdidas24 = conn.execute(
-        """SELECT COUNT(*) c FROM signals s
+    _perdidas24 = _nuevas_perdidas(conn.execute(
+        """SELECT s.signature FROM signals s
            JOIN wallets w ON w.address = s.wallet
                 AND COALESCE(w.is_bot, 0) = 0
                 AND (w.is_tracked = 1 OR w.winning_tokens_count >= 2)
            WHERE s.side='compra' AND s.price_usd IS NOT NULL
              AND s.price_usd > 0 AND s.price_24h IS NULL
              AND s.ts < ? AND s.ts >= ?""",
-        (int(now - 30 * HOUR), int(now - 36 * HOUR))).fetchone()["c"]
+        (int(now - 30 * HOUR), int(now - 36 * HOUR))).fetchall(), "24h")
     if _perdidas24:
         print(f"· Medición: {_perdidas24} señal(es) de hace 30-36 h se "
               f"quedaron sin medir a 24 h y ya están fuera de ventana")
