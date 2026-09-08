@@ -15620,6 +15620,343 @@ def prueba_19bb():
     conn.close()
 
 
+def prueba_19bc():
+    bloque("19-BC (fase 5) - ventas y posiciones: el embudo solo miraba "
+           "compras, asi que no sabia cuanto gano ni cuanto aguanto")
+    import config as _cfg
+    import posiciones as P
+    import analysis_events as AE
+    from wallet_analyzer import extract_sells, extract_buys, \
+        operaciones_del_token
+    from db import get_conn
+
+    AHORA = 1_700_000_000
+    H = 3600
+
+    # ── 1) extract_sells: el espejo de extract_buys ──────────────────
+    MINT = "MintAAA"
+    W = "WalletAAA"
+    tx_venta = {
+        "feePayer": W, "timestamp": AHORA, "signature": "sig_v1",
+        "tokenTransfers": [{"mint": MINT, "fromUserAccount": W,
+                            "toUserAccount": "pool", "tokenAmount": 1000.0}],
+        "nativeTransfers": [{"fromUserAccount": "pool",
+                             "toUserAccount": W, "amount": 2_000_000_000}],
+        "accountData": [],
+    }
+    v = extract_sells([tx_venta], MINT)
+    comprobar("una venta normal (envia el token, recibe SOL) se detecta",
+              len(v) == 1 and v[0]["wallet"] == W
+              and abs(v[0]["sol"] - 2.0) < 1e-9
+              and abs(v[0]["tokens"] - 1000.0) < 1e-9)
+    comprobar("y calcula su precio de salida (SOL por token)",
+              v[0]["precio_salida"] is not None
+              and abs(v[0]["precio_salida"] - 0.002) < 1e-9)
+
+    # Mandar el token a otra cuenta NO es vender: no entra SOL.
+    tx_transfer = {
+        "feePayer": W, "timestamp": AHORA, "signature": "sig_t",
+        "tokenTransfers": [{"mint": MINT, "fromUserAccount": W,
+                            "toUserAccount": "otra", "tokenAmount": 500.0}],
+        "nativeTransfers": [],
+        "accountData": [{"account": W, "nativeBalanceChange": -5000}],
+    }
+    comprobar("mandar el token a otra cuenta (sin recibir SOL) NO cuenta "
+              "como venta", extract_sells([tx_transfer], MINT) == [])
+
+    # Una compra no puede colarse como venta ni al reves.
+    tx_compra = {
+        "feePayer": W, "timestamp": AHORA, "signature": "sig_c",
+        "tokenTransfers": [{"mint": MINT, "toUserAccount": W,
+                            "fromUserAccount": "pool", "tokenAmount": 900.0}],
+        "nativeTransfers": [{"fromUserAccount": W, "toUserAccount": "pool",
+                             "amount": 1_000_000_000}],
+        "accountData": [],
+    }
+    comprobar("una compra no se cuela como venta",
+              extract_sells([tx_compra], MINT) == [])
+    comprobar("y una venta no se cuela como compra",
+              extract_buys([tx_venta], MINT) == [])
+
+    # Otro token en la misma transaccion no contamina.
+    tx_otro = {
+        "feePayer": W, "timestamp": AHORA, "signature": "sig_o",
+        "tokenTransfers": [{"mint": "OTRO", "fromUserAccount": W,
+                            "toUserAccount": "pool", "tokenAmount": 7.0}],
+        "nativeTransfers": [{"fromUserAccount": "pool", "toUserAccount": W,
+                             "amount": 9_000_000_000}],
+        "accountData": [],
+    }
+    comprobar("vender OTRO token no cuenta como venta de este",
+              extract_sells([tx_otro], MINT) == [])
+
+    # Transaccion fallida: no ocurrio.
+    tx_fallida = dict(tx_venta, transactionError={"e": 1},
+                      signature="sig_f")
+    comprobar("una transaccion fallida no es una venta",
+              extract_sells([tx_fallida], MINT) == [])
+
+    # Respaldo por saldo nativo cuando no hay nativeTransfers legibles.
+    tx_resp = {
+        "feePayer": W, "timestamp": AHORA, "signature": "sig_r",
+        "tokenTransfers": [{"mint": MINT, "fromUserAccount": W,
+                            "toUserAccount": "pool", "tokenAmount": 10.0}],
+        "nativeTransfers": [],
+        "accountData": [{"account": W, "nativeBalanceChange": 3_000_000_000}],
+    }
+    r = extract_sells([tx_resp], MINT)
+    comprobar("sin transferencias nativas legibles, un saldo que SUBE "
+              "vale como venta", len(r) == 1 and abs(r[0]["sol"] - 3.0) < 1e-9)
+    tx_resp_neg = dict(tx_resp, signature="sig_rn",
+                       accountData=[{"account": W,
+                                     "nativeBalanceChange": -3_000_000_000}])
+    comprobar("pero un saldo que BAJA no es una venta",
+              extract_sells([tx_resp_neg], MINT) == [])
+
+    ops = operaciones_del_token([tx_venta, tx_compra], MINT)
+    comprobar("`operaciones_del_token` junta las dos y las ordena, con el "
+              "lado en el idioma de la base",
+              len(ops) == 2
+              and {o["side"] for o in ops} == {"compra", "venta"}
+              and ops[0]["ts"] <= ops[1]["ts"])
+
+    # ── 2) calcular: la posicion cerrada ─────────────────────────────
+    cerrada = P.calcular([
+        {"side": "compra", "sol": 1.0, "tokens": 1000.0, "ts": AHORA},
+        {"side": "venta", "sol": 3.0, "tokens": 1000.0,
+         "ts": AHORA + 48 * H}], ahora=AHORA + 100 * H)
+    comprobar("posicion cerrada: estado, PnL realizado y ROI",
+              cerrada["position_status"] == "cerrada"
+              and abs(cerrada["realized_pnl"] - 2.0) < 1e-9
+              and abs(cerrada["roi_pct"] - 200.0) < 1e-9)
+    comprobar("el tiempo dentro de una cerrada va de su primera compra a "
+              "su ultima venta, NO hasta hoy",
+              cerrada["holding_seconds"] == 48 * H)
+    comprobar("y aguantar 48 h marca held_24h pero no held_7d",
+              cerrada["held_24h"] == 1 and cerrada["held_7d"] == 0)
+    comprobar("una cerrada tiene confianza alta y neto = realizado",
+              cerrada["pnl_confidence"] == "alta"
+              and cerrada["net_pnl"] == cerrada["realized_pnl"])
+
+    # ── 3) el peligro: ventas sin compra ─────────────────────────────
+    # En la base del dueño esto son 1.197 de 3.042 pares. Contarlas como
+    # ganancia limpia (todo lo que sale, sin coste) inventaria las
+    # mejores billeteras del sistema.
+    solo_v = P.calcular([{"side": "venta", "sol": 50.0, "tokens": 900.0,
+                          "ts": AHORA}], ahora=AHORA + H)
+    comprobar("ventas sin compra: la historia NO esta completa",
+              solo_v["position_status"] == "solo_ventas"
+              and solo_v["history_complete"] == 0
+              and solo_v["pnl_confidence"] == "baja")
+    incoh = P.calcular([
+        {"side": "compra", "sol": 1.0, "tokens": 100.0, "ts": AHORA},
+        {"side": "venta", "sol": 9.0, "tokens": 5000.0, "ts": AHORA + H}],
+        ahora=AHORA + 2 * H)
+    comprobar("vender MAS de lo comprado marca la posicion incoherente "
+              "y sin historia completa",
+              incoh["position_status"] == "incoherente"
+              and incoh["history_complete"] == 0
+              and incoh["pnl_confidence"] == "baja")
+
+    # ── 4) coste proporcional en una posicion a medio vender ─────────
+    parcial = P.calcular([
+        {"side": "compra", "sol": 10.0, "tokens": 1000.0, "ts": AHORA},
+        {"side": "venta", "sol": 6.0, "tokens": 500.0, "ts": AHORA + H}],
+        ahora=AHORA + 2 * H)
+    comprobar("a medio vender, el coste es el proporcional: vendio la "
+              "mitad por 6 SOL con 5 SOL de coste = +1, no -4",
+              parcial["position_status"] == "parcial"
+              and abs(parcial["realized_pnl"] - 1.0) < 1e-9)
+    comprobar("y sin precio de hoy el neto de una posicion abierta a "
+              "medias queda en NULL, nunca en cero",
+              parcial["net_pnl"] is None
+              and parcial["unrealized_pnl"] is None)
+    con_precio = P.calcular([
+        {"side": "compra", "sol": 10.0, "tokens": 1000.0, "ts": AHORA},
+        {"side": "venta", "sol": 6.0, "tokens": 500.0, "ts": AHORA + H}],
+        precio_actual=0.02, ahora=AHORA + 2 * H)
+    comprobar("con precio de hoy si se calcula lo no realizado "
+              "(500 tokens x 0,02 - 5 de coste = +5)",
+              abs(con_precio["unrealized_pnl"] - 5.0) < 1e-9
+              and abs(con_precio["net_pnl"] - 6.0) < 1e-9)
+
+    # ── 5) una posicion abierta sigue contando el tiempo ─────────────
+    abierta = P.calcular([{"side": "compra", "sol": 2.0, "tokens": 10.0,
+                           "ts": AHORA}], ahora=AHORA + 30 * H)
+    comprobar("una posicion abierta cuenta el tiempo hasta HOY: 30 h "
+              "aguantando ya son mas de un dia",
+              abierta["position_status"] == "abierta"
+              and abierta["holding_seconds"] == 30 * H
+              and abierta["held_24h"] == 1)
+    comprobar("pero su resultado todavia no existe: realizado 0 y ROI "
+              "NULL, no un ROI inventado",
+              abierta["realized_pnl"] == 0.0 and abierta["roi_pct"] is None)
+    comprobar("sin operaciones no hay posicion", P.calcular([]) is None)
+
+    # ── 6) los umbrales mandan de verdad ─────────────────────────────
+    _hold = _cfg.HOLD_MIN_HOURS
+    _min = _cfg.POSICION_CERRADA_MIN_FRAC
+    try:
+        _cfg.HOLD_MIN_HOURS = 72.0
+        otra = P.calcular([
+            {"side": "compra", "sol": 1.0, "tokens": 100.0, "ts": AHORA},
+            {"side": "venta", "sol": 2.0, "tokens": 100.0,
+             "ts": AHORA + 48 * H}], ahora=AHORA + 100 * H)
+        comprobar("HOLD_MIN_HOURS manda: con la vara en 72 h, 48 h ya no "
+                  "cuentan como aguantar", otra["held_24h"] == 0)
+        _cfg.HOLD_MIN_HOURS = _hold
+        _cfg.POSICION_CERRADA_MIN_FRAC = 0.95
+        casi = P.calcular([
+            {"side": "compra", "sol": 1.0, "tokens": 100.0, "ts": AHORA},
+            {"side": "venta", "sol": 2.0, "tokens": 80.0, "ts": AHORA + H}],
+            ahora=AHORA + 2 * H)
+        comprobar("POSICION_CERRADA_MIN_FRAC manda: con la vara en 95 %, "
+                  "vender el 80 % ya no cierra la posicion",
+                  casi["position_status"] == "parcial")
+    finally:
+        _cfg.HOLD_MIN_HOURS = _hold
+        _cfg.POSICION_CERRADA_MIN_FRAC = _min
+
+    # ── 7) escritura en la base, en los dos motores ──────────────────
+    conn = get_conn()
+    for t in ("wallet_positions", "trades", "token_milestones",
+              "analysis_events"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+
+    comprobar("guardar escribe la posicion",
+              P.guardar(conn, W, MINT, cerrada) is True
+              and conn.execute("SELECT COUNT(*) c FROM wallet_positions"
+                               ).fetchone()["c"] == 1)
+    cerrada2 = dict(cerrada, realized_pnl=99.0)
+    # Se comprueba tambien que DEVUELVE True: la clave primaria impide
+    # el duplicado de todas formas, asi que si el codigo intentara
+    # insertar, la fila seguiria siendo una sola y solo se notaria en
+    # que `guardar` fracasa (y deja un aviso) en cada actualizacion.
+    ok2 = P.guardar(conn, W, MINT, cerrada2)
+    fila = conn.execute("SELECT realized_pnl p, COUNT(*) c FROM "
+                        "wallet_positions").fetchone()
+    comprobar("y volver a guardar ACTUALIZA la misma fila en vez de "
+              "duplicarla (clave wallet+mint), sin fallar por el camino",
+              ok2 is True and fila["c"] == 1 and abs(fila["p"] - 99.0) < 1e-9)
+    conn.execute("DELETE FROM wallet_positions")
+    conn.commit()
+
+    # ── 8) reconstruccion desde el historial propio ──────────────────
+    for i, (w, side, sol, tok, ts) in enumerate([
+            ("Wgana", "compra", 1.0, 1000.0, AHORA),
+            ("Wgana", "venta", 5.0, 1000.0, AHORA + 50 * H),
+            ("Wrapido", "compra", 2.0, 500.0, AHORA),
+            ("Wrapido", "venta", 1.0, 500.0, AHORA + 600),
+            ("Wsinc", "venta", 8.0, 300.0, AHORA + H)]):
+        conn.execute("INSERT INTO trades (wallet, signature, mint, side, "
+                     "sol, tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                     (w, f"s{i}", MINT, side, sol, tok, ts))
+    conn.execute("INSERT INTO token_milestones (mint, milestone_usd, "
+                 "first_reached_ts, source, confidence) VALUES "
+                 "(?,?,?,?,?)", (MINT, float(_cfg.MIN_WINNER_MC),
+                                 AHORA, "prueba", "alta"))
+    conn.commit()
+    n = P.reconstruir_mint(conn, MINT)
+    comprobar("reconstruir un token escribe una posicion por billetera",
+              n == 3 and conn.execute(
+                  "SELECT COUNT(*) c FROM wallet_positions").fetchone()["c"] == 3)
+    mejores = P.mejores_del_token(conn, MINT, 10)
+    comprobar("las mejores del token salen ordenadas por PnL medido y "
+              "dejan fuera la de historia incompleta",
+              [m["wallet"] for m in mejores] == ["Wgana", "Wrapido"])
+    comprobar("y la que aguanto 50 h queda marcada como tal",
+              mejores[0]["held_24h"] == 1
+              and abs(mejores[0]["realized_pnl"] - 4.0) < 1e-9)
+
+    # ── 9) la pasada elige tokens ganadores y no repite ──────────────
+    objetivo = P._mints_objetivo(conn, 10)
+    comprobar("un token que YA tiene posiciones no vuelve a la cola",
+              MINT not in objetivo)
+    conn.execute("DELETE FROM wallet_positions")
+    conn.execute("INSERT INTO trades (wallet, signature, mint, side, sol, "
+                 "tokens, ts) VALUES ('Wx','sx','MintSinHito','compra',"
+                 "1.0,1.0,?)", (AHORA,))
+    conn.commit()
+    objetivo = P._mints_objetivo(conn, 10)
+    comprobar("solo entran tokens que cruzaron el hito de MIN_WINNER_MC: "
+              "uno sin hito se queda fuera",
+              MINT in objetivo and "MintSinHito" not in objetivo)
+
+    # ── 10) el registro auditable ────────────────────────────────────
+    conn.execute("DELETE FROM analysis_events")
+    conn.commit()
+    comprobar("registrar deja la decision escrita con la version de la "
+              "configuracion",
+              AE.registrar(conn, "token", MINT, "posiciones", "reconstruido",
+                           "3 posiciones", score=3, data_source="trades")
+              is True)
+    ev = AE.historial(conn, MINT, 5)
+    comprobar("y se puede leer para contestar '¿por que?'",
+              len(ev) == 1 and ev[0]["decision"] == "reconstruido"
+              and ev[0]["config_version"] == _cfg.CONFIG_VERSION
+              and ev[0]["data_source"] == "trades")
+    comprobar("el lote escribe varias de una vez",
+              AE.registrar_lote(conn, [
+                  {"entity_type": "wallet", "entity_id": "W1",
+                   "stage": "atribucion", "decision": "volteo_temprano"},
+                  {"entity_type": "wallet", "entity_id": "W2",
+                   "stage": "atribucion", "decision": "volteo_temprano"}]) == 2)
+    res = AE.resumen(conn, 24)
+    comprobar("el resumen agrupa por paso y decision",
+              any(r["decision"] == "volteo_temprano" and r["n"] == 2
+                  for r in res))
+    _tope = AE.EVENTS_MAX
+    try:
+        AE.EVENTS_MAX = 2
+        AE.podar(conn)
+        comprobar("la poda respeta el tope y conserva las mas nuevas",
+                  conn.execute("SELECT COUNT(*) c FROM analysis_events"
+                               ).fetchone()["c"] == 2
+                  and conn.execute(
+                      "SELECT COUNT(*) c FROM analysis_events WHERE "
+                      "entity_id='W2'").fetchone()["c"] == 1)
+    finally:
+        AE.EVENTS_MAX = _tope
+    # Un registro nunca puede tumbar al que lo llama.
+    class _ConnRoto:
+        def execute(self, *a, **k):
+            raise RuntimeError("base caida")
+
+        def commit(self):
+            raise RuntimeError("base caida")
+    comprobar("si la base falla, el registro avisa y devuelve False en "
+              "vez de reventar el analisis",
+              AE.registrar(_ConnRoto(), "token", "M", "x", "y") is False)
+
+    # ── 11) interruptores y cableado ─────────────────────────────────
+    comprobar("hay interruptor para apagar la reconstruccion sin tocar "
+              "codigo", hasattr(_cfg, "POSICIONES_ACTIVO")
+              and hasattr(_cfg, "POSICIONES_TOKENS_POR_PASADA"))
+    _tb = open("telegram_bot.py", encoding="utf-8").read()
+    # No vale con que el nombre aparezca: en el propio docstring del job
+    # se explica como apagarlo, asi que buscar la palabra suelta pasaria
+    # aunque alguien borrara el `if`. Se exige la LECTURA real.
+    comprobar("el job comprueba el interruptor antes de trabajar",
+              'int(getattr(_c, "POSICIONES_ACTIVO", 1))' in _tb)
+    comprobar("el job esta dado de alta con reloj persistente",
+              '_con_reloj("posiciones"' in _tb
+              and '_reloj_first("posiciones"' in _tb)
+    comprobar("y el comando /posiciones esta registrado y anunciado",
+              'CommandHandler("posiciones"' in _tb
+              and 'BotCommand("posiciones"' in _tb)
+    _wa = open("wallet_analyzer.py", encoding="utf-8").read()
+    comprobar("las ventas se sacan de las MISMAS txs ya descargadas: no "
+              "hay ninguna descarga nueva por ellas",
+              "extract_sells(txs, mint)" in _wa
+              and "fetch_earliest_txs" in _wa)
+
+    for t in ("wallet_positions", "trades", "token_milestones",
+              "analysis_events"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -15699,6 +16036,7 @@ def main():
     prueba_19az()
     prueba_19ba()
     prueba_19bb()
+    prueba_19bc()
 
     print("\n" + "─" * 60)
     if _FALLOS:
