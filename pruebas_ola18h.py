@@ -15066,6 +15066,186 @@ def prueba_19ax():
               pt.APAGADO_PCT == 100_000 and "TP +100%" in txt, txt[:200])
 
 
+def prueba_19az():
+    bloque("19-AZ (embudo v2, fase 3) - esquema y configuracion nuevos: "
+           "tablas vacias, columnas en LOS DOS motores, idempotencia y "
+           "el interruptor maestro apagado")
+    import inspect as _insp
+    import time as _t
+    import config as _cfg
+    import db as _db
+    import migrate_to_pg as _mig
+    from db import get_conn
+
+    conn = get_conn()
+    _src = _insp.getsource(_db)
+
+    # ── 1) las seis tablas nuevas existen ─────────────────────────────
+    tablas = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    nuevas = {"token_snapshots", "token_milestones", "wallet_positions",
+              "helius_ledger", "helius_queue", "analysis_events"}
+    comprobar("las 6 tablas del embudo v2 se crean solas al abrir la base",
+              nuevas <= tablas, sorted(nuevas - tablas))
+    comprobar("y estan definidas en LOS DOS esquemas (SQLite y PostgreSQL)",
+              all(_src.count(f"CREATE TABLE IF NOT EXISTS {t} (") == 2
+                  for t in nuevas),
+              {t: _src.count(f"CREATE TABLE IF NOT EXISTS {t} (")
+               for t in nuevas})
+
+    # ── 2) columnas nuevas en las tablas que ya existian ──────────────
+    def cols(tabla):
+        return {r["name"] for r in conn.execute(f"PRAGMA table_info({tabla})")}
+    wt = {"ath_mc", "ath_mc_ts", "current_mc", "current_price",
+          "current_liquidity", "current_volume_24h", "current_mc_ts",
+          "mc_source", "data_confidence", "survival_24h", "survival_7d",
+          "survival_score", "survival_reason", "survival_confidence",
+          "peak_to_current_pct", "token_class", "token_quality_score",
+          "mc_24h_after_500k", "mc_7d_after_500k", "mc_24h_after_1m",
+          "mc_7d_after_1m", "last_checked", "check_priority"}
+    ap = {"mc_at_entry", "mc_at_exit", "mc_peak", "before_500k",
+          "before_1m", "token_survived_24h", "token_survived_7d",
+          "attribution_confidence"}
+    wa = {"wallet_stage", "q_score", "q_consistency", "q_profit",
+          "q_survival", "q_hold", "q_copyability", "q_risk", "q_strategy",
+          "q_ts", "bot_score", "mm_score", "insider_score",
+          "human_confidence", "estrategia", "hold_median_h",
+          "mult_realizado", "tok_500k", "tok_1m", "tok_surv", "pos_24h",
+          "history_complete", "pnl_confidence"}
+    comprobar("winning_tokens tiene las columnas de mercado/supervivencia",
+              wt <= cols("winning_tokens"), sorted(wt - cols("winning_tokens")))
+    comprobar("appearances tiene las columnas de atribucion al crecimiento",
+              ap <= cols("appearances"), sorted(ap - cols("appearances")))
+    comprobar("wallets tiene las columnas de calidad v2 (prefijo q_) sin "
+              "tocar las de hoy",
+              wa <= cols("wallets") and {"consistency", "wallet_score",
+                                         "copi_score"} <= cols("wallets"),
+              sorted(wa - cols("wallets")))
+    faltan = [c for c in sorted(wt | ap | wa)
+              if _src.count(f'"{c}"') < 2]
+    comprobar("cada columna nueva esta en LAS DOS listas de migracion "
+              "(SQLite y PostgreSQL): un despliegue a Postgres no se "
+              "queda sin ellas", not faltan, faltan)
+
+    # ── 3) idempotencia: preparar el esquema dos veces no rompe ───────
+    try:
+        _db._preparar_sqlite(conn)
+        _db._preparar_sqlite(conn)
+        ok_idem = True
+    except Exception as e:                     # pragma: no cover
+        ok_idem = f"reventó: {e}"
+    comprobar("preparar el esquema dos veces seguidas no falla (reinicios)",
+              ok_idem is True, ok_idem)
+
+    # ── 4) claves unicas: nada se duplica ────────────────────────────
+    ahora = int(_t.time())
+    conn.execute("DELETE FROM token_milestones")
+    conn.execute("DELETE FROM helius_queue")
+    conn.execute("DELETE FROM wallet_positions")
+    for _ in range(2):
+        conn.execute("INSERT OR IGNORE INTO token_milestones "
+                     "(mint, milestone_usd, first_reached_ts, mc, source, "
+                     "confidence) VALUES ('MZ', 500000, ?, 512000, 'dex', "
+                     "'alta')", (ahora,))
+        conn.execute("INSERT OR IGNORE INTO helius_queue "
+                     "(entity_type, entity_id, tarea, priority, estado, "
+                     "created_ts) VALUES ('wallet', 'W1', 'perfil', 90, "
+                     "'pendiente', ?)", (ahora,))
+        conn.execute("INSERT OR IGNORE INTO wallet_positions "
+                     "(wallet, mint, sol_in, sol_out, holding_seconds, "
+                     "held_24h, updated_ts) VALUES ('W1', 'MZ', 1.0, 3.0, "
+                     "?, 1, ?)", (90000, ahora))
+    conn.commit()
+    n_m = conn.execute("SELECT COUNT(*) c FROM token_milestones").fetchone()["c"]
+    n_q = conn.execute("SELECT COUNT(*) c FROM helius_queue").fetchone()["c"]
+    n_p = conn.execute("SELECT COUNT(*) c FROM wallet_positions").fetchone()["c"]
+    comprobar("el mismo hito / tarea / posicion no se guarda dos veces "
+              "(idempotencia, regla 37)", (n_m, n_q, n_p) == (1, 1, 1),
+              (n_m, n_q, n_p))
+    # el hito del MISMO token a OTRO nivel si es una fila nueva
+    conn.execute("INSERT OR IGNORE INTO token_milestones "
+                 "(mint, milestone_usd, first_reached_ts) "
+                 "VALUES ('MZ', 1000000, ?)", (ahora + 60,))
+    conn.commit()
+    comprobar("…pero el mismo token en OTRO nivel de MC si es una fila nueva",
+              conn.execute("SELECT COUNT(*) c FROM token_milestones"
+                           ).fetchone()["c"] == 2)
+
+    # ── 5) las tablas con id automatico funcionan ────────────────────
+    conn.execute("DELETE FROM analysis_events")
+    conn.execute("DELETE FROM helius_ledger")
+    conn.execute("INSERT INTO analysis_events (ts, entity_type, entity_id, "
+                 "stage, decision, reason, score, data_source, "
+                 "model_version, config_version) VALUES "
+                 "(?, 'wallet', 'W1', 'promocion', 'rechazada', 'hold 2 h', "
+                 "12.5, 'trades', 'reglas-v2', ?)",
+                 (ahora, _cfg.CONFIG_VERSION))
+    conn.execute("INSERT INTO helius_ledger (ts, endpoint, metodo, "
+                 "entity_type, entity_id, cost, success, latency_ms, "
+                 "bucket) VALUES (?, 'rpc', 'getTransactionsForAddress', "
+                 "'mint', 'MZ', 200, 1, 850, 'discovery')", (ahora,))
+    conn.commit()
+    ev = conn.execute("SELECT id, config_version FROM analysis_events"
+                      ).fetchone()
+    comprobar("analysis_events guarda la decision con su version de "
+              "configuracion y un id automatico",
+              ev is not None and ev["id"] >= 1
+              and ev["config_version"] == _cfg.CONFIG_VERSION,
+              dict(ev) if ev else ev)
+    comprobar("helius_ledger guarda el coste por llamada con su bucket",
+              conn.execute("SELECT SUM(cost) s FROM helius_ledger"
+                           ).fetchone()["s"] == 200)
+    for t in ("token_milestones", "helius_queue", "wallet_positions",
+              "analysis_events", "helius_ledger"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+
+    # ── 6) configuracion centralizada ────────────────────────────────
+    comprobar("el interruptor maestro esta APAGADO: el bot se comporta "
+              "igual que hoy", _cfg.EMBUDO_V2_ACTIVO == 0)
+    comprobar("la vara del dueño esta puesta: 24 h de holding minimo, "
+              "ganador desde 500K y breakout en 1M",
+              _cfg.HOLD_MIN_HOURS == 24.0
+              and _cfg.MIN_WINNER_MC == 500_000
+              and _cfg.BREAKOUT_MC == 1_000_000)
+    comprobar("los hitos incluyen 500K y 1M y van de menor a mayor",
+              500_000 in _cfg.TOKEN_MILESTONES_USD
+              and 1_000_000 in _cfg.TOKEN_MILESTONES_USD
+              and _cfg.TOKEN_MILESTONES_USD == sorted(
+                  _cfg.TOKEN_MILESTONES_USD),
+              _cfg.TOKEN_MILESTONES_USD)
+    comprobar("los cuatro sobres del presupuesto de Helius suman 100 %",
+              (_cfg.HELIUS_DISCOVERY_BUDGET_PCT + _cfg.HELIUS_WALLET_BUDGET_PCT
+               + _cfg.HELIUS_DEEP_BUDGET_PCT
+               + _cfg.HELIUS_RESERVE_BUDGET_PCT) == 100)
+    comprobar("el presupuesto v2 es el mismo total que el contador de hoy",
+              _cfg.HELIUS_MONTHLY_BUDGET == _cfg.HELIUS_MONTHLY_CREDITS)
+    comprobar("la definicion unica de posicion cerrada (70-105 %) y el "
+              "tope de profit factor estan en config, no repartidos",
+              _cfg.POSICION_CERRADA_MIN_FRAC == 0.70
+              and _cfg.POSICION_CERRADA_MAX_FRAC == 1.05
+              and _cfg.PF_MAX > 0)
+    comprobar("los retrasos del replay son numeros enteros de segundos",
+              _cfg.COPY_DELAY_TESTS == [5, 15, 30, 60, 300])
+    comprobar("una lista mal escrita en el entorno NO tumba el arranque",
+              _cfg._lista_num("NO_EXISTE_ESTA_VAR", [1, 2]) == [1.0, 2.0])
+    # AUTO_CYCLE_HOURS NO se centraliza: hay una prueba (19-U) que exige
+    # que NO este en config, porque leerlo de ahi con un defecto ya
+    # triplico el cupo de evaluaciones una vez. Queda para la fase 7 y
+    # tendra que ser una funcion, no una constante.
+    comprobar("el ciclo automatico sigue leyendose del entorno (la leccion "
+              "19-K se respeta)", not hasattr(_cfg, "AUTO_CYCLE_HOURS"))
+
+    # ── 7) la migracion a Postgres se lleva las tablas nuevas ────────
+    comprobar("migrate_to_pg copia las 6 tablas nuevas y sabe cuales "
+              "llevan id automatico",
+              nuevas <= set(_mig.TABLES)
+              and {"helius_ledger", "analysis_events"} <= {
+                  t for t, _c in _mig.SERIAL_TABLES},
+              sorted(nuevas - set(_mig.TABLES)))
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -15142,6 +15322,7 @@ def main():
     prueba_19av()
     prueba_19aw()
     prueba_19ax()
+    prueba_19az()
 
     print("\n" + "─" * 60)
     if _FALLOS:
