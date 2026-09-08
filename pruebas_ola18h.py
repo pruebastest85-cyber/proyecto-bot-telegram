@@ -16456,6 +16456,226 @@ def prueba_19bf():
     conn.close()
     HL._BUF.clear()
 
+def prueba_19bg():
+    bloque("19-BG (fase 8) - cazar billeteras que MULTIPLICAN metiendo "
+           "poco: la nota de la fase 6 solo alcanzaba a las 4.009 que el "
+           "embudo viejo ya habia perfilado")
+    import config as _cfg
+    import descubrimiento as D
+    import wallet_quality as Q
+    from db import get_conn
+
+    AHORA = 1_700_000_000
+    H = 3600
+
+    def _c(w, sol, ts=AHORA):
+        return {"wallet": w, "sol": sol, "tokens": 1000.0, "time": ts,
+                "signature": f"c{w}"}
+
+    def _v(w, ts=AHORA + 60):
+        return {"wallet": w, "sol": 9.0, "tokens": 1000.0, "time": ts,
+                "signature": f"v{w}"}
+
+    # ── 1) el criterio del dueño: poco capital, sin soltar ───────────
+    buys = [_c("Wpoco", 1.5), _c("Wballena", 120.0), _c("Wpolvo", 0.01),
+            _c("Wvoltea", 2.0), _c("Wjusto", 5.0)]
+    sells = [_v("Wvoltea")]
+    cands = D.elegir_candidatas(buys, sells)
+    nombres = [c["wallet"] for c in cands]
+    comprobar("entra quien metio poco y no vendio en el arranque",
+              "Wpoco" in nombres)
+    comprobar("la ballena queda fuera: gana a menudo pero multiplica x2,6, "
+              "que es lo contrario de lo que se busca",
+              "Wballena" not in nombres)
+    comprobar("el polvo queda fuera: con 0,01 SOL el multiplo se dispara "
+              "sin significar nada (en la base hay un x1.358 asi)",
+              "Wpolvo" not in nombres)
+    comprobar("quien SOLTO dentro de la ventana queda fuera: es un "
+              "volteador, no alguien a quien copiar",
+              "Wvoltea" not in nombres)
+    comprobar("el borde de la banda entra (5 SOL con tope en 5)",
+              "Wjusto" in nombres)
+    comprobar("y salen ordenadas por capital ASCENDENTE: primero quien "
+              "arriesgo menos", nombres == sorted(
+                  nombres, key=lambda n: {c["wallet"]: c["sol"]
+                                          for c in cands}[n]))
+
+    # Trocear la compra no sirve para colarse como pequeño.
+    troceada = D.elegir_candidatas([_c("Wtroza", 3.0), _c("Wtroza", 3.0),
+                                    _c("Wtroza", 3.0)], [])
+    comprobar("partir la compra en tres trozos NO cuela: se suma lo que "
+              "metio en total (9 SOL, fuera de banda)",
+              [c["wallet"] for c in troceada] == [])
+
+    # A las que ya tenemos medidas no se les vuelve a pagar.
+    comprobar("una billetera que ya tenemos medida no se vuelve a "
+              "perfilar (seria pagar dos veces por lo mismo)",
+              [c["wallet"] for c in D.elegir_candidatas(
+                  buys, sells, {"Wpoco"})] == ["Wjusto"])
+
+    # Los umbrales mandan de verdad.
+    _mn, _mx = _cfg.DESCUBRIMIENTO_MIN_SOL, _cfg.DESCUBRIMIENTO_MAX_SOL
+    try:
+        _cfg.DESCUBRIMIENTO_MAX_SOL = 200.0
+        comprobar("si el dueño sube el techo, la ballena entra: los "
+                  "umbrales se leen de verdad",
+                  "Wballena" in [c["wallet"]
+                                 for c in D.elegir_candidatas(buys, sells)])
+    finally:
+        _cfg.DESCUBRIMIENTO_MIN_SOL, _cfg.DESCUBRIMIENTO_MAX_SOL = _mn, _mx
+    comprobar("el tope de candidatas por token se respeta",
+              len(D.elegir_candidatas(
+                  [_c(f"W{i}", 1.0 + i * 0.01) for i in range(50)], [],
+                  limite=7)) == 7)
+
+    # ── 2) a que tokens se va ───────────────────────────────────────
+    conn = get_conn()
+    for t in ("token_milestones", "winning_tokens", "helius_queue",
+              "analysis_events", "wallet_positions", "trades"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    nivel = float(_cfg.MIN_WINNER_MC)
+    for mint, ath, surv in (("Mvivo", 9_000_000, 1), ("Mmuerto", 8_000_000, 0),
+                            ("Mnosabe", 2_000_000, None)):
+        conn.execute("INSERT INTO winning_tokens (mint, symbol, ath_mc, "
+                     "survival_24h) VALUES (?,?,?,?)",
+                     (mint, mint, ath, surv))
+        conn.execute("INSERT INTO token_milestones (mint, milestone_usd, "
+                     "first_reached_ts, source, confidence) VALUES "
+                     "(?,?,?,'prueba','alta')", (mint, nivel, AHORA))
+    conn.execute("INSERT INTO token_milestones (mint, milestone_usd, "
+                 "first_reached_ts, source, confidence) VALUES "
+                 "('Mpequeno',100000.0,?,'prueba','alta')", (AHORA,))
+    conn.commit()
+    objetivo = [t["mint"] for t in D.tokens_a_explorar(conn, 10)]
+    comprobar("solo van tokens que cruzaron el nivel de ganador",
+              "Mpequeno" not in objetivo)
+    comprobar("el que SABEMOS que murio no se explora",
+              "Mmuerto" not in objetivo)
+    comprobar("pero el de supervivencia desconocida SI: 'no se sabe' no "
+              "es 'no' (regla de la fase 4)", "Mnosabe" in objetivo)
+    comprobar("y van primero los que mas alto llegaron",
+              bool(objetivo) and objetivo[0] == "Mvivo", objetivo)
+
+    # ── 3) la cola no duplica ni se olvida ──────────────────────────
+    comprobar("encolar escribe la candidata",
+              D.encolar(conn, "Wa", 900, "prueba") is True)
+    D.encolar(conn, "Wa", 950, "prueba otra vez")
+    conn.commit()
+    comprobar("encolar dos veces la misma NO duplica: actualiza",
+              conn.execute("SELECT COUNT(*) c FROM helius_queue WHERE "
+                           "entity_id='Wa'").fetchone()["c"] == 1)
+    D.encolar(conn, "Wb", 800, "prueba")
+    conn.commit()
+    pend = [p["entity_id"] for p in D.pendientes(conn, 10)]
+    comprobar("las pendientes salen por prioridad: primero la que menos "
+              "capital metio", pend == ["Wa", "Wb"])
+    D.marcar(conn, "Wa", "hecha", 1)
+    comprobar("una ya hecha desaparece de las pendientes",
+              [p["entity_id"] for p in D.pendientes(conn, 10)] == ["Wb"])
+
+    # ── 4) el tope de creditos corta de verdad ──────────────────────
+    _gastado = D._gastado_desde
+    _presu = D._hay_presupuesto
+    llamadas = []
+    try:
+        D._gastado_desde = lambda c, t: 999_999      # ya pasado de tope
+        D._hay_presupuesto = lambda: True
+        import io as _io
+        import contextlib as _ctx
+        with _ctx.redirect_stdout(_io.StringIO()) as sal:
+            mirados, enc = D.explorar(conn, [{"mint": "Mvivo",
+                                              "symbol": "V"}], 1000, 0)
+        comprobar("con el tope de creditos ya superado NO se baja ni un "
+                  "token", mirados == 0 and enc == 0
+                  and "tope" in sal.getvalue())
+        with _ctx.redirect_stdout(_io.StringIO()) as sal2:
+            hechas = D.atender_cola(conn, 1000, 0)
+        comprobar("ni se perfila ni una billetera de la cola",
+                  hechas == 0 and "tope" in sal2.getvalue())
+        # Y el freno global manda por encima del tope de la pasada.
+        D._gastado_desde = lambda c, t: 0
+        D._hay_presupuesto = lambda: False
+        with _ctx.redirect_stdout(_io.StringIO()) as sal3:
+            mirados2, _ = D.explorar(conn, [{"mint": "Mvivo",
+                                             "symbol": "V"}], 10**9, 0)
+        comprobar("y con el freno global del 85 % activo tampoco se "
+                  "explora, aunque el tope de la pasada sobre",
+                  mirados2 == 0 and "freno" in sal3.getvalue())
+        llamadas.append(1)
+    finally:
+        D._gastado_desde = _gastado
+        D._hay_presupuesto = _presu
+    comprobar("los frenos se probaron de verdad", llamadas == [1])
+
+    # ── 5) mirar quien multiplica con poco ──────────────────────────
+    conn.execute("DELETE FROM wallet_positions")
+    conn.commit()
+    def _pos(w, mint, entra, sale, horas=50):
+        conn.execute(
+            """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+                 realized_pnl, roi_pct, holding_seconds, held_24h,
+                 position_status, history_complete, sell_count)
+               VALUES (?,?,?,?,?,?,?,1,'cerrada',1,1)""",
+            (w, mint, entra, sale, sale - entra,
+             (sale - entra) / entra * 100.0, int(horas * H)))
+    # Wchico multiplica x5 con 2 SOL (gana 8 por operacion).
+    # Wmediano multiplica x3 con 4,5 SOL, pero gana MAS dinero (9 por
+    # operacion) y ADEMAS esta dentro de la banda: es el que delataria
+    # un ranking que ordenara por PnL absoluto en vez de por multiplo.
+    # Wgrande y Wmigaja estan fuera de la banda por arriba y por abajo.
+    for i in range(3):
+        _pos("Wchico", f"M{i}", 2.0, 10.0)
+        _pos("Wmediano", f"M{i}", 4.5, 13.5)
+        _pos("Wgrande", f"M{i}", 130.0, 200.0)
+        _pos("Wmigaja", f"M{i}", 0.02, 0.6)
+    conn.commit()
+    ef = [f["wallet"] for f in Q.eficientes(conn, 10)]
+    comprobar("manda el MULTIPLO, no el dinero: x5 con 2 SOL va por "
+              "delante de x3 con 4,5 aunque este gane mas por operacion",
+              ef[:2] == ["Wchico", "Wmediano"], ef)
+    comprobar("el que multiplica x5 con 2 SOL manda sobre el que gana mas "
+              "dinero metiendo 130", bool(ef) and ef[0] == "Wchico")
+    comprobar("el de 130 SOL por operacion ni aparece: esta fuera de la "
+              "banda de poco capital", "Wgrande" not in ef)
+    comprobar("y el de migajas tampoco, aunque su multiplo sea enorme",
+              "Wmigaja" not in ef)
+    txt = Q.eficientes_text(conn, 5)
+    comprobar("el texto dice el multiplo y el capital tipico, no solo el "
+              "PnL", "x5" in txt and "SOL típicos" in txt)
+
+    # ── 6) interruptores y cableado ─────────────────────────────────
+    comprobar("hay interruptor, banda y topes configurables",
+              hasattr(_cfg, "DESCUBRIMIENTO_ACTIVO")
+              and hasattr(_cfg, "DESCUBRIMIENTO_MIN_SOL")
+              and hasattr(_cfg, "DESCUBRIMIENTO_MAX_SOL")
+              and hasattr(_cfg, "DESCUBRIMIENTO_CREDITOS_POR_PASADA"))
+    comprobar("el tope de creditos por pasada es una fraccion pequeña de "
+              "la cuota mensual (no puede repetirse lo del 3/9)",
+              0 < _cfg.DESCUBRIMIENTO_CREDITOS_POR_PASADA
+              <= _cfg.HELIUS_MONTHLY_CREDITS / 100)
+    _tb = open("telegram_bot.py", encoding="utf-8").read()
+    comprobar("el job mira su interruptor de verdad",
+              'int(getattr(_c, "DESCUBRIMIENTO_ACTIVO", 1))' in _tb)
+    comprobar("esta dado de alta con reloj persistente",
+              '_con_reloj("descubrimiento"' in _tb
+              and '_reloj_first("descubrimiento"' in _tb)
+    comprobar("el comando nuevo es /cazar y NO pisa al /descubrir de "
+              "siempre, que busca TOKENS",
+              'CommandHandler("cazar", cmd_cazar)' in _tb
+              and _tb.count('CommandHandler("descubrir", cmd_descubrir)') == 1)
+    _d = open("descubrimiento.py", encoding="utf-8").read()
+    comprobar("el descubrimiento declara su sobre en el libro de cuentas",
+              'contexto("descubrimiento", "token", mint)' in _d)
+    comprobar("y reutiliza el perfilador de siempre en vez de duplicarlo",
+              "from wallet_profiler import profile_wallet" in _d)
+
+    for t in ("token_milestones", "winning_tokens", "helius_queue",
+              "analysis_events", "wallet_positions", "trades"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -16539,6 +16759,7 @@ def main():
     prueba_19bd()
     prueba_19be()
     prueba_19bf()
+    prueba_19bg()
 
     print("\n" + "─" * 60)
     if _FALLOS:
