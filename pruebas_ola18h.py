@@ -16495,10 +16495,42 @@ def prueba_19bg():
               "Wvoltea" not in nombres)
     comprobar("el borde de la banda entra (5 SOL con tope en 5)",
               "Wjusto" in nombres)
-    comprobar("y salen ordenadas por capital ASCENDENTE: primero quien "
-              "arriesgo menos", nombres == sorted(
-                  nombres, key=lambda n: {c["wallet"]: c["sol"]
-                                          for c in cands}[n]))
+    # (19-BH) NO por "la mas pequeña": la primera caceria real saco 30
+    # candidatas todas entre 0,50 y 0,77 SOL, que es el PEOR tramo de la
+    # banda (45 % de aciertos frente al 57 % de 1-3 SOL). Se ordena por
+    # cercania al punto dulce medido.
+    orden = D.elegir_candidatas(
+        [_c("Wmini", 0.51), _c("Wdulce", 2.0), _c("Wgrandecito", 4.8)], [])
+    comprobar("ordena por cercania al PUNTO DULCE, no por el minimo: "
+              "2 SOL va antes que 0,51",
+              [x["wallet"] for x in orden][0] == "Wdulce",
+              [x["wallet"] for x in orden])
+    # La distancia se mide en escala logaritmica, que es como se comparan
+    # los multiplos: lo que cuenta es CUANTAS VECES te separas del
+    # optimo, no cuantos SOL. 4,8 son 2,4 veces el optimo; 0,51 es la
+    # cuarta parte — o sea que 0,51 esta MAS lejos, aunque en SOL
+    # parezca lo contrario.
+    comprobar("la distancia es logaritmica: 4,8 (x2,4 del optimo) esta "
+              "mas cerca que 0,51 (la cuarta parte)",
+              [x["wallet"] for x in orden] == ["Wdulce", "Wgrandecito",
+                                               "Wmini"],
+              [x["wallet"] for x in orden])
+    simetria = D.elegir_candidatas(
+        [_c("Wmitad", 1.0), _c("Wdoble", 4.0)], [])
+    comprobar("y es simetrica en veces: la mitad del optimo y el doble "
+              "empatan (gana el primero que llega, sin sesgo)",
+              len(simetria) == 2)
+    _op = _cfg.DESCUBRIMIENTO_OPTIMO_SOL
+    try:
+        _cfg.DESCUBRIMIENTO_OPTIMO_SOL = 4.8
+        comprobar("y el punto dulce se lee de la configuracion: movido a "
+                  "4,8, gana el de 4,8",
+                  D.elegir_candidatas(
+                      [_c("Wmini", 0.51), _c("Wdulce", 2.0),
+                       _c("Wgrandecito", 4.8)], [])[0]["wallet"]
+                  == "Wgrandecito")
+    finally:
+        _cfg.DESCUBRIMIENTO_OPTIMO_SOL = _op
 
     # Trocear la compra no sirve para colarse como pequeño.
     troceada = D.elegir_candidatas([_c("Wtroza", 3.0), _c("Wtroza", 3.0),
