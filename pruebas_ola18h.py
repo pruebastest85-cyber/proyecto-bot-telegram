@@ -15957,6 +15957,99 @@ def prueba_19bc():
     conn.commit()
     conn.close()
 
+def prueba_19bd():
+    bloque("19-BD - el reloj de los jobs perdia un sondeo entero cada "
+           "vez: `posiciones` (60 min) corria cada 87,7 minutos")
+    import asyncio as _aio
+    import contextlib
+    import io as _io
+    import time as _t
+    import telegram_bot as tb
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    NOM = "prueba19bd"
+    IV = 3600
+
+    class _Ctx:
+        pass
+    _ctx = _Ctx()
+    corridas = []
+
+    async def _job(ctx):
+        corridas.append(_t.time())
+
+    def _limpiar():
+        for k in (f"job_ts:{NOM}", f"job_intento:{NOM}"):
+            conn.execute("DELETE FROM settings WHERE key=?", (k,))
+        conn.commit()
+        corridas.clear()
+
+    # ── 1) el caso real: el reloj se sella al TERMINAR ───────────────
+    # El sondeo cae en una rejilla fija, asi que al llegar el siguiente
+    # han pasado "un intervalo menos lo que tardo el job". Aqui se
+    # simula con 10 s de retraso, mucho menos que los 90 de margen.
+    _limpiar()
+    set_setting(conn, f"job_ts:{NOM}", _t.time() - (IV - 10))
+    conn.commit()
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj(NOM, _job, IV)(_ctx))
+    comprobar("faltando 10 s para el intervalo, el job SI corre (antes "
+              "se saltaba y esperaba otro sondeo de 30 minutos)",
+              len(corridas) == 1)
+
+    # ── 2) el margen no abre la mano de mas ──────────────────────────
+    _limpiar()
+    set_setting(conn, f"job_ts:{NOM}", _t.time() - (IV / 2))
+    conn.commit()
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj(NOM, _job, IV)(_ctx))
+    comprobar("a mitad del intervalo NO corre: el margen es un margen, "
+              "no una puerta abierta", corridas == [])
+
+    _limpiar()
+    set_setting(conn, f"job_ts:{NOM}", _t.time() - (IV - 300))
+    conn.commit()
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj(NOM, _job, IV)(_ctx))
+    comprobar("faltando 5 minutos (mas que el margen) tampoco corre",
+              corridas == [])
+
+    # ── 3) el margen esta puesto y es razonable ──────────────────────
+    comprobar("el margen es una constante con nombre, no un numero "
+              "suelto por el codigo", hasattr(tb, "_RELOJ_MARGEN_S"))
+    comprobar("y vale menos que el sondeo mas corto (si no, un job "
+              "podria correr dos veces seguidas)",
+              0 < tb._RELOJ_MARGEN_S < 300)
+
+    # ── 4) el margen se aplica DE VERDAD, no solo existe ─────────────
+    _margen = tb._RELOJ_MARGEN_S
+    try:
+        tb._RELOJ_MARGEN_S = 0
+        _limpiar()
+        set_setting(conn, f"job_ts:{NOM}", _t.time() - (IV - 10))
+        conn.commit()
+        with contextlib.redirect_stdout(_io.StringIO()):
+            _aio.run(tb._con_reloj(NOM, _job, IV)(_ctx))
+        comprobar("con el margen a cero vuelve el fallo de antes: el "
+                  "mismo caso ya NO corre", corridas == [])
+    finally:
+        tb._RELOJ_MARGEN_S = _margen
+
+    # ── 5) sin intervalo no se mira ningun reloj (daily_summary) ─────
+    _limpiar()
+    set_setting(conn, f"job_ts:{NOM}", _t.time())
+    conn.commit()
+    with contextlib.redirect_stdout(_io.StringIO()):
+        _aio.run(tb._con_reloj(NOM, _job)(_ctx))
+    comprobar("un job sin intervalo (el resumen diario) corre igual: su "
+              "\"toca o no\" lo decide otra cosa", len(corridas) == 1)
+
+    _limpiar()
+    conn.execute("DELETE FROM errors WHERE modulo LIKE 'job:prueba19bd%'")
+    conn.commit()
+    conn.close()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -16037,6 +16130,7 @@ def main():
     prueba_19ba()
     prueba_19bb()
     prueba_19bc()
+    prueba_19bd()
 
     print("\n" + "─" * 60)
     if _FALLOS:
