@@ -331,6 +331,69 @@ def mejores(conn, limite: int = 15, solo_aguantan: bool = True) -> list[dict]:
         return []
 
 
+def eficientes(conn, limite: int = 15) -> list[dict]:
+    """Las que MULTIPLICAN metiendo poco: el criterio literal del dueño.
+
+    No ordena por PnL absoluto —eso corona a quien mete 130 SOL para
+    sacar 205— sino por el multiplo TIPICO de quien opera con capital
+    pequeño. El suelo de capital no es un adorno: con posiciones de
+    milesimas de SOL el multiplo se dispara sin significar nada (en la
+    base hay un "x1.358" que metio 0,004 SOL).
+
+    Se calcula sobre `wallet_positions` en el momento de preguntar, y no
+    se guarda en ninguna columna: es una forma de MIRAR lo ya medido, no
+    una nota nueva que pueda quedarse vieja.
+    """
+    minimo = _cfg("DESCUBRIMIENTO_MIN_SOL", 0.5)
+    maximo = _cfg("DESCUBRIMIENTO_MAX_SOL", 5.0)
+    minpos = int(_cfg("CALIDAD_MIN_POSICIONES", 3))
+    try:
+        filas = conn.execute(
+            """SELECT p.wallet, COUNT(*) n,
+                      AVG(p.sol_in) capital,
+                      SUM(p.sol_out) / SUM(p.sol_in) mult,
+                      SUM(CASE WHEN p.held_24h = 1 THEN 1 ELSE 0 END) agu,
+                      SUM(p.realized_pnl) pnl,
+                      MAX(COALESCE(w.q_score, -1)) q,
+                      MAX(COALESCE(w.is_tracked, 0)) est
+               FROM wallet_positions p
+               LEFT JOIN wallets w ON w.address = p.wallet
+               WHERE p.history_complete = 1
+                 AND p.position_status = 'cerrada'
+                 AND p.sol_in >= ? AND p.sol_in <= ?
+               GROUP BY p.wallet
+               HAVING COUNT(*) >= ? AND SUM(p.sol_in) > 0
+               ORDER BY mult DESC LIMIT ?""",
+            (minimo, maximo, minpos, int(limite))).fetchall()
+        return [dict(f) for f in filas]
+    except Exception as _ex:
+        _avisar_ex("wallet_quality:eficientes", _ex)
+        return []
+
+
+def eficientes_text(conn, limite: int = 12) -> str:
+    minimo = _cfg("DESCUBRIMIENTO_MIN_SOL", 0.5)
+    maximo = _cfg("DESCUBRIMIENTO_MAX_SOL", 5.0)
+    filas = eficientes(conn, limite)
+    L = [f"💎 *Multiplican metiendo poco* ({minimo:g}-{maximo:g} SOL "
+         f"por operación)", ""]
+    if not filas:
+        L.append("Todavía no hay ninguna con suficientes operaciones "
+                 "medidas en esa banda de capital.")
+        return "\n".join(L)
+    for f in filas:
+        est = " ⭐" if f["est"] else ""
+        nota = (f" · nota {f['q']:.0f}" if (f["q"] or -1) >= 0 else "")
+        L.append(f"`{f['wallet'][:10]}…`{est} *x{(f['mult'] or 0):.1f}* "
+                 f"con {(f['capital'] or 0):.1f} SOL típicos · "
+                 f"{f['n']} ops ({f['agu']} aguantadas)"
+                 f" · {(f['pnl'] or 0):+.1f} SOL{nota}")
+    L.append("")
+    L.append("_El múltiplo es del dinero puesto en esa banda, no del "
+             "total de la billetera._")
+    return "\n".join(L)
+
+
 def resumen_text(conn=None, limite: int = 10) -> str:
     propia = conn is None
     if propia:
@@ -367,7 +430,8 @@ def resumen_text(conn=None, limite: int = 10) -> str:
             L.append("")
             L.append("_Ninguna con estrategia de aguantar todavía._")
         L.append("")
-        L.append("_`/calidad todas` incluye también a las que voltean._")
+        L.append("_`/calidad todas` incluye a las que voltean · "
+                 "`/calidad poco` las que multiplican con poco capital._")
         return "\n".join(L)
     finally:
         if propia:

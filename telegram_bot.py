@@ -1288,6 +1288,29 @@ async def ledger_job(ctx: ContextTypes.DEFAULT_TYPE):
             _avisar_ex("telegram_bot:ledger_job", _ex)
 
 
+async def descubrimiento_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 8) Cada 2 h: sale a buscar billeteras NUEVAS que
+    multiplican metiendo poco capital, en tokens que llegaron alto.
+
+    ES LA PRIMERA RUTA NUEVA QUE GASTA CRÉDITOS. Lleva tope duro por
+    pasada (DESCUBRIMIENTO_CREDITOS_POR_PASADA, comprobado contra el
+    libro de cuentas) además del freno global del 85 %. Se apaga con
+    DESCUBRIMIENTO_ACTIVO=0 sin tocar código."""
+    try:
+        import config as _c
+        if not int(getattr(_c, "DESCUBRIMIENTO_ACTIVO", 1)):
+            return
+        from descubrimiento import ciclo
+        await asyncio.to_thread(ciclo)
+    except Exception as e:
+        print(f"· descubrimiento_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "descubrimiento", e)
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:descubrimiento_job", _ex)
+
+
 async def calidad_job(ctx: ContextTypes.DEFAULT_TYPE):
     """(Embudo v2, fase 6) Cada 2 h: nota de calidad de cada billetera a
     partir de sus posiciones medidas — ¿aguanta y gana, o solo voltea?
@@ -2957,6 +2980,7 @@ async def _post_init(app: Application):
             BotCommand("posiciones", "Quién ganó de verdad en cada token"),
             BotCommand("calidad", "Quién aguanta y gana (nota de calidad)"),
             BotCommand("creditos", "En qué se van los créditos de Helius"),
+            BotCommand("cazar", "Billeteras nuevas que multiplican con poco"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
@@ -3187,6 +3211,9 @@ async def cmd_calidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if len(arg) > 20:                 # parece una dirección
                 from wallet_quality import detalle_text
                 return detalle_text(conn, arg)
+            if arg.lower() in ("poco", "eficientes", "capital"):
+                from wallet_quality import eficientes_text
+                return eficientes_text(conn, 12)
             if arg.lower() in ("todas", "all"):
                 from wallet_quality import mejores
                 filas = mejores(conn, 15, solo_aguantan=False)
@@ -3205,6 +3232,19 @@ async def cmd_calidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
     txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_cazar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 8) Qué está encontrando la caza de billeteras
+    nuevas que multiplican metiendo poco capital.
+
+    Se llama `/cazar` y no `/descubrir` porque ese nombre ya es de la
+    búsqueda de TOKENS ganadores, que es otra cosa y sigue igual."""
+    await update.message.chat.send_action("typing")
+    from descubrimiento import resumen_text
+    txt = await asyncio.to_thread(resumen_text, None)
     await _send_md(update.message.chat, txt)
 
 
@@ -3969,6 +4009,7 @@ def main():
     app.add_handler(CommandHandler("posiciones", cmd_posiciones))
     app.add_handler(CommandHandler("calidad", cmd_calidad))
     app.add_handler(CommandHandler("creditos", cmd_creditos))
+    app.add_handler(CommandHandler("cazar", cmd_cazar))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
@@ -4178,6 +4219,13 @@ def main():
         interval=min(600, _SONDEO_MAX),
         first=min(_reloj_first("ledger", 600, 120), _SONDEO_MAX),
         name="ledger")
+    # (Embudo v2, fase 8) Descubrimiento dirigido: cada 2 h, desfasado
+    # media hora del de calidad para no solaparse en la base.
+    app.job_queue.run_repeating(
+        _con_reloj("descubrimiento", descubrimiento_job, 7200),
+        interval=min(7200, _SONDEO_MAX),
+        first=min(_reloj_first("descubrimiento", 7200, 1800), _SONDEO_MAX),
+        name="descubrimiento")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job, 7 * 86400),

@@ -417,6 +417,33 @@ HELIUS_LEDGER_ACTIVO = _int("HELIUS_LEDGER_ACTIVO", 1)
 # asi que 20.000 son casi tres años de historial.
 HELIUS_LEDGER_MAX = _int("HELIUS_LEDGER_MAX", 20_000)
 
+# ── Descubrimiento dirigido (fase 8) ──────────────────────────────────
+# Sale a buscar billeteras NUEVAS con el criterio del dueño: no quien
+# gano mas, sino quien MULTIPLICA metiendo poco capital. Se apaga con
+# DESCUBRIMIENTO_ACTIVO=0.
+DESCUBRIMIENTO_ACTIVO = _int("DESCUBRIMIENTO_ACTIVO", 1)
+# La banda de capital sale de la distribucion REAL de las 2.555
+# posiciones medidas: por debajo de 0,5 SOL solo el 37 % acaba en
+# ganancia (es polvo, y ademas dispara multiplos falsos: hay un caso de
+# "x1.358" que metio 0,004 SOL); entre 1 y 3 SOL esta la cola gorda
+# (percentil 90 en x8,5, uno de cada cuatro pasa de x3); por encima de
+# 30 SOL se gana a menudo pero se multiplica x2,6, que es lo contrario
+# de lo que se busca.
+DESCUBRIMIENTO_MIN_SOL = _float("DESCUBRIMIENTO_MIN_SOL", 0.5)
+DESCUBRIMIENTO_MAX_SOL = _float("DESCUBRIMIENTO_MAX_SOL", 5.0)
+DESCUBRIMIENTO_TOKENS_POR_PASADA = _int(
+    "DESCUBRIMIENTO_TOKENS_POR_PASADA", 3)
+DESCUBRIMIENTO_CANDIDATOS_POR_TOKEN = _int(
+    "DESCUBRIMIENTO_CANDIDATOS_POR_TOKEN", 10)
+DESCUBRIMIENTO_PERFILES_POR_PASADA = _int(
+    "DESCUBRIMIENTO_PERFILES_POR_PASADA", 25)
+# TOPE DURO de creditos por pasada, comprobado contra el libro de la
+# fase 7. Con ~200 por token y ~230 por billetera, una pasada normal
+# ronda los 7.500: 30.000 deja margen de sobra y aun asi hace imposible
+# repetir lo del 3 de septiembre (2,4 millones en un dia).
+DESCUBRIMIENTO_CREDITOS_POR_PASADA = _int(
+    "DESCUBRIMIENTO_CREDITOS_POR_PASADA", 30_000)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]

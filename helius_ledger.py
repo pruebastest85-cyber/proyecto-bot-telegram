@@ -8,8 +8,14 @@ Hoy todo el gasto de Helius se aplasta en UN contador diario
 (`api_helius_credits_<fecha>`). Con eso se sabe cuanto se gasto, pero no
 en que. Y eso ya duele: en la base del dueño, cuatro dias seguidos
 (31/08 a 03/09) se comieron 4.602.170 creditos — el 46 % del mes — con
-el 03/09 solo en 2.443.860 (el 24 % de la cuota mensual en un dia). No
-hay forma de saber que lo causo, porque nada lo apunta.
+el 03/09 solo en 2.443.860 (el 24 % de la cuota mensual en un dia).
+
+Que fue, se supo preguntandole al dueño: el perfilado de billeteras. Lo
+que NO estaba en ningun sitio —y solo se vio reconstruyendolo a mano— es
+que aquellos dias cada llamada costaba 100-140 creditos (la API cara)
+frente a los 33-52 de hoy (la ruta RPC). O sea que no fue "perfilar
+mucho" sino "perfilar mucho por el camino diez veces mas caro". Con esto
+puesto, eso se ve en el momento.
 
 Este modulo lo apunta: por dia, por endpoint y por SOBRE (el bucket del
 encargo). Asi la proxima vez que un dia se dispare, la respuesta esta en
