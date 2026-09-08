@@ -268,6 +268,95 @@ def extract_buys(txs: list[dict], mint: str) -> list[dict]:
     return buys
 
 
+def extract_sells(txs: list[dict], mint: str) -> list[dict]:
+    """
+    Detecta ventas en las MISMAS transacciones que ya se descargaron:
+      venta = feePayer ENVIÓ el mint Y recibió SOL en la misma tx.
+
+    (Embudo v2, fase 5) Es el espejo exacto de `extract_buys`, y su valor
+    esta en lo que NO cuesta: no se le pide nada nuevo a Helius, se leen
+    las transacciones que `fetch_earliest_txs` ya trajo para las compras.
+    El embudo llevaba desde siempre pagando por estas transacciones y
+    tirando la mitad de la informacion que venia dentro.
+
+    Sin las ventas no se puede contestar lo unico que el dueño pregunta:
+    cuanto GANO esa billetera en ese token y cuanto tiempo lo AGUANTO.
+
+    OJO con lo que NO es una venta: mandar el token a otra cuenta propia,
+    a un puente o a un contrato de staking mueve tokens sin recibir SOL.
+    Por eso se exige SOL de vuelta, igual que la compra exige SOL de ida.
+    """
+    sells = []
+    for tx in txs:
+        if tx.get("transactionError"):
+            continue
+        seller = tx.get("feePayer")
+        if not seller:
+            continue
+
+        sent_token = False
+        tokens_out = 0.0
+        for t in (tx.get("tokenTransfers") or []):
+            if t.get("mint") == mint and t.get("fromUserAccount") == seller:
+                sent_token = True
+                try:
+                    tokens_out += float(t.get("tokenAmount") or 0)
+                except (TypeError, ValueError):
+                    pass
+        if not sent_token:
+            continue
+
+        sol_in = 0.0
+        for n in (tx.get("nativeTransfers") or []):
+            if n.get("toUserAccount") == seller:
+                if n.get("fromUserAccount") in JITO_TIP_ACCOUNTS:
+                    continue   # devolución de propina: no es precio
+                sol_in += int(n.get("amount", 0)) / LAMPORTS
+
+        if sol_in <= 0:
+            # Respaldo: el saldo nativo del vendedor SUBIÓ en esta tx. Ese
+            # delta ya lleva la comisión restada, así que un saldo neto a
+            # favor es una venta con toda seguridad.
+            for acc in (tx.get("accountData") or []):
+                if acc.get("account") == seller:
+                    delta = int(acc.get("nativeBalanceChange", 0))
+                    if delta > 0:
+                        sol_in = delta / LAMPORTS
+                    break
+
+        if sol_in > 0:
+            precio_salida = (sol_in / tokens_out) if tokens_out > 0 else None
+            sells.append({
+                "wallet": seller,
+                "sol": sol_in,
+                "tokens": tokens_out,
+                "precio_salida": precio_salida,
+                "time": tx.get("timestamp"),
+                "signature": tx.get("signature", ""),
+            })
+    return sells
+
+
+def operaciones_del_token(txs: list[dict], mint: str) -> list[dict]:
+    """Compras y ventas juntas, en el formato que entiende `posiciones`.
+
+    Existe para que quien reconstruya posiciones no tenga que conocer las
+    dos funciones ni el nombre de sus campos: aqui se traduce una sola vez
+    (`precio_entrada`/`precio_salida` → `side`) y se ordena por tiempo.
+    """
+    ops = []
+    for b in extract_buys(txs, mint):
+        ops.append({"wallet": b["wallet"], "side": "compra", "sol": b["sol"],
+                    "tokens": b["tokens"], "ts": b["time"],
+                    "signature": b["signature"]})
+    for s in extract_sells(txs, mint):
+        ops.append({"wallet": s["wallet"], "side": "venta", "sol": s["sol"],
+                    "tokens": s["tokens"], "ts": s["time"],
+                    "signature": s["signature"]})
+    ops.sort(key=lambda o: (o["ts"] or 0))
+    return ops
+
+
 # (19-AJ) Reintentos por token cuando DexScreener no da precio: en memoria
 # (un reinicio los pone a cero, que es lo mas benigno).
 _SIN_PRECIO_INTENTOS = {}
@@ -378,12 +467,37 @@ def analyze_token(conn, token) -> int:
     # delay no significa nada y se deja vacío.
     t0 = (txs[0].get("timestamp") or 0) if historial_completo else 0
     buys = extract_buys(txs, mint)
-    print(f"  · {len(txs)} txs tempranas → {len(buys)} compras detectadas")
+    # (Embudo v2, fase 5) Las ventas salen de estas MISMAS transacciones:
+    # cero créditos añadidos. Ojo con lo que esta ventana puede y no puede
+    # decir: cubre el ARRANQUE del token (las primeras EARLY_BUYER_WINDOW
+    # transacciones), así que una venta vista aquí es una venta TEMPRANA
+    # —eso es un dato fiable y muy útil: quien ya soltó en el arranque es
+    # un volteador, no alguien a quien copiar—, pero NO ver ninguna venta
+    # aquí NO significa que aguantara: puede haber vendido más tarde,
+    # fuera de la ventana. Por eso esto solo marca a los que SÍ vendieron
+    # pronto, y el PnL de verdad se calcula en `posiciones` con el
+    # historial completo de la billetera, nunca desde aquí.
+    volteadores = {}
+    try:
+        for s in extract_sells(txs, mint):
+            w, ts = s.get("wallet"), s.get("time")
+            if not w:
+                continue
+            ant = volteadores.get(w)
+            if ant is None or (ts and ts < ant):
+                volteadores[w] = ts
+    except Exception as _ex:
+        _avisar_ex("wallet_analyzer:analyze_token:ventas", _ex)
+    print(f"  · {len(txs)} txs tempranas → {len(buys)} compras detectadas"
+          + (f" · {len(volteadores)} vendieron ya en el arranque"
+             if volteadores else ""))
 
     end_rank = int(getattr(config, "BUYER_END_RANK", 600))
     min_obs = float(getattr(config, "MIN_OBS_BUY_SOL", 0.3))
     registered = 0
     descartados_tarde = 0
+    eventos = []
+    volteo_rapido = 0
     for rank, buy in enumerate(buys):
         if rank + 1 > end_rank:
             break              # fuera de la ventana de observación
@@ -427,6 +541,25 @@ def analyze_token(conn, token) -> int:
             reason = (f"Compró {buy['sol']:.2f} SOL de {symbol} {_puesto}"
                       f"antes de subida de "
                       f"+{token['price_change_24h']:.0f}% en 24h (tx {sig}…)")
+        # (fase 5) ¿Soltó ya en el arranque? Si la venta que vimos es
+        # POSTERIOR a esta compra, esta billetera entró y salió dentro de
+        # la ventana temprana: es un volteador. Se dice en el texto de la
+        # evidencia y queda registrado para poder medirlo después. Si la
+        # venta es ANTERIOR a la compra no cuenta: vendía algo que ya
+        # tenía, no esta posición.
+        ts_venta = volteadores.get(buy["wallet"])
+        if ts_venta and ts and ts_venta > ts:
+            horas = (ts_venta - ts) / 3600.0
+            reason += (f" · vendió {horas:.1f} h después, todavía en el "
+                       f"arranque del token")
+            volteo_rapido += 1
+            eventos.append({
+                "entity_type": "wallet", "entity_id": buy["wallet"],
+                "stage": "atribucion", "decision": "volteo_temprano",
+                "reason": (f"{symbol}: compró y vendió en {horas:.1f} h "
+                           f"dentro de las primeras {len(txs)} txs"),
+                "score": horas, "data_source": "helius:primeras_txs",
+            })
         upsert_wallet_appearance(conn, buy["wallet"], mint, buy["sol"],
                                  buy_time, rank_real, reason, delay,
                                  price_at_buy=pe, mc_at_buy=mc_entrada,
@@ -434,9 +567,24 @@ def analyze_token(conn, token) -> int:
         registered += 1
 
     mark_analyzed(conn, mint)
+    try:
+        from analysis_events import registrar, registrar_lote
+        registrar(conn, "token", mint, "atribucion", "analizado",
+                  (f"{len(txs)} txs · {len(buys)} compras · "
+                   f"{len(volteadores)} ventas tempranas · "
+                   f"{registered} registradas · {descartados_tarde} tarde"),
+                  score=registered,
+                  data_source=("helius:primeras_txs"
+                               if historial_completo else
+                               "helius:primeras_txs(parcial)"))
+        registrar_lote(conn, eventos)
+    except Exception as _ex:
+        _avisar_ex("wallet_analyzer:analyze_token:eventos", _ex)
     print(f"  ✓ {registered} billeteras registradas"
           + (f" · {descartados_tarde} descartadas por entrar tarde "
-             f"(<x{min_mult:g} desde su compra)" if descartados_tarde else ""))
+             f"(<x{min_mult:g} desde su compra)" if descartados_tarde else "")
+          + (f" · {volteo_rapido} voltearon en el arranque"
+             if volteo_rapido else ""))
     return registered
 
 

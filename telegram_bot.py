@@ -1234,6 +1234,29 @@ async def token_history_job(ctx: ContextTypes.DEFAULT_TYPE):
             _avisar_ex("telegram_bot:token_history_job", _ex)
 
 
+async def posiciones_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 5) Cada hora: junta compras y ventas en una fila
+    por (billetera, token) para saber cuánto ganó de verdad y cuánto tiempo
+    aguantó.
+
+    CERO créditos de Helius: se lee `trades`, el historial propio que el
+    perfilador lleva guardando desde diciembre. Se apaga con
+    POSICIONES_ACTIVO=0 sin tocar código."""
+    try:
+        import config as _c
+        if not int(getattr(_c, "POSICIONES_ACTIVO", 1)):
+            return
+        from posiciones import reconstruir
+        await asyncio.to_thread(reconstruir)
+    except Exception as e:
+        print(f"· posiciones_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "posiciones", e)
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:posiciones_job", _ex)
+
+
 async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
     """(Ola 14) Cada 15 min: tokens recién nacidos con smart money."""
     try:
@@ -2878,6 +2901,7 @@ async def _post_init(app: Application):
             BotCommand("estrellasperf", "Rendimiento medido de cada ⭐"),
             BotCommand("salud", "¿Está todo funcionando bien?"),
             BotCommand("tokens", "Tokens: máximo histórico y si siguen vivos"),
+            BotCommand("posiciones", "Quién ganó de verdad en cada token"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
@@ -3051,6 +3075,46 @@ async def cmd_tokens(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
     from token_history import resumen_text
     txt = await asyncio.to_thread(resumen_text, None, 10)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_posiciones(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 5) Qué hizo cada billetera en cada token: cuánto
+    ganó y cuánto tiempo aguantó. `/posiciones <mint>` para un token."""
+    await update.message.chat.send_action("typing")
+    if ctx.args:
+        mint = ctx.args[0].strip()
+
+        def _uno():
+            from db import get_conn
+            from posiciones import mejores_del_token
+            conn = get_conn()
+            try:
+                filas = mejores_del_token(conn, mint, 12)
+            finally:
+                conn.close()
+            if not filas:
+                return (f"📊 *{mint[:10]}…*\n\nTodavía no hay posiciones "
+                        f"medidas de este token. Se reconstruyen solas con "
+                        f"el historial que ya tenemos guardado.")
+            L = [f"📊 *Quién ganó en* `{mint[:10]}…`", ""]
+            for f in filas:
+                h = (f["holding_seconds"] or 0) / 3600.0
+                roi = (f"{f['roi_pct']:+.0f} %"
+                       if f["roi_pct"] is not None else "?")
+                L.append(f"`{f['wallet'][:10]}…` "
+                         f"{(f['realized_pnl'] or 0):+.2f} SOL ({roi}) · "
+                         f"{h:.0f} h dentro"
+                         + (" ✅" if f["held_24h"] else ""))
+            L.append("")
+            L.append("_✅ = aguantó más de un día._")
+            return "\n".join(L)
+
+        txt = await asyncio.to_thread(_uno)
+    else:
+        from posiciones import resumen_text as _res
+        txt = await asyncio.to_thread(_res, None, 8)
     await _send_md(update.message.chat, txt)
 
 
@@ -3770,6 +3834,7 @@ def main():
     app.add_handler(CommandHandler("estrellasperf", cmd_wallets_perf))
     app.add_handler(CommandHandler("salud", cmd_salud))
     app.add_handler(CommandHandler("tokens", cmd_tokens))
+    app.add_handler(CommandHandler("posiciones", cmd_posiciones))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
@@ -3958,6 +4023,14 @@ def main():
         interval=min(1800, _SONDEO_MAX),
         first=min(_reloj_first("token_history", 1800, 300), _SONDEO_MAX),
         name="token_history")
+    # (Embudo v2, fase 5) Posiciones: cada hora, sobre el historial propio.
+    # Va DESPUÉS del historial de mercado (media hora de desfase con
+    # `first`) porque se apoya en los hitos que aquél escribe.
+    app.job_queue.run_repeating(
+        _con_reloj("posiciones", posiciones_job, 3600),
+        interval=min(3600, _SONDEO_MAX),
+        first=min(_reloj_first("posiciones", 3600, 900), _SONDEO_MAX),
+        name="posiciones")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job, 7 * 86400),

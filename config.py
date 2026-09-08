@@ -371,6 +371,20 @@ SURVIVAL_SCORE_MIN = _float("SURVIVAL_SCORE_MIN", 50.0)
 MC_MAX_CREIBLE = _float("MC_MAX_CREIBLE", 20_000_000_000.0)
 MC_LIQ_RATIO_MAX = _float("MC_LIQ_RATIO_MAX", 10_000.0)
 
+# ── Reconstruccion de posiciones (fase 5) ─────────────────────────────
+# Junta compra y venta en UNA fila por (billetera, token) para saber
+# cuanto gano de verdad y cuanto tiempo aguanto. Se alimenta de `trades`,
+# el historial propio que el perfilador lleva guardando desde diciembre:
+# CERO creditos de Helius. Se apaga con POSICIONES_ACTIVO=0.
+POSICIONES_ACTIVO = _int("POSICIONES_ACTIVO", 1)
+# Tokens por pasada. Es lectura de `trades` y una escritura por
+# billetera; 20 tokens son segundos de trabajo y evitan tener la base
+# ocupada mucho rato con el bot corriendo.
+POSICIONES_TOKENS_POR_PASADA = _int("POSICIONES_TOKENS_POR_PASADA", 20)
+# Tope de filas del registro auditable de decisiones. La base viaja en el
+# backup de Telegram: ninguna tabla puede crecer sin freno.
+ANALYSIS_EVENTS_MAX = _int("ANALYSIS_EVENTS_MAX", 50_000)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]
