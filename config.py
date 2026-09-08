@@ -356,6 +356,21 @@ TOKEN_HISTORY_BACKFILL_POR_PASADA = _int(
 # Por debajo de esta nota (0-100) un token no cuenta como superviviente.
 SURVIVAL_SCORE_MIN = _float("SURVIVAL_SCORE_MIN", 50.0)
 
+# ── Cordura del market cap (19-BB) ────────────────────────────────────
+# El historico de `signals` trae MC contaminados por el fallo del precio
+# ajeno que se corrigio el 07/09 (19-AX): antes, si DexScreener devolvia
+# un par donde NUESTRO token era la moneda de cotizacion, se guardaba el
+# precio y el MC del OTRO token. Medido en la base: 109 señales con MC
+# >= 1.000 M, entre ellas un "token" de 13,8 BILLONES con 76 M de
+# liquidez (x182.253). Sin filtro, esas filas dan maximos historicos
+# falsos y convierten cualquier token en BREAKOUT.
+#
+# Los dos topes salen de la distribucion real: el percentil 99,9 del MC
+# es 250 M y los contaminados empiezan en 1.000 M con relaciones de
+# x95.000 para arriba. Un token de verdad ronda 5-100 veces su liquidez.
+MC_MAX_CREIBLE = _float("MC_MAX_CREIBLE", 20_000_000_000.0)
+MC_LIQ_RATIO_MAX = _float("MC_LIQ_RATIO_MAX", 10_000.0)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]

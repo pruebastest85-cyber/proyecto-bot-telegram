@@ -64,6 +64,39 @@ COLUMNAS_ESTADO = ("current_mc", "current_price", "current_liquidity",
                    "data_confidence")
 
 
+def mc_creible(mc, liq=None) -> tuple:
+    """(True/False, motivo). Un market cap que no puede ser.
+
+    (19-BB) El historico de `signals` arrastra MC del fallo del precio
+    ajeno (19-AX): un "token" de 13,8 billones con 76 M de liquidez.
+    Sin este filtro esas filas dan maximos historicos falsos y todo se
+    vuelve BREAKOUT. Los topes vienen de la distribucion medida (ver
+    config.MC_MAX_CREIBLE).
+
+    Se rechaza SOLO con evidencia: si no hay dato de liquidez, la
+    relacion no se puede juzgar y no se usa como motivo.
+    """
+    if mc is None:
+        return (False, "sin MC")
+    try:
+        mc = float(mc)
+    except (TypeError, ValueError):
+        return (False, "MC ilegible")
+    if mc <= 0:
+        return (False, "MC cero o negativo")
+    if mc > config.MC_MAX_CREIBLE:
+        return (False, f"MC de ${mc:,.0f}: por encima del tope creible")
+    try:
+        liq = float(liq) if liq is not None else None
+    except (TypeError, ValueError):
+        liq = None
+    if liq and liq > 0:
+        ratio = mc / liq
+        if ratio > config.MC_LIQ_RATIO_MAX:
+            return (False, f"MC {ratio:,.0f} veces su liquidez")
+    return (True, "")
+
+
 # ── Fotos ────────────────────────────────────────────────────────────
 
 def guardar_foto(conn, mint: str, d: dict, ts=None,
@@ -78,6 +111,13 @@ def guardar_foto(conn, mint: str, d: dict, ts=None,
     mc = d.get("mc")
     if mc is None and d.get("price") is None:
         return False            # una foto sin precio ni MC no dice nada
+    if mc is not None:
+        ok, motivo = mc_creible(mc, d.get("liq"))
+        if not ok:
+            print(f"· Historial: MC descartado en {mint[:8]}… ({motivo})")
+            mc = None           # se guarda el resto, sin inventar el MC
+            if d.get("price") is None:
+                return False
     ts = int(ts if ts is not None else time.time())
     try:
         ultima = conn.execute(
@@ -129,7 +169,7 @@ def backfill_desde_signals(conn, limite_tokens: int = 25,
     except Exception as e:
         print(f"· Historial: no pude listar tokens para el relleno ({e})")
         return 0
-    escritas = 0
+    escritas = descartadas = 0
     for c in candidatos:
         mint = c["mint"]
         try:
@@ -145,6 +185,10 @@ def backfill_desde_signals(conn, limite_tokens: int = 25,
             ts = int(f["ts"] or 0)
             if not ts or ts - ultimo < FOTO_HUECO_MIN_S:
                 continue        # una observacion cada 5 min basta
+            ok, motivo = mc_creible(f["mc"], f["liq"])
+            if not ok:
+                descartadas += 1
+                continue        # (19-BB) MC contaminado: no entra
             ultimo = ts
             try:
                 cur = conn.execute(
@@ -160,10 +204,56 @@ def backfill_desde_signals(conn, limite_tokens: int = 25,
         conn.commit()
         recalcular_hitos(conn, mint)
         recalcular_ath(conn, mint)
-    if escritas:
+    if escritas or descartadas:
         print(f"📈 Historial: {escritas} fotos recuperadas de `signals` "
-              f"({len(candidatos)} tokens)")
+              f"({len(candidatos)} tokens)"
+              + (f" · {descartadas} descartadas por MC incoherente"
+                 if descartadas else ""))
     return escritas
+
+
+def limpiar_contaminados(conn) -> int:
+    """Borra las fotos con MC imposible que ya estuvieran guardadas y
+    rehace hitos y maximo historico de esos tokens. Devuelve cuantas.
+
+    Solo toca las tablas NUEVAS, que son derivadas y se pueden
+    reconstruir; `signals` —el historico irreemplazable— no se toca.
+    Es idempotente: en la segunda pasada no encuentra nada.
+    """
+    try:
+        malas = conn.execute(
+            "SELECT mint, ts, mc, liquidity FROM token_snapshots "
+            "WHERE mc IS NOT NULL AND (mc > ? OR (liquidity IS NOT NULL "
+            "AND liquidity > 0 AND mc / liquidity > ?))",
+            (config.MC_MAX_CREIBLE, config.MC_LIQ_RATIO_MAX)).fetchall()
+    except Exception as e:
+        print(f"· Historial: no pude buscar fotos contaminadas ({e})")
+        return 0
+    if not malas:
+        return 0
+    afectados = sorted({r["mint"] for r in malas})
+    for r in malas:
+        try:
+            conn.execute("DELETE FROM token_snapshots WHERE mint = ? "
+                         "AND ts = ?", (r["mint"], int(r["ts"])))
+        except Exception as e:
+            print(f"· Historial: no pude borrar la foto mala de "
+                  f"{r['mint'][:8]}… ({e})")
+    for mint in afectados:
+        try:
+            conn.execute("DELETE FROM token_milestones WHERE mint = ?",
+                         (mint,))
+        except Exception as e:
+            print(f"· Historial: no pude rehacer los hitos de "
+                  f"{mint[:8]}… ({e})")
+    conn.commit()
+    for mint in afectados:
+        recalcular_hitos(conn, mint)
+        recalcular_ath(conn, mint, forzar=True)
+    print(f"🧹 Historial: {len(malas)} fotos con MC imposible borradas "
+          f"({len(afectados)} tokens); hitos y máximos rehechos. Venían "
+          f"del fallo del precio ajeno corregido en la 19-AX.")
+    return len(malas)
 
 
 # ── Hitos ────────────────────────────────────────────────────────────
@@ -231,9 +321,13 @@ def hito_ts(conn, mint: str, nivel: float):
 
 # ── Maximo historico ─────────────────────────────────────────────────
 
-def recalcular_ath(conn, mint: str) -> tuple:
-    """(ath_mc, ath_mc_ts) desde las fotos; lo escribe en winning_tokens
-    si mejora lo guardado. El ATH nunca baja: es historia."""
+def recalcular_ath(conn, mint: str, forzar: bool = False) -> tuple:
+    """(ath_mc, ath_mc_ts) desde las fotos; lo escribe en winning_tokens.
+
+    El ATH normalmente NUNCA baja (es historia), pero con `forzar` se
+    reescribe aunque baje: hace falta al limpiar fotos contaminadas, que
+    es el unico caso en que el maximo guardado era falso.
+    """
     try:
         r = conn.execute(
             "SELECT mc, ts FROM token_snapshots WHERE mint = ? "
@@ -246,10 +340,15 @@ def recalcular_ath(conn, mint: str) -> tuple:
         return (None, None)
     ath, ath_ts = r["mc"], int(r["ts"])
     try:
-        conn.execute(
-            "UPDATE winning_tokens SET ath_mc = ?, ath_mc_ts = ? "
-            "WHERE mint = ? AND (ath_mc IS NULL OR ath_mc < ?)",
-            (ath, ath_ts, mint, ath))
+        if forzar:
+            conn.execute(
+                "UPDATE winning_tokens SET ath_mc = ?, ath_mc_ts = ? "
+                "WHERE mint = ?", (ath, ath_ts, mint))
+        else:
+            conn.execute(
+                "UPDATE winning_tokens SET ath_mc = ?, ath_mc_ts = ? "
+                "WHERE mint = ? AND (ath_mc IS NULL OR ath_mc < ?)",
+                (ath, ath_ts, mint, ath))
         conn.commit()
     except Exception as e:
         print(f"· Historial: no pude guardar el ATH de {mint[:8]}… ({e})")
@@ -478,8 +577,10 @@ def actualizar(conn=None, limite: int | None = None,
     conn = conn or get_conn()
     limite = (config.TOKEN_HISTORY_TOKENS_POR_PASADA
               if limite is None else limite)
-    res = {"fotos": 0, "hitos": 0, "tokens": 0, "relleno": 0}
+    res = {"fotos": 0, "hitos": 0, "tokens": 0, "relleno": 0,
+           "limpiadas": 0}
     try:
+        res["limpiadas"] = limpiar_contaminados(conn)
         if con_relleno:
             res["relleno"] = backfill_desde_signals(
                 conn, config.TOKEN_HISTORY_BACKFILL_POR_PASADA)
