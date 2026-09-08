@@ -16050,6 +16050,217 @@ def prueba_19bd():
     conn.commit()
     conn.close()
 
+def prueba_19be():
+    bloque("19-BE (fase 6) - nota de calidad: quien AGUANTA y gana, no "
+           "quien llega primero")
+    import config as _cfg
+    import wallet_quality as Q
+    from db import get_conn
+
+    H = 3600
+    AHORA = 1_700_000_000
+
+    def _pos(mint, entra, sale, horas, survived=None, h1m=True):
+        roi = ((sale - entra) / entra * 100.0) if entra else None
+        return {"mint": mint, "sol_in": entra, "sol_out": sale,
+                "realized_pnl": sale - entra, "roi_pct": roi,
+                "holding_seconds": int(horas * H), "survived": survived,
+                "hito_500k": True, "hito_1m": h1m}
+
+    # ── 1) hace falta material: una golondrina no hace verano ────────
+    comprobar("con una sola posicion no hay nota (no se distingue el "
+              "acierto de la suerte)",
+              Q.calcular([_pos("M1", 1, 5, 50)]) is None)
+    comprobar("sin posiciones tampoco", Q.calcular([]) is None)
+
+    # ── 2) el que aguanta y acierta ──────────────────────────────────
+    aguanta = Q.calcular([_pos("M1", 1, 3, 50, survived=1),
+                          _pos("M2", 2, 5, 72, survived=1),
+                          _pos("M3", 1, 2.5, 30, survived=1),
+                          _pos("M4", 1, 2, 40, survived=1)])
+    comprobar("el que aguanta sale con estrategia 'aguanta' y q_hold 100",
+              aguanta["estrategia"] == "aguanta"
+              and abs(aguanta["q_hold"] - 100.0) < 1e-9)
+    comprobar("y con q_consistency 100 porque gano en las cuatro",
+              abs(aguanta["q_consistency"] - 100.0) < 1e-9)
+    comprobar("cuenta bien los aguantes y los tokens de 1M",
+              aguanta["pos_24h"] == 4 and aguanta["tok_1m"] == 4
+              and aguanta["tok_surv"] == 4)
+
+    # ── 3) el francotirador: mismo dinero, nota mucho peor ───────────
+    voltea = Q.calcular([_pos("M1", 1, 3, 0.2, survived=1),
+                         _pos("M2", 2, 5, 0.3, survived=1),
+                         _pos("M3", 1, 2.5, 0.1, survived=1),
+                         _pos("M4", 1, 2, 0.4, survived=1)])
+    comprobar("el que voltea en minutos sale como 'voltea' y con q_hold 0",
+              voltea["estrategia"] == "voltea" and voltea["q_hold"] == 0.0)
+    comprobar("gana LO MISMO y aun asi puntua peor: es lo que el dueño "
+              "pidio (aguantar manda)",
+              abs(voltea["q_profit"] - aguanta["q_profit"]) < 1e-9
+              and voltea["q_score"] < aguanta["q_score"])
+
+    # ── 4) la mediana, no la media: un x400 no disfraza el resto ─────
+    suerte = Q.calcular([_pos("M1", 1, 400, 50), _pos("M2", 1, 1.0, 50),
+                         _pos("M3", 1, 1.0, 50), _pos("M4", 1, 1.0, 50)])
+    constante = Q.calcular([_pos("M1", 1, 2.2, 50), _pos("M2", 1, 2.2, 50),
+                            _pos("M3", 1, 2.2, 50), _pos("M4", 1, 2.2, 50)])
+    comprobar("un x400 con todo lo demas plano NO gana a cuatro x2,2 "
+              "constantes: la nota mira la operacion tipica",
+              constante["q_profit"] > suerte["q_profit"])
+
+    # ── 5) "no se sabe" no cuenta como cero (regla 54) ───────────────
+    sin_dato = Q.calcular([_pos("M1", 1, 3, 50), _pos("M2", 1, 3, 50),
+                           _pos("M3", 1, 3, 50)])
+    comprobar("si no se sabe si los tokens sobrevivieron, q_survival es "
+              "NULL, no cero", sin_dato["q_survival"] is None)
+    # Y un valor que NO es ni 1 ni 0 (una fila corrupta, un dato de otra
+    # epoca) tampoco puede colarse como "sabido": daria un porcentaje
+    # imposible, del 200 %.
+    corrupto = Q.calcular([_pos("M1", 1, 3, 50, survived=2),
+                           _pos("M2", 1, 3, 50, survived=2),
+                           _pos("M3", 1, 3, 50, survived=2)])
+    comprobar("un valor de supervivencia que no es ni si ni no se ignora, "
+              "no se cuenta (daria un 200 % imposible)",
+              corrupto["q_survival"] is None)
+    murieron = Q.calcular([_pos("M1", 1, 3, 50, survived=0),
+                           _pos("M2", 1, 3, 50, survived=0),
+                           _pos("M3", 1, 3, 50, survived=0)])
+    comprobar("y el que SI sabemos que entro en tokens muertos puntua "
+              "peor que aquel del que no sabemos nada",
+              murieron["q_survival"] == 0.0
+              and murieron["q_score"] < sin_dato["q_score"])
+    comprobar("el peso de la pata que falta se reparte, no se pierde: "
+              "sin supervivencia la nota sigue siendo 0-100",
+              0.0 <= sin_dato["q_score"] <= 100.0)
+
+    # ── 6) el riesgo mira lo que pierde cuando falla ─────────────────
+    suave = Q.calcular([_pos("M1", 1, 0.9, 50), _pos("M2", 1, 3, 50),
+                        _pos("M3", 1, 3, 50)])
+    ruina = Q.calcular([_pos("M1", 1, 0.05, 50), _pos("M2", 1, 3, 50),
+                        _pos("M3", 1, 3, 50)])
+    comprobar("perder el 10 % cuando falla puntua mejor en riesgo que "
+              "perderlo casi todo", suave["q_risk"] > ruina["q_risk"])
+    limpio = Q.calcular([_pos("M1", 1, 2, 50), _pos("M2", 1, 3, 50),
+                         _pos("M3", 1, 3, 50)])
+    comprobar("y quien nunca pierde tiene el riesgo a 100",
+              limpio["q_risk"] == 100.0)
+
+    # ── 7) los pesos mandan de verdad ────────────────────────────────
+    _ph, _pp = _cfg.Q_PESO_HOLD, _cfg.Q_PESO_PROFIT
+    try:
+        _cfg.Q_PESO_HOLD, _cfg.Q_PESO_PROFIT = 0.0, 100.0
+        v2 = Q.calcular([_pos("M1", 1, 3, 0.2, survived=1),
+                         _pos("M2", 2, 5, 0.3, survived=1),
+                         _pos("M3", 1, 2.5, 0.1, survived=1),
+                         _pos("M4", 1, 2, 0.4, survived=1)])
+        comprobar("si el dueño le quita el peso a aguantar, el "
+                  "francotirador sube: los pesos se leen de verdad",
+                  v2["q_score"] > voltea["q_score"])
+    finally:
+        _cfg.Q_PESO_HOLD, _cfg.Q_PESO_PROFIT = _ph, _pp
+
+    # ── 8) contra la base, en los dos motores ────────────────────────
+    conn = get_conn()
+    for t in ("wallet_positions", "token_milestones", "winning_tokens"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wcal%'")
+    conn.commit()
+    W = "WcalAguanta"
+    conn.execute("INSERT INTO wallets (address, first_seen, last_updated) "
+                 "VALUES (?,?,?)", (W, "2026-01-01", "2026-01-01"))
+    conn.execute("INSERT INTO winning_tokens (mint, symbol, survival_24h) "
+                 "VALUES ('Mq1','Q1',1)")
+    conn.execute("INSERT INTO token_milestones (mint, milestone_usd, "
+                 "first_reached_ts, source, confidence) VALUES "
+                 "('Mq1',?,?,'prueba','alta')",
+                 (float(_cfg.BREAKOUT_MC), AHORA))
+    for i, (mint, entra, sale, horas) in enumerate([
+            ("Mq1", 1.0, 3.0, 50), ("Mq2", 1.0, 2.0, 40),
+            ("Mq3", 1.0, 2.5, 60)]):
+        conn.execute(
+            """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+                 realized_pnl, roi_pct, holding_seconds, held_24h,
+                 position_status, history_complete, sell_count)
+               VALUES (?,?,?,?,?,?,?,1,'cerrada',1,1)""",
+            (W, mint, entra, sale, sale - entra,
+             (sale - entra) / entra * 100.0, int(horas * H)))
+    # Dos que NO deben puntuar. La primera por no estar cerrada; la
+    # segunda por historia incompleta AUNQUE figure como cerrada — asi el
+    # guardia `history_complete` se comprueba solo, sin que el filtro de
+    # "cerrada" la tape.
+    conn.execute(
+        """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+             realized_pnl, roi_pct, holding_seconds, held_24h,
+             position_status, history_complete, sell_count)
+           VALUES (?,?,0,999,999,99999,3600,0,'solo_ventas',0,1)""",
+        (W, "Mbasura"))
+    conn.execute(
+        """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+             realized_pnl, roi_pct, holding_seconds, held_24h,
+             position_status, history_complete, sell_count)
+           VALUES (?,?,1,500,499,49900,3600,0,'cerrada',0,1)""",
+        (W, "Mcorrupta"))
+    conn.commit()
+
+    pos = Q.posiciones_de(conn, W)
+    comprobar("la lectura deja fuera las de historia incompleta, "
+              "incluida la que figura como cerrada",
+              len(pos) == 3
+              and all(p["mint"] not in ("Mbasura", "Mcorrupta")
+                      for p in pos))
+    comprobar("y pega la supervivencia y el hito del token",
+              any(p["mint"] == "Mq1" and p["survived"] == 1
+                  and p["hito_1m"] for p in pos))
+    nota = Q.calcular(pos)
+    comprobar("guardar escribe las columnas q_ de esa billetera",
+              Q.guardar(conn, W, nota) is True)
+    conn.commit()
+    f = conn.execute("SELECT q_score, estrategia, pos_24h, score, "
+                     "COALESCE(is_tracked,0) t FROM wallets WHERE address=?",
+                     (W,)).fetchone()
+    comprobar("la nota queda guardada con su estrategia",
+              f["q_score"] is not None and f["estrategia"] == "aguanta"
+              and f["pos_24h"] == 3)
+    comprobar("y NO toca la nota vieja ni la estrella: la fase 6 mide, "
+              "no decide", f["score"] == 0 and f["t"] == 0)
+
+    filas = Q.mejores(conn, 5, solo_aguantan=True)
+    comprobar("sale en la lista de las que aguantan",
+              any(x["address"] == W for x in filas))
+    comprobar("el detalle explica las cinco patas",
+              "Aguantar" in Q.detalle_text(conn, W)
+              and "Poco daño al fallar" in Q.detalle_text(conn, W))
+    comprobar("y de una billetera sin nota lo dice claro, sin inventar",
+              "todavía no tiene nota" in Q.detalle_text(conn, "Wdesconocida"))
+
+    pendientes = Q._a_puntuar(conn, 10)
+    comprobar("una billetera ya puntuada hace un momento no se repite",
+              W not in pendientes)
+
+    # ── 9) interruptores y cableado ─────────────────────────────────
+    comprobar("hay interruptor y pesos configurables",
+              hasattr(_cfg, "CALIDAD_ACTIVO")
+              and hasattr(_cfg, "Q_PESO_HOLD")
+              and hasattr(_cfg, "CALIDAD_MIN_POSICIONES"))
+    _tb = open("telegram_bot.py", encoding="utf-8").read()
+    comprobar("el job mira el interruptor de verdad",
+              'int(getattr(_c, "CALIDAD_ACTIVO", 1))' in _tb)
+    comprobar("el job esta dado de alta con reloj persistente",
+              '_con_reloj("calidad"' in _tb
+              and '_reloj_first("calidad"' in _tb)
+    comprobar("y /calidad esta registrado y anunciado",
+              'CommandHandler("calidad"' in _tb
+              and 'BotCommand("calidad"' in _tb)
+    _wq = open("wallet_quality.py", encoding="utf-8").read()
+    comprobar("la nota NO escribe score, is_tracked ni grade",
+              "is_tracked =" not in _wq and "SET score" not in _wq)
+
+    for t in ("wallet_positions", "token_milestones", "winning_tokens"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wcal%'")
+    conn.commit()
+    conn.close()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -16131,6 +16342,7 @@ def main():
     prueba_19bb()
     prueba_19bc()
     prueba_19bd()
+    prueba_19be()
 
     print("\n" + "─" * 60)
     if _FALLOS:
