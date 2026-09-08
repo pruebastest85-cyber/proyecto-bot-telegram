@@ -385,6 +385,28 @@ POSICIONES_TOKENS_POR_PASADA = _int("POSICIONES_TOKENS_POR_PASADA", 20)
 # backup de Telegram: ninguna tabla puede crecer sin freno.
 ANALYSIS_EVENTS_MAX = _int("ANALYSIS_EVENTS_MAX", 50_000)
 
+# ── Nota de calidad de la billetera (fase 6) ──────────────────────────
+# Junta TODAS las posiciones medidas de una billetera y contesta si
+# aguanta y gana o solo voltea. Vive en las columnas `q_*` y NO decide
+# nada todavia: la nota vieja (`score`) sigue mandando. Cero creditos.
+CALIDAD_ACTIVO = _int("CALIDAD_ACTIVO", 1)
+# Con una sola operacion no se distingue el acierto de la suerte. Tres es
+# el minimo con el que hoy hay material: 256 billeteras lo cumplen.
+CALIDAD_MIN_POSICIONES = _int("CALIDAD_MIN_POSICIONES", 3)
+CALIDAD_WALLETS_POR_PASADA = _int("CALIDAD_WALLETS_POR_PASADA", 200)
+# Cada cuantas horas se vuelve a puntuar a una que ya tiene nota.
+CALIDAD_REFRESCO_H = _int("CALIDAD_REFRESCO_H", 24)
+# Pesos de las cinco patas. NO tienen por que sumar 100: la nota es una
+# media ponderada, asi que lo que importa es la proporcion entre ellos —
+# y cuando una pata no se puede medir, su peso se reparte entre las
+# demas en vez de contar como cero. Aguantar pesa mas que nada porque es
+# el criterio que el dueño puso por escrito.
+Q_PESO_HOLD = _float("Q_PESO_HOLD", 30.0)
+Q_PESO_CONSISTENCIA = _float("Q_PESO_CONSISTENCIA", 25.0)
+Q_PESO_PROFIT = _float("Q_PESO_PROFIT", 25.0)
+Q_PESO_SUPERVIVENCIA = _float("Q_PESO_SUPERVIVENCIA", 10.0)
+Q_PESO_RIESGO = _float("Q_PESO_RIESGO", 10.0)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]

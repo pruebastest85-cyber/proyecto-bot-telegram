@@ -1257,6 +1257,28 @@ async def posiciones_job(ctx: ContextTypes.DEFAULT_TYPE):
             _avisar_ex("telegram_bot:posiciones_job", _ex)
 
 
+async def calidad_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 6) Cada 2 h: nota de calidad de cada billetera a
+    partir de sus posiciones medidas — ¿aguanta y gana, o solo voltea?
+
+    CERO créditos de Helius: se lee `wallet_positions`. NO cambia a quién
+    se copia: escribe solo las columnas `q_*`. Se apaga con
+    CALIDAD_ACTIVO=0 sin tocar código."""
+    try:
+        import config as _c
+        if not int(getattr(_c, "CALIDAD_ACTIVO", 1)):
+            return
+        from wallet_quality import puntuar
+        await asyncio.to_thread(puntuar)
+    except Exception as e:
+        print(f"· calidad_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "calidad", e)
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:calidad_job", _ex)
+
+
 async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
     """(Ola 14) Cada 15 min: tokens recién nacidos con smart money."""
     try:
@@ -2902,6 +2924,7 @@ async def _post_init(app: Application):
             BotCommand("salud", "¿Está todo funcionando bien?"),
             BotCommand("tokens", "Tokens: máximo histórico y si siguen vivos"),
             BotCommand("posiciones", "Quién ganó de verdad en cada token"),
+            BotCommand("calidad", "Quién aguanta y gana (nota de calidad)"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
@@ -3115,6 +3138,41 @@ async def cmd_posiciones(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         from posiciones import resumen_text as _res
         txt = await asyncio.to_thread(_res, None, 8)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_calidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 6) Quién aguanta y gana. `/calidad todas` incluye
+    a las que voltean; `/calidad <billetera>` desglosa su nota."""
+    await update.message.chat.send_action("typing")
+    arg = (ctx.args[0].strip() if ctx.args else "")
+
+    def _trabajo():
+        from db import get_conn
+        conn = get_conn()
+        try:
+            if len(arg) > 20:                 # parece una dirección
+                from wallet_quality import detalle_text
+                return detalle_text(conn, arg)
+            if arg.lower() in ("todas", "all"):
+                from wallet_quality import mejores
+                filas = mejores(conn, 15, solo_aguantan=False)
+                if not filas:
+                    return "🏅 Todavía no hay ninguna billetera puntuada."
+                L = ["🏅 *Todas, ordenadas por nota*", ""]
+                for f in filas:
+                    est = " ⭐" if f["is_tracked"] else ""
+                    L.append(f"`{f['address'][:10]}…`{est} "
+                             f"{(f['q_score'] or 0):.0f} · {f['estrategia']} "
+                             f"· {(f['hold_median_h'] or 0):.0f} h")
+                return "\n".join(L)
+            from wallet_quality import resumen_text
+            return resumen_text(conn, 10)
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
     await _send_md(update.message.chat, txt)
 
 
@@ -3867,6 +3925,7 @@ def main():
     app.add_handler(CommandHandler("salud", cmd_salud))
     app.add_handler(CommandHandler("tokens", cmd_tokens))
     app.add_handler(CommandHandler("posiciones", cmd_posiciones))
+    app.add_handler(CommandHandler("calidad", cmd_calidad))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
@@ -4063,6 +4122,13 @@ def main():
         interval=min(3600, _SONDEO_MAX),
         first=min(_reloj_first("posiciones", 3600, 900), _SONDEO_MAX),
         name="posiciones")
+    # (Embudo v2, fase 6) Nota de calidad: cada 2 h, después de que las
+    # posiciones estén reconstruidas (de ellas se alimenta).
+    app.job_queue.run_repeating(
+        _con_reloj("calidad", calidad_job, 7200),
+        interval=min(7200, _SONDEO_MAX),
+        first=min(_reloj_first("calidad", 7200, 1200), _SONDEO_MAX),
+        name="calidad")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job, 7 * 86400),
