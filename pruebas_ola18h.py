@@ -15489,6 +15489,137 @@ def prueba_19ba():
     conn.close()
 
 
+def prueba_19bb():
+    bloque("19-BB - filtro de cordura del market cap: el historico trae "
+           "MC imposibles del fallo del precio ajeno (19-AX) y sin esto "
+           "cualquier token pasaria por BREAKOUT")
+    import contextlib
+    import io
+    import time as _t
+    import config as _cfg
+    import token_history as th
+    from db import get_conn
+
+    conn = get_conn()
+    for t in ("token_snapshots", "token_milestones", "winning_tokens"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    ahora = int(_t.time())
+
+    # ── 1) el filtro, con los casos REALES de la base del dueño ──────
+    comprobar("un 'token' de 13,8 billones con 76 M de liquidez se "
+              "rechaza (caso real: pumpCmXqMf…)",
+              th.mc_creible(13_871_226_882_004, 76_109_526)[0] is False)
+    comprobar("757.000 millones con 890 K de liquidez tambien (caso real: "
+              "CATE, x850.231 su liquidez)",
+              th.mc_creible(757_059_385_563, 890_416)[0] is False)
+    comprobar("y el motivo se explica, no se descarta en silencio",
+              "creible" in th.mc_creible(757_059_385_563, 890_416)[1]
+              or "liquidez" in th.mc_creible(757_059_385_563, 890_416)[1])
+    # Cada regla se comprueba POR SEPARADO: los dos casos reales de
+    # arriba disparan las dos a la vez, asi que sin esto una de ellas
+    # podria desaparecer sin que ninguna prueba se enterara (lo cazo la
+    # bateria de mutaciones).
+    comprobar("solo por el tope: 50.000 M con 10 M de liquidez (relacion "
+              "normal) se rechaza igual",
+              th.mc_creible(50_000_000_000, 10_000_000)[0] is False)
+    comprobar("solo por la relacion: 1.000 M con 1.000 $ de liquidez "
+              "(por debajo del tope) tambien se rechaza",
+              th.mc_creible(1_000_000_000, 1_000)[0] is False)
+    comprobar("un token de verdad (2 M con 180 K de liquidez) pasa",
+              th.mc_creible(2_000_000, 180_000)[0] is True)
+    comprobar("uno grande pero coherente (250 M con 3 M) tambien: el "
+              "percentil 99,9 de la base son 250 M",
+              th.mc_creible(250_000_000, 3_000_000)[0] is True)
+    comprobar("sin dato de liquidez NO se juzga la relacion (no se "
+              "rechaza por lo que no se sabe)",
+              th.mc_creible(5_000_000, None)[0] is True)
+    comprobar("un MC ausente, cero o ilegible no cuela",
+              all(th.mc_creible(x)[0] is False
+                  for x in (None, 0, -5, "hola")))
+
+    # ── 2) una foto fresca contaminada no entra ─────────────────────
+    conn.execute("INSERT INTO winning_tokens (mint, symbol) VALUES "
+                 "('MX','MALO')")
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()) as sal:
+        th.guardar_foto(conn, "MX", {"mc": 9e12, "price": 785.0,
+                                     "liq": 900_000.0}, ahora - 100)
+    conn.commit()
+    r = conn.execute("SELECT mc, price FROM token_snapshots "
+                     "WHERE mint='MX'").fetchone()
+    comprobar("una lectura fresca con MC imposible guarda el precio pero "
+              "NO el MC, y lo dice por consola",
+              r is not None and r["mc"] is None and r["price"] == 785.0
+              and "MC descartado" in sal.getvalue(),
+              dict(r) if r else r)
+
+    # ── 3) limpieza de lo que ya estaba guardado ────────────────────
+    conn.execute("DELETE FROM token_snapshots")
+    th.guardar_foto(conn, "MX", {"mc": 400_000, "price": 0.4,
+                                 "liq": 40_000}, ahora - 3 * 86400)
+    conn.execute("INSERT INTO token_snapshots (mint, ts, mc, liquidity, "
+                 "price, source) VALUES ('MX',?,757059385563.0,890416.0,"
+                 "784.99,'signals')", (ahora - 2 * 86400,))
+    conn.commit()
+    th.recalcular_hitos(conn, "MX")
+    th.recalcular_ath(conn, "MX")
+    ath_malo = conn.execute("SELECT ath_mc FROM winning_tokens "
+                            "WHERE mint='MX'").fetchone()["ath_mc"]
+    hitos_malos = conn.execute("SELECT COUNT(*) c FROM token_milestones "
+                               "WHERE mint='MX'").fetchone()["c"]
+    comprobar("montaje: con la foto contaminada el maximo historico sale "
+              "en 757.000 millones y cruza todos los niveles",
+              ath_malo > 1e11 and hitos_malos == 7, (ath_malo, hitos_malos))
+    with contextlib.redirect_stdout(io.StringIO()):
+        n = th.limpiar_contaminados(conn)
+    ath_ok = conn.execute("SELECT ath_mc FROM winning_tokens "
+                          "WHERE mint='MX'").fetchone()["ath_mc"]
+    hitos_ok = conn.execute("SELECT COUNT(*) c FROM token_milestones "
+                            "WHERE mint='MX'").fetchone()["c"]
+    comprobar("la limpieza borra esa foto y REHACE el maximo (400 K) y "
+              "los hitos (100 K y 250 K): el ATH baja, que es el unico "
+              "caso en que debe bajar",
+              n == 1 and ath_ok == 400_000.0 and hitos_ok == 2,
+              (n, ath_ok, hitos_ok))
+    comprobar("las fotos buenas del mismo token NO se tocan",
+              conn.execute("SELECT COUNT(*) c FROM token_snapshots "
+                           "WHERE mint='MX'").fetchone()["c"] == 1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        comprobar("y es idempotente: en la segunda pasada no hay nada que "
+                  "limpiar", th.limpiar_contaminados(conn) == 0)
+
+    # ── 4) el relleno tampoco importa basura ────────────────────────
+    conn.execute("DELETE FROM token_snapshots")
+    conn.execute("DELETE FROM token_milestones")
+    conn.execute("DELETE FROM signals")
+    conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                 "side, price_usd, mc, liq) VALUES "
+                 "('S1','W','MY',1.0,?, 'compra',0.6,600000,55000)",
+                 (ahora - 5 * 86400,))
+    conn.execute("INSERT INTO signals (signature, wallet, mint, sol, ts, "
+                 "side, price_usd, mc, liq) VALUES "
+                 "('S2','W','MY',1.0,?, 'compra',785.0,757059385563.0,"
+                 "890416.0)", (ahora - 4 * 86400,))
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()) as sal2:
+        th.backfill_desde_signals(conn, 5)
+    comprobar("el relleno desde `signals` deja fuera la fila contaminada "
+              "y lo cuenta",
+              conn.execute("SELECT COUNT(*) c FROM token_snapshots "
+                           "WHERE mint='MY'").fetchone()["c"] == 1
+              and "descartadas por MC incoherente" in sal2.getvalue(),
+              sal2.getvalue()[-120:])
+    comprobar("los topes son configurables, no numeros sueltos por el "
+              "codigo", _cfg.MC_MAX_CREIBLE > 0 and _cfg.MC_LIQ_RATIO_MAX > 0)
+
+    for t in ("token_snapshots", "token_milestones", "winning_tokens",
+              "signals"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -15567,6 +15698,7 @@ def main():
     prueba_19ax()
     prueba_19az()
     prueba_19ba()
+    prueba_19bb()
 
     print("\n" + "─" * 60)
     if _FALLOS:
