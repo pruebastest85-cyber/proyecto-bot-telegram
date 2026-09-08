@@ -33,10 +33,17 @@ TABLES = ["winning_tokens", "wallets", "appearances", "signals",
           # (19-AF) Faltaban: paper_fills es el libro de idempotencia de
           # las ventas del paper (sin el, tras migrar se volverian a
           # aplicar) y radar_tokens el registro del radar.
-          "paper_fills", "radar_tokens"]
+          "paper_fills", "radar_tokens",
+          # (Fase 3 del embudo v2, 08/09) Tablas nuevas. Se migran igual:
+          # `token_snapshots` y `token_milestones` son el historial de
+          # mercado que ninguna API regala, y perderlo obligaria a
+          # empezar a medir de cero.
+          "token_snapshots", "token_milestones", "wallet_positions",
+          "helius_ledger", "helius_queue", "analysis_events"]
 SERIAL_TABLES = [("appearances", "id"), ("chat_history", "id"),
                  ("paper_trades", "id"), ("predictions", "id"),
-                 ("paper_fills", "id")]
+                 ("paper_fills", "id"),
+                 ("helius_ledger", "id"), ("analysis_events", "id")]
 
 TAG = "MIGRACION_DIAG"
 

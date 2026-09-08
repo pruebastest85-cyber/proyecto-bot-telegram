@@ -189,6 +189,144 @@ CREATE TABLE IF NOT EXISTS radar_tokens (
     smart           INTEGER
 );
 
+-- ══════════════════════════════════════════════════════════════════════
+-- EMBUDO v2 (fase 3, 08/09/2026). Tablas NUEVAS y VACIAS: ningun modulo
+-- las lee ni las escribe todavia. Existen para que las fases siguientes
+-- no tengan que migrar y trabajar a la vez. Interruptor maestro:
+-- `config.EMBUDO_V2_ACTIVO` (0 por defecto = el bot se comporta igual).
+-- ══════════════════════════════════════════════════════════════════════
+
+-- Fotos periodicas del mercado de un token. Ninguna API gratuita da MC
+-- historico, asi que el historial se CONSTRUYE con estas fotos. La
+-- columna `mc_source` dice si el MC es real o FDV: GeckoTerminal
+-- devuelve market_cap_usd NULL salvo tokens listados en CoinGecko, o
+-- sea casi siempre FDV en memecoins.
+CREATE TABLE IF NOT EXISTS token_snapshots (
+    mint            TEXT NOT NULL,
+    ts              INTEGER NOT NULL,
+    price           REAL,
+    mc              REAL,
+    fdv             REAL,
+    liquidity       REAL,
+    volume_24h      REAL,
+    txns_24h        INTEGER,
+    mc_source       TEXT,
+    source          TEXT,
+    PRIMARY KEY (mint, ts)
+);
+
+-- Cuando un token cruzo por PRIMERA vez cada nivel de MC. Fuente UNICA
+-- de first_500k_ts / first_1m_ts…: no se duplican en winning_tokens a
+-- proposito (regla del dueño: reutilizar antes que duplicar).
+CREATE TABLE IF NOT EXISTS token_milestones (
+    mint             TEXT NOT NULL,
+    milestone_usd    REAL NOT NULL,
+    first_reached_ts INTEGER,
+    mc               REAL,
+    price            REAL,
+    liquidity        REAL,
+    volume           REAL,
+    source           TEXT,
+    confidence       TEXT,
+    PRIMARY KEY (mint, milestone_usd)
+);
+
+-- Posiciones reconstruidas por (billetera, token) desde `trades`. Hoy el
+-- mismo calculo vive en cuatro sitios con tres definiciones distintas de
+-- "cerrada" (wallet_profiler:392, wallet_metrics:57, filtro_calidad:233,
+-- trades_store:240); esta tabla sera la unica. `holding_seconds` mide la
+-- EXPOSICION real (primera compra → saldo a cero), no una resta de
+-- fechas: decision del dueño del 08/09.
+CREATE TABLE IF NOT EXISTS wallet_positions (
+    wallet           TEXT NOT NULL,
+    mint             TEXT NOT NULL,
+    first_buy_ts     INTEGER,
+    last_buy_ts      INTEGER,
+    first_sell_ts    INTEGER,
+    last_sell_ts     INTEGER,
+    buy_count        INTEGER,
+    sell_count       INTEGER,
+    tokens_bought    REAL,
+    tokens_sold      REAL,
+    sol_in           REAL,
+    sol_out          REAL,
+    realized_pnl     REAL,
+    remaining_tokens REAL,
+    unrealized_pnl   REAL,
+    net_pnl          REAL,
+    roi_pct          REAL,
+    holding_seconds  INTEGER,
+    held_24h         INTEGER,
+    held_7d          INTEGER,
+    position_status  TEXT,
+    history_complete INTEGER,
+    pnl_confidence   TEXT,
+    updated_ts       INTEGER,
+    PRIMARY KEY (wallet, mint)
+);
+
+-- Una fila por llamada a Helius. Hoy todo el gasto se aplasta en dos
+-- contadores diarios (`api_helius_*`) sin categoria, exito, latencia ni
+-- motivo, y hay rutas que no cuentan nada (webhooks y el WebSocket).
+-- Sin esto no se puede repartir el presupuesto por buckets.
+CREATE TABLE IF NOT EXISTS helius_ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER,
+    endpoint    TEXT,
+    metodo      TEXT,
+    entity_type TEXT,
+    entity_id   TEXT,
+    cost        INTEGER,
+    success     INTEGER,
+    latency_ms  INTEGER,
+    reason      TEXT,
+    bucket      TEXT
+);
+
+-- Cola de trabajo con prioridad. La clave triple la hace idempotente: la
+-- misma tarea para la misma entidad no se encola dos veces.
+CREATE TABLE IF NOT EXISTS helius_queue (
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    tarea       TEXT NOT NULL,
+    priority    INTEGER,
+    reason      TEXT,
+    estado      TEXT DEFAULT 'pendiente',
+    intentos    INTEGER DEFAULT 0,
+    created_ts  INTEGER,
+    updated_ts  INTEGER,
+    next_try_ts INTEGER,
+    PRIMARY KEY (entity_type, entity_id, tarea)
+);
+
+-- Auditoria de decisiones: que decidio el bot, cuando, con que datos y
+-- con que version. Hoy solo queda el ultimo `ai_reason` (500 caracteres
+-- que se pisan) y la consola.
+CREATE TABLE IF NOT EXISTS analysis_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             INTEGER,
+    entity_type    TEXT,
+    entity_id      TEXT,
+    stage          TEXT,
+    decision       TEXT,
+    reason         TEXT,
+    score          REAL,
+    data_source    TEXT,
+    model_version  TEXT,
+    config_version TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_milestones_usd
+    ON token_milestones(milestone_usd, first_reached_ts);
+CREATE INDEX IF NOT EXISTS idx_wpos_mint ON wallet_positions(mint);
+CREATE INDEX IF NOT EXISTS idx_wpos_held24 ON wallet_positions(held_24h);
+CREATE INDEX IF NOT EXISTS idx_ledger_ts ON helius_ledger(ts);
+CREATE INDEX IF NOT EXISTS idx_ledger_bucket ON helius_ledger(bucket, ts);
+CREATE INDEX IF NOT EXISTS idx_queue_estado
+    ON helius_queue(estado, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_events_ent
+    ON analysis_events(entity_type, entity_id, ts);
+
 CREATE INDEX IF NOT EXISTS idx_signals_mint_ts ON signals(mint, ts);
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_score ON wallets(score DESC);
@@ -381,6 +519,144 @@ CREATE TABLE IF NOT EXISTS radar_tokens (
     resultado       TEXT,
     smart           INTEGER
 );
+
+-- ══════════════════════════════════════════════════════════════════════
+-- EMBUDO v2 (fase 3, 08/09/2026). Tablas NUEVAS y VACIAS: ningun modulo
+-- las lee ni las escribe todavia. Existen para que las fases siguientes
+-- no tengan que migrar y trabajar a la vez. Interruptor maestro:
+-- `config.EMBUDO_V2_ACTIVO` (0 por defecto = el bot se comporta igual).
+-- ══════════════════════════════════════════════════════════════════════
+
+-- Fotos periodicas del mercado de un token. Ninguna API gratuita da MC
+-- historico, asi que el historial se CONSTRUYE con estas fotos. La
+-- columna `mc_source` dice si el MC es real o FDV: GeckoTerminal
+-- devuelve market_cap_usd NULL salvo tokens listados en CoinGecko, o
+-- sea casi siempre FDV en memecoins.
+CREATE TABLE IF NOT EXISTS token_snapshots (
+    mint            TEXT NOT NULL,
+    ts              BIGINT NOT NULL,
+    price           DOUBLE PRECISION,
+    mc              DOUBLE PRECISION,
+    fdv             DOUBLE PRECISION,
+    liquidity       DOUBLE PRECISION,
+    volume_24h      DOUBLE PRECISION,
+    txns_24h        INTEGER,
+    mc_source       TEXT,
+    source          TEXT,
+    PRIMARY KEY (mint, ts)
+);
+
+-- Cuando un token cruzo por PRIMERA vez cada nivel de MC. Fuente UNICA
+-- de first_500k_ts / first_1m_ts…: no se duplican en winning_tokens a
+-- proposito (regla del dueño: reutilizar antes que duplicar).
+CREATE TABLE IF NOT EXISTS token_milestones (
+    mint             TEXT NOT NULL,
+    milestone_usd    DOUBLE PRECISION NOT NULL,
+    first_reached_ts BIGINT,
+    mc               DOUBLE PRECISION,
+    price            DOUBLE PRECISION,
+    liquidity        DOUBLE PRECISION,
+    volume           DOUBLE PRECISION,
+    source           TEXT,
+    confidence       TEXT,
+    PRIMARY KEY (mint, milestone_usd)
+);
+
+-- Posiciones reconstruidas por (billetera, token) desde `trades`. Hoy el
+-- mismo calculo vive en cuatro sitios con tres definiciones distintas de
+-- "cerrada" (wallet_profiler:392, wallet_metrics:57, filtro_calidad:233,
+-- trades_store:240); esta tabla sera la unica. `holding_seconds` mide la
+-- EXPOSICION real (primera compra → saldo a cero), no una resta de
+-- fechas: decision del dueño del 08/09.
+CREATE TABLE IF NOT EXISTS wallet_positions (
+    wallet           TEXT NOT NULL,
+    mint             TEXT NOT NULL,
+    first_buy_ts     BIGINT,
+    last_buy_ts      BIGINT,
+    first_sell_ts    BIGINT,
+    last_sell_ts     BIGINT,
+    buy_count        INTEGER,
+    sell_count       INTEGER,
+    tokens_bought    DOUBLE PRECISION,
+    tokens_sold      DOUBLE PRECISION,
+    sol_in           DOUBLE PRECISION,
+    sol_out          DOUBLE PRECISION,
+    realized_pnl     DOUBLE PRECISION,
+    remaining_tokens DOUBLE PRECISION,
+    unrealized_pnl   DOUBLE PRECISION,
+    net_pnl          DOUBLE PRECISION,
+    roi_pct          DOUBLE PRECISION,
+    holding_seconds  BIGINT,
+    held_24h         INTEGER,
+    held_7d          INTEGER,
+    position_status  TEXT,
+    history_complete INTEGER,
+    pnl_confidence   TEXT,
+    updated_ts       BIGINT,
+    PRIMARY KEY (wallet, mint)
+);
+
+-- Una fila por llamada a Helius. Hoy todo el gasto se aplasta en dos
+-- contadores diarios (`api_helius_*`) sin categoria, exito, latencia ni
+-- motivo, y hay rutas que no cuentan nada (webhooks y el WebSocket).
+-- Sin esto no se puede repartir el presupuesto por buckets.
+CREATE TABLE IF NOT EXISTS helius_ledger (
+    id          SERIAL PRIMARY KEY,
+    ts          BIGINT,
+    endpoint    TEXT,
+    metodo      TEXT,
+    entity_type TEXT,
+    entity_id   TEXT,
+    cost        INTEGER,
+    success     INTEGER,
+    latency_ms  INTEGER,
+    reason      TEXT,
+    bucket      TEXT
+);
+
+-- Cola de trabajo con prioridad. La clave triple la hace idempotente: la
+-- misma tarea para la misma entidad no se encola dos veces.
+CREATE TABLE IF NOT EXISTS helius_queue (
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    tarea       TEXT NOT NULL,
+    priority    INTEGER,
+    reason      TEXT,
+    estado      TEXT DEFAULT 'pendiente',
+    intentos    INTEGER DEFAULT 0,
+    created_ts  BIGINT,
+    updated_ts  BIGINT,
+    next_try_ts BIGINT,
+    PRIMARY KEY (entity_type, entity_id, tarea)
+);
+
+-- Auditoria de decisiones: que decidio el bot, cuando, con que datos y
+-- con que version. Hoy solo queda el ultimo `ai_reason` (500 caracteres
+-- que se pisan) y la consola.
+CREATE TABLE IF NOT EXISTS analysis_events (
+    id             SERIAL PRIMARY KEY,
+    ts             BIGINT,
+    entity_type    TEXT,
+    entity_id      TEXT,
+    stage          TEXT,
+    decision       TEXT,
+    reason         TEXT,
+    score          DOUBLE PRECISION,
+    data_source    TEXT,
+    model_version  TEXT,
+    config_version TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_milestones_usd
+    ON token_milestones(milestone_usd, first_reached_ts);
+CREATE INDEX IF NOT EXISTS idx_wpos_mint ON wallet_positions(mint);
+CREATE INDEX IF NOT EXISTS idx_wpos_held24 ON wallet_positions(held_24h);
+CREATE INDEX IF NOT EXISTS idx_ledger_ts ON helius_ledger(ts);
+CREATE INDEX IF NOT EXISTS idx_ledger_bucket ON helius_ledger(bucket, ts);
+CREATE INDEX IF NOT EXISTS idx_queue_estado
+    ON helius_queue(estado, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_events_ent
+    ON analysis_events(entity_type, entity_id, ts);
 """
 
 
@@ -811,7 +1087,72 @@ def _preparar_pg(pg):
             # (19-AW) De donde salio price_usd: 'dex' (DexScreener) o 'tx'
             # (SOL gastados / tokens recibidos de la propia operacion,
             # cuando DexScreener aun no cotizaba el token). NULL = legado.
-            ("signals", "price_origen", "TEXT")]:
+            ("signals", "price_origen", "TEXT"),
+            # ── EMBUDO v2 (fase 3, 08/09) ────────────────────────────
+            # Estado de mercado del token y su supervivencia. Los hitos
+            # ($500K, $1M…) NO se repiten aqui: viven en
+            # `token_milestones`, que es su fuente unica.
+            ("winning_tokens", "ath_mc", "DOUBLE PRECISION"),
+            ("winning_tokens", "ath_mc_ts", "BIGINT"),
+            ("winning_tokens", "current_mc", "DOUBLE PRECISION"),
+            ("winning_tokens", "current_price", "DOUBLE PRECISION"),
+            ("winning_tokens", "current_liquidity", "DOUBLE PRECISION"),
+            ("winning_tokens", "current_volume_24h", "DOUBLE PRECISION"),
+            ("winning_tokens", "current_mc_ts", "BIGINT"),
+            ("winning_tokens", "mc_source", "TEXT"),
+            ("winning_tokens", "data_confidence", "TEXT"),
+            ("winning_tokens", "survival_24h", "INTEGER"),
+            ("winning_tokens", "survival_7d", "INTEGER"),
+            ("winning_tokens", "survival_score", "DOUBLE PRECISION"),
+            ("winning_tokens", "survival_reason", "TEXT"),
+            ("winning_tokens", "survival_confidence", "TEXT"),
+            ("winning_tokens", "peak_to_current_pct", "DOUBLE PRECISION"),
+            ("winning_tokens", "token_class", "TEXT"),
+            ("winning_tokens", "token_quality_score", "DOUBLE PRECISION"),
+            ("winning_tokens", "mc_24h_after_500k", "DOUBLE PRECISION"),
+            ("winning_tokens", "mc_7d_after_500k", "DOUBLE PRECISION"),
+            ("winning_tokens", "mc_24h_after_1m", "DOUBLE PRECISION"),
+            ("winning_tokens", "mc_7d_after_1m", "DOUBLE PRECISION"),
+            ("winning_tokens", "last_checked", "BIGINT"),
+            ("winning_tokens", "check_priority", "TEXT"),
+            # Atribucion de la billetera AL CRECIMIENTO del token. El
+            # `mc_at_buy` que ya existe es una ESTIMACION (MC de ahora /
+            # multiplo, que asume oferta constante); estos salen de los
+            # hitos y las fotos, y llevan su confianza.
+            ("appearances", "mc_at_entry", "DOUBLE PRECISION"),
+            ("appearances", "mc_at_exit", "DOUBLE PRECISION"),
+            ("appearances", "mc_peak", "DOUBLE PRECISION"),
+            ("appearances", "before_500k", "INTEGER"),
+            ("appearances", "before_1m", "INTEGER"),
+            ("appearances", "token_survived_24h", "INTEGER"),
+            ("appearances", "token_survived_7d", "INTEGER"),
+            ("appearances", "attribution_confidence", "TEXT"),
+            # Calidad de la billetera v2. Prefijo `q_` para no chocar con
+            # `consistency` / `wallet_score`, que siguen siendo los del
+            # sistema actual y no se tocan.
+            ("wallets", "wallet_stage", "TEXT"),
+            ("wallets", "q_score", "DOUBLE PRECISION"),
+            ("wallets", "q_consistency", "DOUBLE PRECISION"),
+            ("wallets", "q_profit", "DOUBLE PRECISION"),
+            ("wallets", "q_survival", "DOUBLE PRECISION"),
+            ("wallets", "q_hold", "DOUBLE PRECISION"),
+            ("wallets", "q_copyability", "DOUBLE PRECISION"),
+            ("wallets", "q_risk", "DOUBLE PRECISION"),
+            ("wallets", "q_strategy", "DOUBLE PRECISION"),
+            ("wallets", "q_ts", "BIGINT"),
+            ("wallets", "bot_score", "DOUBLE PRECISION"),
+            ("wallets", "mm_score", "DOUBLE PRECISION"),
+            ("wallets", "insider_score", "DOUBLE PRECISION"),
+            ("wallets", "human_confidence", "DOUBLE PRECISION"),
+            ("wallets", "estrategia", "TEXT"),
+            ("wallets", "hold_median_h", "DOUBLE PRECISION"),
+            ("wallets", "mult_realizado", "DOUBLE PRECISION"),
+            ("wallets", "tok_500k", "INTEGER"),
+            ("wallets", "tok_1m", "INTEGER"),
+            ("wallets", "tok_surv", "INTEGER"),
+            ("wallets", "pos_24h", "INTEGER"),
+            ("wallets", "history_complete", "INTEGER"),
+            ("wallets", "pnl_confidence", "TEXT")]:
         try:
             pg.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS "
                        f"{col} {typ}")
@@ -896,7 +1237,27 @@ def _preparar_sqlite(conn):
                      ("copi_score", "REAL"), ("copi_n", "INTEGER"),
                      ("copi_n_real", "INTEGER"), ("copi_media", "REAL"),
                      ("copi_pf", "REAL"), ("copi_dd", "REAL"),
-                     ("copi_brecha", "REAL"), ("copi_ts", "INTEGER")]:
+                     ("copi_brecha", "REAL"), ("copi_ts", "INTEGER"),
+                     # ── EMBUDO v2 (fase 3, 08/09) · bloque gemelo en
+                     # _preparar_pg. Prefijo `q_` para no chocar con
+                     # `consistency`/`wallet_score`, que siguen siendo
+                     # los del sistema actual.
+                     ("wallet_stage", "TEXT"),
+                     ("q_score", "REAL"), ("q_consistency", "REAL"),
+                     ("q_profit", "REAL"), ("q_survival", "REAL"),
+                     ("q_hold", "REAL"), ("q_copyability", "REAL"),
+                     ("q_risk", "REAL"), ("q_strategy", "REAL"),
+                     ("q_ts", "INTEGER"),
+                     ("bot_score", "REAL"), ("mm_score", "REAL"),
+                     ("insider_score", "REAL"),
+                     ("human_confidence", "REAL"),
+                     ("estrategia", "TEXT"),
+                     ("hold_median_h", "REAL"),
+                     ("mult_realizado", "REAL"),
+                     ("tok_500k", "INTEGER"), ("tok_1m", "INTEGER"),
+                     ("tok_surv", "INTEGER"), ("pos_24h", "INTEGER"),
+                     ("history_complete", "INTEGER"),
+                     ("pnl_confidence", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE wallets ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
@@ -931,9 +1292,46 @@ def _preparar_sqlite(conn):
             pass
     for col, typ in [("delay_s", "INTEGER"),
                      ("price_at_buy", "REAL"), ("mc_at_buy", "REAL"),
-                     ("entry_multiple", "REAL")]:
+                     ("entry_multiple", "REAL"),
+                     # ── EMBUDO v2 (fase 3) · atribucion al crecimiento
+                     # del token. `mc_at_buy` (arriba) es una ESTIMACION;
+                     # estos salen de los hitos y llevan su confianza.
+                     ("mc_at_entry", "REAL"), ("mc_at_exit", "REAL"),
+                     ("mc_peak", "REAL"),
+                     ("before_500k", "INTEGER"), ("before_1m", "INTEGER"),
+                     ("token_survived_24h", "INTEGER"),
+                     ("token_survived_7d", "INTEGER"),
+                     ("attribution_confidence", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE appearances ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
+    # ── EMBUDO v2 (fase 3) · estado de mercado y supervivencia del
+    # token. Los hitos ($500K, $1M…) NO estan aqui: su fuente unica es
+    # `token_milestones`.
+    for col, typ in [("ath_mc", "REAL"), ("ath_mc_ts", "INTEGER"),
+                     ("current_mc", "REAL"), ("current_price", "REAL"),
+                     ("current_liquidity", "REAL"),
+                     ("current_volume_24h", "REAL"),
+                     ("current_mc_ts", "INTEGER"),
+                     ("mc_source", "TEXT"), ("data_confidence", "TEXT"),
+                     ("survival_24h", "INTEGER"),
+                     ("survival_7d", "INTEGER"),
+                     ("survival_score", "REAL"),
+                     ("survival_reason", "TEXT"),
+                     ("survival_confidence", "TEXT"),
+                     ("peak_to_current_pct", "REAL"),
+                     ("token_class", "TEXT"),
+                     ("token_quality_score", "REAL"),
+                     ("mc_24h_after_500k", "REAL"),
+                     ("mc_7d_after_500k", "REAL"),
+                     ("mc_24h_after_1m", "REAL"),
+                     ("mc_7d_after_1m", "REAL"),
+                     ("last_checked", "INTEGER"),
+                     ("check_priority", "TEXT")]:
+        try:
+            conn.execute(
+                f"ALTER TABLE winning_tokens ADD COLUMN {col} {typ}")
         except sqlite3.OperationalError:
             pass
     # Paper trading en DÓLARES (ver el comentario del bloque Postgres).

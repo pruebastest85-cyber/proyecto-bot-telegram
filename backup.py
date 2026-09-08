@@ -35,7 +35,13 @@ TABLES = ["wallets", "winning_tokens", "appearances", "signals",
           "settings", "predictions", "positions", "paper_trades",
           "paper_fills", "trades", "chat_history", "radar_tokens",
           "wallet_identity", "wallet_funding", "submitted_tokens",
-          "errors"]
+          "errors",
+          # (Fase 3 del embudo v2, 08/09) El historial de mercado que
+          # ninguna API regala (`token_snapshots`, `token_milestones`),
+          # las posiciones reconstruidas y la auditoria de decisiones.
+          # Perderlos obligaria a empezar a medir de cero.
+          "token_snapshots", "token_milestones", "wallet_positions",
+          "helius_ledger", "helius_queue", "analysis_events"]
 
 BATCH = 1000      # filas por lote al volcar; acota la memoria del backup
 

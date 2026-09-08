@@ -248,3 +248,113 @@ HELIUS_STOP_AT_PCT = _int("HELIUS_STOP_AT_PCT", 85)   # pausar al 85%
 # entra en bucle de reinicios sin rollback. Ahora cae al defecto.
 HELIUS_DELAY = _float("HELIUS_DELAY", 0.1)
 DEXSCREENER_DELAY = 0.3
+
+
+# ══════════════════════════════════════════════════════════════════════
+# EMBUDO v2 — fuente UNICA de configuracion del embudo nuevo
+# ══════════════════════════════════════════════════════════════════════
+# (Fase 3, 08/09/2026) Objetivo del dueño: encontrar traders humanos
+# copiables a partir de tokens que demostraron crecimiento REAL y
+# supervivencia, no francotiradores de lanzamientos. Nada de lo de abajo
+# cambia el comportamiento del bot mientras EMBUDO_V2_ACTIVO valga 0:
+# las fases 4-9 lo iran encendiendo por partes.
+#
+# Por que un bloque unico: hoy los umbrales del embudo estan repartidos
+# entre config.py, grading.py, filtro_calidad.py y variables de entorno
+# leidas a pelo en dos modulos. La regla 40 del encargo pide una sola
+# fuente.
+
+# Interruptor maestro. 0 = el bot se comporta EXACTAMENTE como hoy.
+EMBUDO_V2_ACTIVO = _int("EMBUDO_V2_ACTIVO", 0)
+# Version de la configuracion, para `analysis_events.config_version`:
+# permite saber con que reglas se tomo cada decision.
+CONFIG_VERSION = os.getenv("CONFIG_VERSION", "v2.0-fase3")
+
+# ── Token ganador ─────────────────────────────────────────────────────
+# SURVIVOR: llego a MIN_WINNER_MC y sigue sano. BREAKOUT: llego a
+# BREAKOUT_MC. Un token de 500K que nunca llego a 1M NO se descarta
+# (regla 3 del encargo): son dos grupos, no una escalera.
+MIN_WINNER_MC = _int("MIN_WINNER_MC", 500_000)
+BREAKOUT_MC = _int("BREAKOUT_MC", 1_000_000)
+
+
+def _lista_num(name, default):
+    """Lista de numeros desde una variable de entorno separada por comas.
+    Un valor ilegible cae a la lista por defecto: este archivo lo importa
+    el repo entero y un ValueError aqui impide arrancar (leccion 19-A)."""
+    crudo = os.getenv(name)
+    if not crudo:
+        return list(default)
+    try:
+        vals = [float(x) for x in crudo.split(",") if x.strip()]
+        return vals or list(default)
+    except (TypeError, ValueError):
+        print(f"· {name}={crudo!r} no es una lista de numeros; se usa "
+              f"{default}")
+        return list(default)
+
+
+# Niveles de MC cuyo primer cruce se registra en `token_milestones`.
+TOKEN_MILESTONES_USD = _lista_num(
+    "TOKEN_MILESTONES_USD",
+    [100_000, 250_000, 500_000, 1_000_000, 2_000_000, 5_000_000,
+     10_000_000])
+
+# ── Supervivencia ─────────────────────────────────────────────────────
+# "Sigue vivo" NO es "current_mc > 0" (regla 4). El score 0-100 combina
+# las señales observables; estos son los minimos por debajo de los
+# cuales un token cuenta como abandonado.
+SURVIVAL_24H_ENABLED = _int("SURVIVAL_24H_ENABLED", 1)
+SURVIVAL_7D_ENABLED = _int("SURVIVAL_7D_ENABLED", 1)
+SURVIVAL_MIN_LIQ_USD = _int("SURVIVAL_MIN_LIQ_USD", 15_000)
+SURVIVAL_MIN_VOL24_USD = _int("SURVIVAL_MIN_VOL24_USD", 25_000)
+# Cuanto puede haber caido desde su maximo sin considerarlo muerto.
+SURVIVAL_MIN_PCT_ATH = _float("SURVIVAL_MIN_PCT_ATH", 10.0)
+
+# ── Holder (lo que el dueño busca) ────────────────────────────────────
+# Vara principal: mantener la posicion mas de un dia.
+HOLD_MIN_HOURS = _float("HOLD_MIN_HOURS", 24.0)
+# Posicion CERRADA = vendio entre el 70% y el 105% de los tokens que
+# compro. Es la definicion mas estricta de las cuatro que hay hoy en el
+# repo y la unica que evita contar una venta de polvo como cierre; a
+# partir de la fase 6 sera la UNICA (decision del dueño, 08/09).
+POSICION_CERRADA_MIN_FRAC = _float("POSICION_CERRADA_MIN_FRAC", 0.70)
+POSICION_CERRADA_MAX_FRAC = _float("POSICION_CERRADA_MAX_FRAC", 1.05)
+# Profit factor sin perdidas: hoy hay tres centinelas distintos (99.99 en
+# wallet_metrics y filtro_calidad, 9.99 en copiabilidad). Regla 17: un
+# tope configurable, y NULL con motivo cuando ni eso tiene sentido.
+PF_MAX = _float("PF_MAX", 20.0)
+
+# ── Presupuesto de Helius por categorias (reglas 8 y 9) ───────────────
+# HELIUS_MONTHLY_BUDGET es el mismo numero que HELIUS_MONTHLY_CREDITS;
+# se nombra aparte porque el encargo lo pide asi y porque el ledger v2
+# reparte ESTE total entre buckets.
+HELIUS_MONTHLY_BUDGET = _int("HELIUS_MONTHLY_BUDGET", HELIUS_MONTHLY_CREDITS)
+HELIUS_DISCOVERY_BUDGET_PCT = _int("HELIUS_DISCOVERY_BUDGET_PCT", 30)
+HELIUS_WALLET_BUDGET_PCT = _int("HELIUS_WALLET_BUDGET_PCT", 40)
+HELIUS_DEEP_BUDGET_PCT = _int("HELIUS_DEEP_BUDGET_PCT", 20)
+HELIUS_RESERVE_BUDGET_PCT = _int("HELIUS_RESERVE_BUDGET_PCT", 10)
+# Coste REAL por llamada segun la documentacion de Helius (verificada el
+# 08/09/2026). El contador actual cobra 10 al RPC estandar, que cuesta 1.
+HELIUS_COSTE_RPC_ESTANDAR = _int("HELIUS_COSTE_RPC_ESTANDAR", 1)
+HELIUS_COSTE_DAS = _int("HELIUS_COSTE_DAS", 10)
+HELIUS_COSTE_ENHANCED = _int("HELIUS_COSTE_ENHANCED", 100)
+HELIUS_COSTE_WALLET_API = _int("HELIUS_COSTE_WALLET_API", 100)
+# WebSocket: 2 creditos por cada 0,1 MB de datos sin comprimir. Hoy no se
+# cuenta NADA de esto y por eso el panel de Helius y el contador propio
+# no cuadran.
+HELIUS_COSTE_WS_POR_MB = _float("HELIUS_COSTE_WS_POR_MB", 20.0)
+
+# ── Replay de copia (regla 26) ────────────────────────────────────────
+COPY_DELAY_TESTS = [int(x) for x in _lista_num(
+    "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]
+
+# ── Ciclo automatico: A PROPOSITO NO ESTA AQUI ────────────────────────
+# `AUTO_CYCLE_HOURS` vive SOLO en el entorno y cada modulo lo lee con
+# os.getenv EN EL MOMENTO DE USARLO. No es descuido: la ola 19-K lo leyo
+# con getattr(config, "AUTO_CYCLE_HOURS", 6), el atributo no existia,
+# siempre caia al 6 del defecto y con el ciclo real del dueño el cupo de
+# evaluaciones salia TRIPLE (gasto de creditos irreversible). Hay una
+# prueba que falla si alguien lo añade a este archivo. Centralizarlo mas
+# adelante exige una FUNCION que lea el entorno al llamarla, no una
+# constante congelada en el import.

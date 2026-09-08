@@ -233,7 +233,9 @@ def _crear_tablas_perezosas(conn, tablas):
 # restauracion imprimia tres "avisos" que no eran mas que este error.
 SERIAL_TABLES = [("appearances", "id"), ("predictions", "id"),
                  ("paper_trades", "id"), ("paper_fills", "id"),
-                 ("chat_history", "id")]
+                 ("chat_history", "id"),
+                 # (Fase 3 del embudo v2, 08/09) Tablas nuevas con id.
+                 ("helius_ledger", "id"), ("analysis_events", "id")]
 
 
 def _resetear_secuencias(conn):
