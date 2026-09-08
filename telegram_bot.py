@@ -3660,6 +3660,35 @@ def _saldos_text():
     return "\n".join(out)
 
 
+# (19-BD) Margen al comparar el reloj, en segundos.
+#
+# EL PROBLEMA MEDIDO: el reloj de exito (`job_ts`) se sella cuando el job
+# TERMINA, pero el sondeo que decide si toca corre en una rejilla fija
+# (cada `_SONDEO_MAX` segundos como mucho). Asi que en el sondeo
+# siguiente han pasado "un intervalo MENOS lo que tardo el job", la
+# comparacion estricta lo lee como "aun no toca", y se espera OTRO
+# sondeo entero. Un job de una hora acaba corriendo cada hora y media.
+#
+# No es teoria: el 08/09/2026, con `posiciones` (intervalo 60 min), el
+# reloj marcaba 87,7 minutos desde el ultimo exito — 27,7 de retraso, es
+# decir un sondeo de 30 minutos perdido por tardar unos segundos. Lo
+# mismo le pasa a `token_history` (30 min) y, en menor proporcion, a
+# todos los demas.
+#
+# EL ARREGLO: tolerar este margen al comparar. 90 s cubre de sobra lo que
+# tardan los jobs cortos (segundos) mas el retraso del propio
+# planificador, y es el 5 % del intervalo mas corto que hay (1.800 s):
+# adelantarse 90 s no le importa a nada, y evita perder hasta 1.800.
+#
+# LO QUE ESTE ARREGLO NO CUBRE: un job que tarde MAS de 90 s (el ciclo
+# automatico completo puede) seguira perdiendo un sondeo. La solucion
+# definitiva seria medir de COMIENZO a comienzo en vez de de final a
+# final, pero eso cambia lo que significa `job_ts` y hay un consumidor
+# que lo lee como "hora del ultimo exito" para el resumen diario
+# (`_toca_resumen_diario`), asi que no se toca aqui.
+_RELOJ_MARGEN_S = 90
+
+
 # (19-V) `_con_reloj` vivia anidada en `main()` sin usar nada de su
 # ambito. Se saca a nivel de modulo, SIN tocar su cuerpo, para poder
 # probar su comportamiento (CicloOmitido, relojes) ejecutandola.
@@ -3694,7 +3723,10 @@ def _con_reloj(nombre: str, fn, intervalo: int | None = None):
                 # tick de sondeo de los 7 jobs (con Postgres remoto,
                 # cada conexion son decenas de ms).
                 _last = await asyncio.to_thread(_leer_reloj, nombre)
-                if _last and (_t.time() - _last) < intervalo:
+                # (19-BD) Con margen: ver `_RELOJ_MARGEN_S`. Sin el, un
+                # job pierde un sondeo entero cada vez, solo por tardar
+                # unos segundos en terminar.
+                if _last and (_t.time() - _last) < intervalo - _RELOJ_MARGEN_S:
                     return                     # aún no toca
             except Exception as _ex:
                 _avisar_ex("telegram_bot:_w:3526", _ex)
