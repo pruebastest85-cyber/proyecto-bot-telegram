@@ -16261,6 +16261,201 @@ def prueba_19be():
     conn.commit()
     conn.close()
 
+def prueba_19bf():
+    bloque("19-BF (fase 7) - libro de cuentas de Helius: hoy se sabe "
+           "CUANTO se gasta pero no EN QUE (el 3/9 se fueron 2,4 M en un "
+           "dia y nadie puede decir en que)")
+    import config as _cfg
+    import helius_ledger as HL
+    from db import get_conn
+
+    conn = get_conn()
+    conn.execute("DELETE FROM helius_ledger")
+    conn.commit()
+    HL._BUF.clear()
+    HL._EVENTOS[0] = 0
+
+    # ── 0) el reloj del volcado arranca en "ahora" ───────────────────
+    # Si arrancara en cero, el PRIMER apunte de la vida del proceso
+    # creeria que lleva una eternidad sin volcar y escribiria en la base
+    # al instante: una fila suelta por llamada en vez de la suma del
+    # minuto. Se comprueba sobre el modulo RECIEN cargado porque, a
+    # estas alturas de la suite, otras pruebas ya han apuntado creditos
+    # y el reloj esta puesto de todos modos.
+    import importlib as _il
+    _fresco = _il.reload(HL)
+    comprobar("el reloj del volcado arranca en 'ahora', no en cero",
+              _fresco._ULTIMO[0] > 0)
+    HL = _il.reload(HL)
+    HL._BUF.clear()
+    HL._EVENTOS[0] = 0
+
+    # ── 1) el contexto dice a que sobre va el gasto ──────────────────
+    comprobar("sin contexto, el gasto cae en 'otros' (y se ve en el "
+              "informe, que es lo que hace falta para afinar)",
+              HL.actual()[0] == "otros")
+    with HL.contexto("billeteras", "wallet", "W1"):
+        comprobar("dentro del contexto, el sobre y la entidad son los "
+                  "declarados", HL.actual() == ("billeteras", "wallet", "W1"))
+        with HL.contexto("profundo", "wallet", "W2"):
+            comprobar("y los contextos se anidan",
+                      HL.actual()[0] == "profundo")
+        comprobar("al salir del de dentro se recupera el de fuera, no se "
+                  "queda el hilo marcado", HL.actual()[0] == "billeteras")
+    comprobar("y al salir del todo se vuelve a 'otros'",
+              HL.actual()[0] == "otros")
+
+    # ── 2) apuntar y volcar ─────────────────────────────────────────
+    with HL.contexto("descubrimiento", "token", "Mint1"):
+        HL.apuntar(10, endpoint="rpc")
+        HL.apuntar(10, endpoint="rpc")
+        HL.apuntar(100, endpoint="enhanced", ok=False)
+    with HL.contexto("billeteras", "wallet", "Wx"):
+        HL.apuntar(250, endpoint="rpc", ms=120)
+    volcado = HL.volcar()
+    comprobar("se vuelca todo lo apuntado", volcado == 370)
+    filas = conn.execute(
+        "SELECT endpoint, bucket, cost, success, reason FROM helius_ledger "
+        "ORDER BY cost DESC").fetchall()
+    comprobar("se agrega por dia, endpoint y sobre: tres filas, no cuatro "
+              "apuntes sueltos", len(filas) == 3)
+    rpc_desc = [f for f in filas if f["endpoint"] == "rpc"
+                and f["bucket"] == "descubrimiento"]
+    comprobar("las dos llamadas de RPC del mismo sobre se suman en una "
+              "fila", len(rpc_desc) == 1 and rpc_desc[0]["cost"] == 20
+              and "2 llamadas" in (rpc_desc[0]["reason"] or ""))
+    fallida = [f for f in filas if f["endpoint"] == "enhanced:fallo"]
+    comprobar("una llamada que FALLO se apunta en su propia fila, para "
+              "poder ver cuanto se gasta en llamadas que no sirvieron",
+              len(fallida) == 1 and fallida[0]["cost"] == 100
+              and not [f for f in filas if f["endpoint"] == "enhanced"])
+    comprobar("el mismo sobre con endpoints distintos NO se mezcla",
+              len({(f["endpoint"], f["bucket"]) for f in filas}) == 3)
+
+    # ── 3) volver a volcar SUMA, no duplica ─────────────────────────
+    with HL.contexto("descubrimiento", "token", "Mint1"):
+        HL.apuntar(30, endpoint="rpc")
+    HL.volcar()
+    r = conn.execute("SELECT cost, reason FROM helius_ledger WHERE "
+                     "endpoint='rpc' AND bucket='descubrimiento'").fetchall()
+    comprobar("un segundo volcado del mismo dia SUMA sobre la misma fila "
+              "en vez de crear otra, y el recuento del texto sigue "
+              "cuadrando con la columna",
+              len(r) == 1 and r[0]["cost"] == 50
+              and "3 llamadas" in (r[0]["reason"] or ""))
+
+    # ── 4) lo que no se pudo escribir NO se pierde ──────────────────
+    HL._BUF.clear()
+    with HL.contexto("reserva"):
+        HL.apuntar(7, endpoint="rpc")
+    _get = HL.get_conn
+    try:
+        def _roto():
+            raise RuntimeError("base caida")
+        HL.get_conn = _roto
+        comprobar("si la base falla, el volcado devuelve 0 en vez de "
+                  "reventar", HL.volcar() == 0)
+    finally:
+        HL.get_conn = _get
+    comprobar("y los créditos vuelven al búfer: subcontar el gasto es "
+              "como el freno del 85 % llega tarde",
+              sum(d["cost"] for d in HL._BUF.values()) == 7)
+    comprobar("al volcar de nuevo con la base sana, se escriben",
+              HL.volcar() == 7)
+
+    # ── 5) lecturas ─────────────────────────────────────────────────
+    desde = 0
+    # Apuntado: 20 + 30 de RPC en descubrimiento, 100 de una enhanced que
+    # fallo (tambien en descubrimiento), 250 en billeteras y 7 en reserva.
+    comprobar("el total del libro cuadra con lo apuntado",
+              HL.gastado(conn, desde) == 407)
+    comprobar("y se puede pedir por sobre: el gasto de la llamada "
+              "fallida sigue contando en SU sobre",
+              HL.gastado(conn, desde, "descubrimiento") == 150)
+    sobres = {f["bucket"]: f["c"] for f in HL.por_sobre(conn, desde)}
+    comprobar("el reparto por sobre sale entero",
+              sobres.get("descubrimiento") == 150
+              and sobres.get("billeteras") == 250
+              and sobres.get("reserva") == 7)
+    comprobar("cada sobre tiene su parte del presupuesto, sacada de la "
+              "configuracion",
+              HL.presupuesto("billeteras") == int(
+                  _cfg.HELIUS_MONTHLY_BUDGET
+                  * _cfg.HELIUS_WALLET_BUDGET_PCT / 100.0)
+              and HL.presupuesto("billeteras") > 0)
+    comprobar("un sobre que no existe no tiene presupuesto (no se lo "
+              "inventa)", HL.presupuesto("inventado") == 0)
+    comprobar("las partes de los sobres suman 100",
+              _cfg.HELIUS_DISCOVERY_BUDGET_PCT
+              + _cfg.HELIUS_WALLET_BUDGET_PCT
+              + _cfg.HELIUS_DEEP_BUDGET_PCT
+              + _cfg.HELIUS_RESERVE_BUDGET_PCT == 100)
+
+    # ── 6) el interruptor apaga de verdad ───────────────────────────
+    _act = _cfg.HELIUS_LEDGER_ACTIVO
+    try:
+        _cfg.HELIUS_LEDGER_ACTIVO = 0
+        HL._BUF.clear()
+        HL.apuntar(999, endpoint="rpc")
+        comprobar("con el interruptor apagado no se apunta nada",
+                  not HL._BUF)
+    finally:
+        _cfg.HELIUS_LEDGER_ACTIVO = _act
+
+    # ── 7) la poda respeta el tope ──────────────────────────────────
+    _tope = _cfg.HELIUS_LEDGER_MAX
+    try:
+        _cfg.HELIUS_LEDGER_MAX = 2
+        HL.podar(conn)
+        comprobar("la poda deja el tope de filas",
+                  conn.execute("SELECT COUNT(*) c FROM helius_ledger"
+                               ).fetchone()["c"] == 2)
+    finally:
+        _cfg.HELIUS_LEDGER_MAX = _tope
+
+    # ── 8) el enganche: contar creditos apunta en el libro ──────────
+    # Es LO que garantiza que el libro cuadre con el contador del freno:
+    # si el enganche se cae, el libro se queda a cero mientras el freno
+    # sigue contando, y nadie se entera.
+    conn.execute("DELETE FROM helius_ledger")
+    conn.commit()
+    HL._BUF.clear()
+    import api_usage as AU
+    with HL.contexto("billeteras", "wallet", "Wenganche"):
+        AU.record("helius_credits", 40)
+    comprobar("apuntar creditos en el contador de siempre alimenta el "
+              "libro, sin tener que acordarse en cada sitio",
+              sum(d["cost"] for d in HL._BUF.values()) == 40)
+    HL._BUF.clear()
+    AU.record("dexscreener", 5)
+    comprobar("y una API que no es Helius no ensucia el libro",
+              not HL._BUF)
+
+    # ── 9) cableado ─────────────────────────────────────────────────
+    _tb = open("telegram_bot.py", encoding="utf-8").read()
+    comprobar("el volcado periodico mira su interruptor",
+              'int(getattr(_c, "HELIUS_LEDGER_ACTIVO", 1))' in _tb)
+    comprobar("esta dado de alta con reloj persistente",
+              '_con_reloj("ledger"' in _tb and '_reloj_first("ledger"' in _tb)
+    comprobar("y /creditos esta registrado y anunciado",
+              'CommandHandler("creditos"' in _tb
+              and 'BotCommand("creditos"' in _tb)
+    _wp = open("wallet_profiler.py", encoding="utf-8").read()
+    _wa = open("wallet_analyzer.py", encoding="utf-8").read()
+    comprobar("el perfilado declara su sobre (es el mayor gastador)",
+              '_ctx_helius("billeteras", "wallet", address)' in _wp)
+    comprobar("y el analisis de un token declara el suyo",
+              '_ctx_helius("descubrimiento", "token", mint)' in _wa)
+    _rt = open("realtime.py", encoding="utf-8").read()
+    comprobar("el contexto de tiempo real se cierra con `with`, no a "
+              "mano: si no, el hilo se quedaria marcado para siempre",
+              'with _ctx_helius("profundo", "wallet", wallet):' in _rt)
+
+    conn.execute("DELETE FROM helius_ledger")
+    conn.commit()
+    conn.close()
+    HL._BUF.clear()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -16343,6 +16538,7 @@ def main():
     prueba_19bc()
     prueba_19bd()
     prueba_19be()
+    prueba_19bf()
 
     print("\n" + "─" * 60)
     if _FALLOS:
