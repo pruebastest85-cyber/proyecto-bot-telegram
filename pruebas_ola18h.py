@@ -15246,6 +15246,249 @@ def prueba_19az():
     conn.close()
 
 
+def prueba_19ba():
+    bloque("19-BA (embudo v2, fase 4) - historial de mercado del token: "
+           "fotos, hitos de 500K/1M, maximo historico y supervivencia "
+           "24h/7d, sin gastar un credito de Helius")
+    import contextlib
+    import inspect as _insp
+    import io
+    import json as _json
+    import time as _t
+    import config as _cfg
+    import token_check as tc
+    import token_history as th
+    from db import get_conn
+
+    conn = get_conn()
+    for t in ("token_snapshots", "token_milestones", "winning_tokens",
+              "signals"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    ahora = int(_t.time())
+
+    # ── 1) una curva completa: sube a 3M y se desinfla ────────────────
+    conn.execute("INSERT INTO winning_tokens (mint, symbol) VALUES ('M1','SUBE')")
+    curva = [(ahora - 9 * 86400, 80_000, 9_000),
+             (ahora - 8 * 86400, 600_000, 60_000),
+             (ahora - 8 * 86400 + 1800, 900_000, 80_000),
+             (ahora - 7 * 86400, 3_000_000, 250_000),
+             (ahora - 6 * 86400, 2_000_000, 180_000),
+             (ahora - 86400, 400_000, 40_000),
+             (ahora, 380_000, 38_000)]
+    for ts, mc, liq in curva:
+        th.guardar_foto(conn, "M1", {"mc": mc, "price": mc / 1e9, "liq": liq,
+                                     "vol24": liq * 2, "mc_source": "mc",
+                                     "txns24": {"buys": 50, "sells": 40}}, ts)
+    conn.commit()
+    comprobar("se guardan las 7 fotos de la curva",
+              conn.execute("SELECT COUNT(*) c FROM token_snapshots "
+                           "WHERE mint='M1'").fetchone()["c"] == 7)
+    n = th.recalcular_hitos(conn, "M1")
+    hitos = {r["milestone_usd"]: r for r in conn.execute(
+        "SELECT * FROM token_milestones WHERE mint='M1'")}
+    comprobar("detecta el cruce de 500K y el de 1M (y los de 100K, 250K y 2M)",
+              n == 5 and 500_000.0 in hitos and 1_000_000.0 in hitos
+              and 5_000_000.0 not in hitos, sorted(hitos))
+    comprobar("el cruce de 500K se fecha en la foto en que se vio, no antes",
+              int(hitos[500_000.0]["first_reached_ts"]) == ahora - 8 * 86400)
+    comprobar("un cruce acotado entre dos fotos cercanas (30 min) tiene "
+              "confianza ALTA; uno con un dia de hueco, BAJA",
+              hitos[1_000_000.0]["confidence"] == "baja"
+              and th.HITO_VENTANA_FIABLE_S > 1800,
+              hitos[1_000_000.0]["confidence"])
+    ath, ath_ts = th.recalcular_ath(conn, "M1")
+    comprobar("el maximo historico es 3M aunque hoy valga 380K",
+              ath == 3_000_000.0 and int(ath_ts) == ahora - 7 * 86400)
+    sup = th.evaluar_supervivencia(conn, "M1", None, ahora)
+    comprobar("sobrevivio 24 h y 7 d desde que cruzo los 500K",
+              sup["survival_24h"] is True and sup["survival_7d"] is True,
+              (sup["survival_24h"], sup["survival_7d"]))
+    comprobar("y se dice cuanto queda de su maximo (380K de 3M ≈ 13 %)",
+              abs(sup["peak_to_current_pct"] - 12.7) < 0.5,
+              sup["peak_to_current_pct"])
+    comprobar("la nota de vida viene con su razon y su confianza, nunca "
+              "sola", 0 <= sup["survival_score"] <= 100
+              and sup["survival_reason"]
+              and sup["survival_confidence"] in ("alta", "media", "baja"),
+              sup["survival_score"])
+    comprobar("clase BREAKOUT porque su maximo paso del millon",
+              th.clasificar(ath, sup["survival_score"]) == "BREAKOUT")
+
+    # ── 2) lo que NO se sabe no se inventa ────────────────────────────
+    conn.execute("INSERT INTO winning_tokens (mint, symbol) VALUES ('M2','NUEVO')")
+    th.guardar_foto(conn, "M2", {"mc": 700_000, "price": 0.1, "liq": 50_000},
+                    ahora - 600)
+    conn.commit()
+    th.recalcular_hitos(conn, "M2")
+    s2 = th.evaluar_supervivencia(conn, "M2", None, ahora)
+    comprobar("un token recien visto: supervivencia None ('todavia no se "
+              "sabe'), NUNCA False", s2["survival_24h"] is None
+              and s2["survival_7d"] is None,
+              (s2["survival_24h"], s2["survival_7d"]))
+    # un token que se apago: hay foto a las 24 h y estaba muerto
+    conn.execute("INSERT INTO winning_tokens (mint, symbol) VALUES ('M3','MUERE')")
+    th.guardar_foto(conn, "M3", {"mc": 800_000, "price": 1.0, "liq": 70_000},
+                    ahora - 5 * 86400)
+    th.guardar_foto(conn, "M3", {"mc": 9_000, "price": 0.01, "liq": 300.0,
+                                 "vol24": 50.0}, ahora - 4 * 86400)
+    conn.commit()
+    th.recalcular_hitos(conn, "M3")
+    s3 = th.evaluar_supervivencia(conn, "M3", None, ahora)
+    comprobar("un token que se quedo sin liquidez a las 24 h: survival_24h "
+              "False (eso SI se afirma, hay dato)",
+              s3["survival_24h"] is False, s3["survival_24h"])
+    comprobar("y su nota de vida es baja", s3["survival_score"] < 50,
+              s3["survival_score"])
+    comprobar("no es SURVIVOR ni BREAKOUT",
+              th.clasificar(s3["ath_mc"], s3["survival_score"]) is None)
+
+    # ── 3) idempotencia (regla 37) ────────────────────────────────────
+    antes = conn.execute("SELECT COUNT(*) c FROM token_snapshots").fetchone()["c"]
+    with contextlib.redirect_stdout(io.StringIO()):
+        rep = th.recalcular_hitos(conn, "M1")
+        foto = th.guardar_foto(conn, "M1", {"mc": 1.0, "price": 1.0}, ahora)
+    comprobar("repetir la pasada no crea hitos ni fotos duplicadas",
+              rep == 0 and foto is False
+              and conn.execute("SELECT COUNT(*) c FROM token_snapshots"
+                               ).fetchone()["c"] == antes)
+
+    # ── 4) relleno GRATIS desde `signals` ─────────────────────────────
+    conn.execute("DELETE FROM token_snapshots WHERE mint='M4'")
+    for i, (mc, liq) in enumerate([(120_000, 20_000), (700_000, 65_000),
+                                   (1_400_000, 120_000), (300_000, 30_000)]):
+        conn.execute(
+            "INSERT INTO signals (signature, wallet, mint, sol, ts, side, "
+            "price_usd, mc, liq) VALUES (?,'W','M4',1.0,?, 'compra',?,?,?)",
+            (f"SIG{i}", ahora - (10 - i * 2) * 86400, mc / 1e9, mc, liq))
+    conn.commit()
+    with contextlib.redirect_stdout(io.StringIO()):
+        n_rell = th.backfill_desde_signals(conn, 10)
+    comprobar("el historial de MC que ya estaba en `signals` se convierte "
+              "en fotos (gratis, sin una sola llamada a ninguna API)",
+              n_rell == 4, n_rell)
+    h4 = {r["milestone_usd"] for r in conn.execute(
+        "SELECT milestone_usd FROM token_milestones WHERE mint='M4'")}
+    comprobar("…y de ahi salen sus hitos: cruzo 500K y 1M",
+              {500_000.0, 1_000_000.0} <= h4, sorted(h4))
+    comprobar("las fotos recuperadas quedan marcadas como 'signals' para "
+              "no confundirlas con una lectura fresca",
+              conn.execute("SELECT COUNT(*) c FROM token_snapshots "
+                           "WHERE mint='M4' AND source='signals'"
+                           ).fetchone()["c"] == 4)
+    with contextlib.redirect_stdout(io.StringIO()):
+        comprobar("y el relleno no se repite en la siguiente pasada",
+                  th.backfill_desde_signals(conn, 10) == 0)
+
+    # ── 5) lectura en lote: MC real vs FDV y el par que NO es nuestro ─
+    class _R:
+        def __init__(self, data):
+            self.status_code, self._d, self.ok = 200, data, True
+            self.text = _json.dumps(data)[:200]
+        def json(self):
+            return self._d
+        def raise_for_status(self):
+            return None
+
+    MA, MB = "MINTA" + "a" * 39, "MINTB" + "b" * 39
+    RESP = {"pairs": [
+        {"baseToken": {"address": MA, "symbol": "AAA"},
+         "priceUsd": "0.5", "marketCap": 900000, "fdv": 2000000,
+         "liquidity": {"usd": 70000.0}, "volume": {"h24": 250000.0},
+         "txns": {"h24": {"buys": 300, "sells": 250}},
+         "pairAddress": "PA", "chainId": "solana"},
+        {"baseToken": {"address": MB, "symbol": "BBB"},
+         "priceUsd": "0.02", "fdv": 640000,
+         "liquidity": {"usd": 30000.0}, "volume": {"h24": 90000.0},
+         "txns": {"h24": {"buys": 10, "sells": 8}},
+         "pairAddress": "PB", "chainId": "solana"},
+        # par donde MA es la moneda de COTIZACION: su precio es de OTRO
+        {"baseToken": {"address": "OTRO" + "z" * 40, "symbol": "ZZZ"},
+         "quoteToken": {"address": MA}, "priceUsd": "999.0",
+         "liquidity": {"usd": 90000000.0}, "marketCap": 5e9,
+         "pairAddress": "PZ", "chainId": "solana"}]}
+    _g0, _d0 = tc.requests.get, _cfg.DEXSCREENER_DELAY
+    tc.requests.get = lambda *a, **k: _R(RESP)
+    _cfg.DEXSCREENER_DELAY = 0.0
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            lote = tc.datos_lote([MA, MB, "NOEXISTE" + "n" * 36])
+    finally:
+        tc.requests.get, _cfg.DEXSCREENER_DELAY = _g0, _d0
+    comprobar("el lote devuelve solo los tokens que aparecen: 'no lo se' "
+              "no es 'esta muerto'", set(lote) == {MA, MB}, sorted(lote))
+    comprobar("con marketCap real se usa ese y se marca 'mc'",
+              lote[MA]["mc"] == 900000 and lote[MA]["mc_source"] == "mc"
+              and lote[MA]["fdv"] == 2000000, lote[MA])
+    comprobar("sin marketCap se cae al FDV y se marca 'fdv' (un FDV no es "
+              "un market cap y el embudo decide con 500K/1M)",
+              lote[MB]["mc"] == 640000 and lote[MB]["mc_source"] == "fdv")
+    comprobar("el par donde nuestro token es la moneda de cotizacion se "
+              "ignora (leccion JUPCAT, 19-AX)",
+              lote[MA]["price"] == 0.5 and lote[MA]["liq"] == 70000.0)
+    # …y el filtro se comprueba tambien EN DIRECTO sobre `_mejor_par`: en
+    # `datos_lote` la agrupacion por baseToken ya deja fuera al par ajeno,
+    # asi que sin esto una regresion en el filtro pasaria desapercibida
+    # (lo descubrio la bateria de mutaciones).
+    _mezcla = [RESP["pairs"][2], RESP["pairs"][0]]
+    comprobar("_mejor_par se queda con el par cuyo token BASE es el mint, "
+              "aunque el ajeno tenga mil veces mas liquidez",
+              (tc._mejor_par(_mezcla, MA) or {}).get("pairAddress") == "PA"
+              and tc._mejor_par([RESP["pairs"][2]], MA) is None)
+    comprobar("y trae volumen y transacciones, que son las señales de "
+              "supervivencia que el lote viejo tiraba",
+              lote[MA]["vol24"] == 250000.0
+              and lote[MA]["txns24"].get("buys") == 300)
+
+    # ── 6) prioridad de refresco (regla 33) ──────────────────────────
+    comprobar("un token de 1M+ se vigila como WINNER; uno de 500K sano "
+              "como SURVIVOR; uno de 500K apagado pasa a HISTORICAL; uno "
+              "recien nacido es HOT",
+              (th.prioridad(2e6, 90, 1), th.prioridad(6e5, 80, 10),
+               th.prioridad(6e5, 10, 10), th.prioridad(None, 0, 1),
+               th.prioridad(None, 0, 30))
+              == ("WINNER", "SURVIVOR", "HISTORICAL", "HOT", "HISTORICAL"))
+
+    # ── 7) cableado: job con reloj persistente y cero Helius ─────────
+    import telegram_bot as tb
+    _src_tb = _insp.getsource(tb)
+    comprobar("el job del historial esta registrado con reloj persistente "
+              "(sobrevive reinicios) y se puede apagar por configuracion",
+              '_con_reloj("token_history"' in _src_tb
+              and "TOKEN_HISTORY_ACTIVO" in _insp.getsource(
+                  tb.token_history_job)
+              # el interruptor tiene que EXISTIR de verdad en config: si
+              # solo estuviera nombrado en el job, el getattr caeria al
+              # defecto y apagarlo no serviria de nada.
+              and hasattr(_cfg, "TOKEN_HISTORY_ACTIVO")
+              and hasattr(_cfg, "TOKEN_HISTORY_TOKENS_POR_PASADA"))
+    # Solo el CODIGO, no los comentarios: el modulo explica en su
+    # cabecera que no gasta Helius, y buscar la palabra a secas encuentra
+    # justo esa frase.
+    _src_th = "\n".join(
+        l for l in _insp.getsource(th).splitlines()
+        if not l.strip().startswith("#"))
+    _sin_docstring = _src_th.split('"""')[2] if _src_th.count('"""') >= 2 else _src_th
+    comprobar("el modulo NO llama a Helius por ningun lado (0 creditos)",
+              not any(x in _sin_docstring for x in
+                      ("helius", "primeras_txs", "historial_wallet",
+                       "getTransactionsForAddress")),
+              [x for x in ("helius", "primeras_txs", "historial_wallet")
+               if x in _sin_docstring])
+    comprobar("/tokens existe para consultarlo desde Telegram",
+              "CommandHandler(\"tokens\"" in _src_tb)
+    with contextlib.redirect_stdout(io.StringIO()):
+        txt = th.resumen_text(conn, 5)
+    comprobar("el resumen dice cuantos cruzaron 500K y 1M",
+              "Historial de tokens" in txt and "Cruzaron" in txt, txt[:120])
+
+    for t in ("token_snapshots", "token_milestones", "winning_tokens",
+              "signals"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.commit()
+    conn.close()
+
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -15323,6 +15566,7 @@ def main():
     prueba_19aw()
     prueba_19ax()
     prueba_19az()
+    prueba_19ba()
 
     print("\n" + "─" * 60)
     if _FALLOS:
