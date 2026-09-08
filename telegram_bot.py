@@ -1212,6 +1212,28 @@ async def post_mortem_job(ctx: ContextTypes.DEFAULT_TYPE):
         raise                  # (Ola 17-B) que el reloj de ÉXITO no se marque
 
 
+async def token_history_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 4) Cada 30 min: fotos del mercado de los tokens
+    ganadores, hitos de MC, maximo historico y supervivencia.
+
+    CERO creditos de Helius: DexScreener en lote (UNA peticion por cada
+    30 tokens) y el historial de MC que ya vive en `signals`. Se apaga
+    con TOKEN_HISTORY_ACTIVO=0 sin tocar codigo."""
+    try:
+        import config as _c
+        if not int(getattr(_c, "TOKEN_HISTORY_ACTIVO", 1)):
+            return
+        from token_history import actualizar
+        await asyncio.to_thread(actualizar)
+    except Exception as e:
+        print(f"· token_history_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "token_history", e)
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:token_history_job", _ex)
+
+
 async def radar_job(ctx: ContextTypes.DEFAULT_TYPE):
     """(Ola 14) Cada 15 min: tokens recién nacidos con smart money."""
     try:
@@ -2855,6 +2877,7 @@ async def _post_init(app: Application):
             BotCommand("rendimiento", "Win rate de las señales"),
             BotCommand("estrellasperf", "Rendimiento medido de cada ⭐"),
             BotCommand("salud", "¿Está todo funcionando bien?"),
+            BotCommand("tokens", "Tokens: máximo histórico y si siguen vivos"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
@@ -3018,6 +3041,16 @@ async def cmd_salud(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
     from salud import salud_text
     txt = await asyncio.to_thread(salud_text, None, con_ia)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_tokens(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2) Historial de mercado: cuantos tokens cruzaron 500K y
+    1M, y cuales siguen vivos."""
+    await update.message.chat.send_action("typing")
+    from token_history import resumen_text
+    txt = await asyncio.to_thread(resumen_text, None, 10)
     await _send_md(update.message.chat, txt)
 
 
@@ -3736,6 +3769,7 @@ def main():
     app.add_handler(CommandHandler("rendimiento", cmd_rendimiento))
     app.add_handler(CommandHandler("estrellasperf", cmd_wallets_perf))
     app.add_handler(CommandHandler("salud", cmd_salud))
+    app.add_handler(CommandHandler("tokens", cmd_tokens))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
@@ -3917,6 +3951,13 @@ def main():
     # Radar de pares recién nacidos (Ola 14): cada 15 min
     app.job_queue.run_repeating(radar_job, interval=900, first=600,
                                 name="radar")
+    # (Embudo v2, fase 4) Historial de mercado de los tokens: cada 30 min.
+    # Reloj persistente para que un reinicio no lo adelante.
+    app.job_queue.run_repeating(
+        _con_reloj("token_history", token_history_job, 1800),
+        interval=min(1800, _SONDEO_MAX),
+        first=min(_reloj_first("token_history", 1800, 300), _SONDEO_MAX),
+        name="token_history")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job, 7 * 86400),

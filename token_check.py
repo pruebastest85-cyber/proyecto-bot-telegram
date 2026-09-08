@@ -123,6 +123,7 @@ def _get(url: str, timeout: int = 15):
 def analyze_token(mint: str) -> dict:
     t = {"symbol": "?", "pair": None, "chain": "solana",
          "price": None, "liq": None, "mc": None,
+         "fdv": None, "mc_source": None,
          "age_days": None, "vol24": None, "buys5": None, "sells5": None,
          "price_change_h1": None, "price_change_h24": None,
          "websites": [], "socials": [],
@@ -175,7 +176,15 @@ def analyze_token(mint: str) -> dict:
         # el chequeo de cordura de los hitos descartaba tarjetas
         # legitimas como "dato poco fiable" y la linea "MC $a → $b"
         # mezclaba unidades.
+        # (19-BA) Ademas del valor, se dice DE DONDE sale. Un FDV no es
+        # un market cap: en un token con oferta bloqueada el FDV puede
+        # multiplicar por 10 al MC real, y el embudo v2 decide con
+        # umbrales de 500K/1M. Sin esta marca no se puede saber si un
+        # "token de 1M" lo era de verdad.
+        t["fdv"] = p.get("fdv")
         t["mc"] = p.get("marketCap") or p.get("fdv")
+        t["mc_source"] = ("mc" if p.get("marketCap")
+                          else ("fdv" if p.get("fdv") else None))
         t["price_change_h1"] = (p.get("priceChange") or {}).get("h1")
         t["price_change_h24"] = (p.get("priceChange") or {}).get("h24")
         t["vol24"] = (p.get("volume") or {}).get("h24")
@@ -287,3 +296,81 @@ def ai_payload(t: dict) -> dict:
             ("symbol", "liq", "mc", "price_change_h1", "age_days", "vol24",
              "buys5", "sells5", "rug_score", "risks", "rug_ok", "mint_auth",
              "freeze_auth", "top10_pct", "lp_locked_pct")}
+
+
+# ── Lectura EN LOTE para el historial de mercado (19-BA) ──────────────
+LOTE_MAX = 30          # DexScreener acepta 30 direcciones por peticion
+
+
+def _mejor_par(pares, mint):
+    """El par de mayor liquidez cuyo token BASE es `mint`. Devuelve None
+    si ninguno lo es: el endpoint tambien lista pares donde el mint es la
+    moneda de COTIZACION, y ahi el precio es el del OTRO token (19-AX)."""
+    propios = [p for p in pares
+               if ((p.get("baseToken") or {}).get("address") or "") == mint]
+    if not propios:
+        return None
+
+    def _liq(x):
+        try:
+            return float(((x.get("liquidity") or {}).get("usd")) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    return max(propios, key=_liq)
+
+
+def _num(x):
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v
+
+
+def datos_lote(mints) -> dict:
+    """{mint: {price, mc, fdv, mc_source, liq, vol24, txns24, symbol,
+    pair, pair_created_ms}} para VARIOS tokens con UNA peticion por cada
+    30 (regla de DexScreener).
+
+    Existe para el historial de mercado del embudo v2: `_prices_mc_lote`
+    de signal_tracker ya hace un lote parecido, pero solo devuelve
+    (precio, MC, muerto, liquidez) y tira el resto de la respuesta —
+    volumen, transacciones y FDV, que son justo las señales de
+    supervivencia. No se toca aquella (la usa la medicion cada 15 min);
+    esta vive aqui, que es el modulo de datos de token, y comparte con
+    `analyze_token` la regla del par base.
+
+    Un mint que no aparece en la respuesta NO se incluye en el
+    resultado: "no lo se" y "esta muerto" no son lo mismo. Nunca lanza.
+    """
+    out = {}
+    mints = [m for m in dict.fromkeys(mints or []) if m]
+    for i in range(0, len(mints), LOTE_MAX):
+        trozo = mints[i:i + LOTE_MAX]
+        d = _get(config.DEXSCREENER_TOKEN.format(address=",".join(trozo)))
+        _api_rec("dexscreener")
+        pares = (d or {}).get("pairs") or []
+        por_mint = {}
+        for p in pares:
+            m = (p.get("baseToken") or {}).get("address")
+            if m:
+                por_mint.setdefault(m, []).append(p)
+        for m in trozo:
+            p = _mejor_par(por_mint.get(m, []), m)
+            if not p:
+                continue
+            mc, fdv = _num(p.get("marketCap")), _num(p.get("fdv"))
+            out[m] = {
+                "price": _num(p.get("priceUsd")),
+                "mc": mc if mc else fdv,
+                "fdv": fdv,
+                "mc_source": "mc" if mc else ("fdv" if fdv else None),
+                "liq": _num((p.get("liquidity") or {}).get("usd")),
+                "vol24": _num((p.get("volume") or {}).get("h24")),
+                "txns24": ((p.get("txns") or {}).get("h24") or {}),
+                "symbol": (p.get("baseToken") or {}).get("symbol"),
+                "pair": p.get("pairAddress"),
+                "pair_created_ms": p.get("pairCreatedAt"),
+            }
+        time.sleep(config.DEXSCREENER_DELAY)
+    return out

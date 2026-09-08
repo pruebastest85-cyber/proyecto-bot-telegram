@@ -345,6 +345,17 @@ HELIUS_COSTE_WALLET_API = _int("HELIUS_COSTE_WALLET_API", 100)
 # no cuadran.
 HELIUS_COSTE_WS_POR_MB = _float("HELIUS_COSTE_WS_POR_MB", 20.0)
 
+# ── Historial de mercado del token (fase 4) ───────────────────────────
+# Solo usa DexScreener (gratis) y el historial de MC que ya esta en
+# `signals`: CERO creditos de Helius. Con 30 tokens por pasada es UNA
+# peticion cada media hora, frente a las miles que el bot ya hace.
+TOKEN_HISTORY_ACTIVO = _int("TOKEN_HISTORY_ACTIVO", 1)
+TOKEN_HISTORY_TOKENS_POR_PASADA = _int("TOKEN_HISTORY_TOKENS_POR_PASADA", 30)
+TOKEN_HISTORY_BACKFILL_POR_PASADA = _int(
+    "TOKEN_HISTORY_BACKFILL_POR_PASADA", 25)
+# Por debajo de esta nota (0-100) un token no cuenta como superviviente.
+SURVIVAL_SCORE_MIN = _float("SURVIVAL_SCORE_MIN", 50.0)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]
