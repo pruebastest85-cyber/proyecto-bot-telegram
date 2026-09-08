@@ -55,6 +55,7 @@ libro de cuentas de la fase 7: si se pasa, se corta y se sigue en la
 siguiente. Nunca puede repetirse lo del 3 de septiembre.
 """
 
+import math as _math
 import time
 
 import config
@@ -123,8 +124,18 @@ def elegir_candidatas(buys: list[dict], sells: list[dict],
       · y no ser una billetera que ya tenemos medida (buscamos gente
         nueva; a las conocidas ya las puntua la fase 6).
 
-    Ordenadas por capital ASCENDENTE: entre dos candidatas, primero la
-    que arriesgo menos, que es literalmente lo que se busca.
+    Ordenadas por CERCANIA AL PUNTO DULCE medido, no por "la mas
+    pequeña". La diferencia importa y la enseño la primera caceria real:
+    ordenando por capital ascendente, las 30 candidatas salieron todas
+    entre 0,50 y 0,77 SOL — el fondo de la banda. Y el fondo de la banda
+    es justo su peor tramo: entre 0,5 y 1 SOL solo el 45 % acaba en
+    ganancia y el percentil 90 se queda en x3,8, mientras que entre 1 y
+    3 SOL gana el 57 % y el percentil 90 llega a x8,5.
+
+    "Poco capital" no quiere decir "el minimo posible": quiere decir la
+    banda donde de verdad se multiplica. Por eso se ordena por distancia
+    (en escala logaritmica, que es como se comparan los multiplos) al
+    centro de ese tramo.
     """
     minimo = _float("DESCUBRIMIENTO_MIN_SOL", 0.5)
     maximo = _float("DESCUBRIMIENTO_MAX_SOL", 5.0)
@@ -162,7 +173,8 @@ def elegir_candidatas(buys: list[dict], sells: list[dict],
         if w in vendieron:
             continue
         out.append({"wallet": w, "sol": sol, "ts": primera.get(w)})
-    out.sort(key=lambda d: d["sol"])
+    optimo = max(1e-9, _float("DESCUBRIMIENTO_OPTIMO_SOL", 2.0))
+    out.sort(key=lambda d: abs(_math.log(max(1e-9, d["sol"]) / optimo)))
     return out[:int(limite)]
 
 
@@ -294,7 +306,8 @@ def explorar(conn, tokens: list[dict], tope_creditos: int,
         sells = extract_sells(txs, mint)
         cands = elegir_candidatas(buys, sells, ya)
         for i, c in enumerate(cands):
-            # Prioridad: cuanto menos capital metio, mas arriba. Se
+            # Prioridad = el orden en que salieron de `elegir_candidatas`,
+            # que ya es "lo mas cerca del punto dulce, primero". Se
             # convierte a entero porque la columna lo es.
             prio = 1000 - i
             if encolar(conn, c["wallet"], prio,

@@ -431,6 +431,13 @@ DESCUBRIMIENTO_ACTIVO = _int("DESCUBRIMIENTO_ACTIVO", 1)
 # de lo que se busca.
 DESCUBRIMIENTO_MIN_SOL = _float("DESCUBRIMIENTO_MIN_SOL", 0.5)
 DESCUBRIMIENTO_MAX_SOL = _float("DESCUBRIMIENTO_MAX_SOL", 5.0)
+# El PUNTO DULCE dentro de la banda, que es por donde se ordenan las
+# candidatas. No es el minimo: la primera caceria real saco 30 candidatas
+# todas entre 0,50 y 0,77 SOL porque se ordenaba por "la mas pequeña", y
+# ese es el PEOR tramo de la banda (45 % de aciertos, percentil 90 en
+# x3,8) frente al de 1-3 SOL (57 % y x8,5). 2 SOL es el centro del tramo
+# bueno.
+DESCUBRIMIENTO_OPTIMO_SOL = _float("DESCUBRIMIENTO_OPTIMO_SOL", 2.0)
 DESCUBRIMIENTO_TOKENS_POR_PASADA = _int(
     "DESCUBRIMIENTO_TOKENS_POR_PASADA", 3)
 DESCUBRIMIENTO_CANDIDATOS_POR_TOKEN = _int(
