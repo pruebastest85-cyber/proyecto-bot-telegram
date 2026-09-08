@@ -1257,6 +1257,37 @@ async def posiciones_job(ctx: ContextTypes.DEFAULT_TYPE):
             _avisar_ex("telegram_bot:posiciones_job", _ex)
 
 
+async def ledger_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 7) Cada 10 min: vuelca al disco lo que el libro
+    de cuentas lleva acumulado en memoria y lo poda si crece.
+
+    Existe porque el búfer solo se vuelca al llegar a 50 apuntes o al
+    pasar un minuto DESDE EL SIGUIENTE apunte: en una racha tranquila lo
+    último podría quedarse en memoria horas y perderse en un reinicio."""
+    try:
+        import config as _c
+        if not int(getattr(_c, "HELIUS_LEDGER_ACTIVO", 1)):
+            return
+
+        def _trabajo():
+            from helius_ledger import volcar, podar
+            volcar()
+            from db import get_conn
+            conn = get_conn()
+            try:
+                podar(conn)
+            finally:
+                conn.close()
+        await asyncio.to_thread(_trabajo)
+    except Exception as e:
+        print(f"· ledger_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "ledger", e)
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:ledger_job", _ex)
+
+
 async def calidad_job(ctx: ContextTypes.DEFAULT_TYPE):
     """(Embudo v2, fase 6) Cada 2 h: nota de calidad de cada billetera a
     partir de sus posiciones medidas — ¿aguanta y gana, o solo voltea?
@@ -2925,6 +2956,7 @@ async def _post_init(app: Application):
             BotCommand("tokens", "Tokens: máximo histórico y si siguen vivos"),
             BotCommand("posiciones", "Quién ganó de verdad en cada token"),
             BotCommand("calidad", "Quién aguanta y gana (nota de calidad)"),
+            BotCommand("creditos", "En qué se van los créditos de Helius"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
@@ -3173,6 +3205,16 @@ async def cmd_calidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
     txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_creditos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 7) En qué se van los créditos de Helius: por
+    sobre, por día y por endpoint."""
+    await update.message.chat.send_action("typing")
+    from helius_ledger import resumen_text
+    txt = await asyncio.to_thread(resumen_text, None)
     await _send_md(update.message.chat, txt)
 
 
@@ -3926,6 +3968,7 @@ def main():
     app.add_handler(CommandHandler("tokens", cmd_tokens))
     app.add_handler(CommandHandler("posiciones", cmd_posiciones))
     app.add_handler(CommandHandler("calidad", cmd_calidad))
+    app.add_handler(CommandHandler("creditos", cmd_creditos))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
@@ -4129,6 +4172,12 @@ def main():
         interval=min(7200, _SONDEO_MAX),
         first=min(_reloj_first("calidad", 7200, 1200), _SONDEO_MAX),
         name="calidad")
+    # (Embudo v2, fase 7) Volcado del libro de cuentas: cada 10 min.
+    app.job_queue.run_repeating(
+        _con_reloj("ledger", ledger_job, 600),
+        interval=min(600, _SONDEO_MAX),
+        first=min(_reloj_first("ledger", 600, 120), _SONDEO_MAX),
+        name="ledger")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job, 7 * 86400),

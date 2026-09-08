@@ -751,15 +751,21 @@ def _recarga_reciente(wallet: str, ts: int) -> float:
         print(f"· Recarga reciente: no pude leer el presupuesto ({e})")
     try:
         url = config.HELIUS_PARSED_TX.format(address=wallet)
-        r = requests.get(url, params={"api-key": config.HELIUS_API_KEY,
-                                      "limit": 50}, timeout=20)
-        r.raise_for_status()
-        try:
-            from api_usage import record as _api_rec
-            _api_rec("helius")
-            _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
-        except Exception as e:
-            print(f"· Recarga reciente: no pude apuntar los créditos ({e})")
+        # (19-BF) Este gasto va al sobre "profundo": es la comprobacion
+        # cara que solo se hace cuando una compra ya paso todos los
+        # filtros. El `with` cierra el contexto pase lo que pase.
+        from helius_ledger import contexto as _ctx_helius
+        with _ctx_helius("profundo", "wallet", wallet):
+            r = requests.get(url, params={"api-key": config.HELIUS_API_KEY,
+                                          "limit": 50}, timeout=20)
+            r.raise_for_status()
+            try:
+                from api_usage import record as _api_rec
+                _api_rec("helius")
+                _api_rec("helius_credits", config.HELIUS_CREDITS_PER_CALL)
+            except Exception as e:
+                print(f"· Recarga reciente: no pude apuntar los "
+                      f"créditos ({e})")
         total = 0.0
         for tx in r.json() or []:
             tts = tx.get("timestamp", 0)

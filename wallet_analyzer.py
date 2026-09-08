@@ -426,7 +426,12 @@ def analyze_token(conn, token) -> int:
         return 0
     _SIN_PRECIO_INTENTOS.pop(mint, None)
 
-    txs, historial_completo = fetch_earliest_txs(mint, con_estado=True)
+    # (19-BF) Todo lo que Helius cobre por descargar el historial de
+    # ESTE token queda apuntado en el sobre de descubrimiento, con el
+    # mint como entidad. El contexto es por hilo y se deshace solo.
+    from helius_ledger import contexto as _ctx_helius
+    with _ctx_helius("descubrimiento", "token", mint):
+        txs, historial_completo = fetch_earliest_txs(mint, con_estado=True)
     # (Ola 18-D) Un fallo de descarga NO es lo mismo que un historial
     # corto. Antes esto solo se miraba cuando no llegaba ni una
     # transaccion; si la primera pagina venia bien y la segunda se caia,

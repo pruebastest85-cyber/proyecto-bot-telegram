@@ -407,6 +407,16 @@ Q_PESO_PROFIT = _float("Q_PESO_PROFIT", 25.0)
 Q_PESO_SUPERVIVENCIA = _float("Q_PESO_SUPERVIVENCIA", 10.0)
 Q_PESO_RIESGO = _float("Q_PESO_RIESGO", 10.0)
 
+# ── Libro de cuentas de Helius (fase 7) ───────────────────────────────
+# Apunta EN QUE se gasta cada credito (por dia, endpoint y sobre), que
+# hoy no se sabe: todo cae en un contador diario suelto. Se apaga con
+# HELIUS_LEDGER_ACTIVO=0. No cambia nada de lo que el bot gasta: solo
+# deja constancia. El freno del 85 % sigue siendo el de siempre.
+HELIUS_LEDGER_ACTIVO = _int("HELIUS_LEDGER_ACTIVO", 1)
+# Filas conservadas. Son agregados por dia/endpoint/sobre (~20 al dia),
+# asi que 20.000 son casi tres años de historial.
+HELIUS_LEDGER_MAX = _int("HELIUS_LEDGER_MAX", 20_000)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]

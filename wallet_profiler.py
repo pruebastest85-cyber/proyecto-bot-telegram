@@ -61,6 +61,16 @@ def _fetch_txs(address: str, pages: int | None = None) -> tuple[list, bool]:
     se guarde— sobre media historia."""
     if pages is None:
         pages = getattr(config, "PROFILE_MAX_PAGES", 10)
+    # (19-BF) El perfilado es el mayor consumidor del sistema: todo lo
+    # que cueste queda apuntado en el sobre de billeteras, con la
+    # direccion como entidad.
+    from helius_ledger import contexto as _ctx_helius
+    with _ctx_helius("billeteras", "wallet", address):
+        return _fetch_txs_int(address, pages)
+
+
+def _fetch_txs_int(address: str, pages: int) -> tuple[list, bool]:
+    """El cuerpo de `_fetch_txs`, ya dentro del contexto de gasto."""
     # Ruta preferente: RPC (10x más barato y hasta 1.000 txs por llamada),
     # así el perfil ve MUCHO más historial por el mismo presupuesto.
     if getattr(config, "USE_RPC_HISTORY", True):

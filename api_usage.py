@@ -59,6 +59,19 @@ def _key(api: str) -> str:
 
 def record(api: str, n: int = 1) -> None:
     """Cuenta n llamadas a la API. Barato: acumula en memoria."""
+    # (19-BF) El libro de cuentas se engancha AQUI y en ningun otro
+    # sitio. Podria haberse llamado desde los nueve puntos que apuntan
+    # creditos de Helius, pero entonces cualquier ruta nueva que se
+    # olvidara de llamarlo gastaria sin dejar rastro — y el libro dejaria
+    # de cuadrar con el contador del freno sin que nadie lo notara.
+    # Enganchado aqui, todo lo que cuenta el freno cuenta tambien en el
+    # libro, por construccion. Nunca puede tumbar a quien gasta.
+    if api == "helius_credits":
+        try:
+            from helius_ledger import apuntar as _apuntar
+            _apuntar(n)
+        except Exception as _ex:
+            _avisar_ex("api_usage:record:ledger", _ex)
     try:
         with _LOCK:
             _BUF[api] = _BUF.get(api, 0) + n
