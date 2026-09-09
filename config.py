@@ -451,6 +451,21 @@ DESCUBRIMIENTO_PERFILES_POR_PASADA = _int(
 DESCUBRIMIENTO_CREDITOS_POR_PASADA = _int(
     "DESCUBRIMIENTO_CREDITOS_POR_PASADA", 30_000)
 
+# ── Las tres puertas (fase 9) ─────────────────────────────────────────
+# Ponen a cada billetera en una etapa (`wallet_stage`) y dejan escrito
+# por que. NO deciden a quien se copia: eso depende de EMBUDO_V2_ACTIVO,
+# que sigue en 0. Cero creditos.
+PUERTAS_ACTIVO = _int("PUERTAS_ACTIVO", 1)
+PUERTAS_POR_PASADA = _int("PUERTAS_POR_PASADA", 300)
+# Puerta 1: por debajo de esto, cuando la alerta llegue la billetera ya
+# se habra ido. No es el criterio de "aguantar" (ese es HOLD_MIN_HOURS y
+# vive en la puerta 3): es el minimo para que copiarla sea POSIBLE.
+PUERTA_MIN_HOLD_COPIABLE_H = _float("PUERTA_MIN_HOLD_COPIABLE_H", 1.0)
+# Puerta 2: multiplo tipico por encima de 1 (o sea, que gane) y mas
+# aciertos que fallos.
+PUERTA_MIN_MULTIPLO = _float("PUERTA_MIN_MULTIPLO", 1.0)
+PUERTA_MIN_CONSISTENCIA = _float("PUERTA_MIN_CONSISTENCIA", 50.0)
+
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(
     "COPY_DELAY_TESTS", [5, 15, 30, 60, 300])]

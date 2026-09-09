@@ -1288,6 +1288,28 @@ async def ledger_job(ctx: ContextTypes.DEFAULT_TYPE):
             _avisar_ex("telegram_bot:ledger_job", _ex)
 
 
+async def puertas_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 9) Cada 2 h: pasa a cada billetera por las tres
+    puertas y le pone su etapa.
+
+    CERO créditos. Y **no cambia a quién se copia**: solo escribe
+    `wallet_stage`. Que la etapa mande depende de EMBUDO_V2_ACTIVO, que
+    sigue en 0. Se apaga con PUERTAS_ACTIVO=0."""
+    try:
+        import config as _c
+        if not int(getattr(_c, "PUERTAS_ACTIVO", 1)):
+            return
+        from puertas import revisar
+        await asyncio.to_thread(revisar)
+    except Exception as e:
+        print(f"· puertas_job falló: {e}")
+        try:
+            from errores import record
+            await asyncio.to_thread(record, "puertas", e)
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:puertas_job", _ex)
+
+
 async def descubrimiento_job(ctx: ContextTypes.DEFAULT_TYPE):
     """(Embudo v2, fase 8) Cada 2 h: sale a buscar billeteras NUEVAS que
     multiplican metiendo poco capital, en tokens que llegaron alto.
@@ -2981,6 +3003,8 @@ async def _post_init(app: Application):
             BotCommand("calidad", "Quién aguanta y gana (nota de calidad)"),
             BotCommand("creditos", "En qué se van los créditos de Helius"),
             BotCommand("cazar", "Billeteras nuevas que multiplican con poco"),
+            BotCommand("ranking", "Las que pasan las tres puertas"),
+            BotCommand("porque", "Por qué una billetera está donde está"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
             BotCommand("exportar", "Descargar todo en JSON (para IA local)"),
@@ -3228,6 +3252,48 @@ async def cmd_calidad(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return "\n".join(L)
             from wallet_quality import resumen_text
             return resumen_text(conn, 10)
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_porque(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 9) Por qué una billetera está donde está: las
+    tres puertas, una por una."""
+    if not ctx.args:
+        await update.message.reply_text(
+            "Uso: /porque <billetera>\n\nTe digo en qué puerta se cae.")
+        return
+    await update.message.chat.send_action("typing")
+    arg = ctx.args[0].strip()
+
+    def _trabajo():
+        from db import get_conn
+        from puertas import porque_text
+        conn = get_conn()
+        try:
+            return porque_text(conn, arg)
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_ranking(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 9) Las que pasan las tres puertas."""
+    await update.message.chat.send_action("typing")
+
+    def _trabajo():
+        from db import get_conn
+        from puertas import ranking_text
+        conn = get_conn()
+        try:
+            return ranking_text(conn, 15)
         finally:
             conn.close()
 
@@ -4010,6 +4076,8 @@ def main():
     app.add_handler(CommandHandler("calidad", cmd_calidad))
     app.add_handler(CommandHandler("creditos", cmd_creditos))
     app.add_handler(CommandHandler("cazar", cmd_cazar))
+    app.add_handler(CommandHandler("porque", cmd_porque))
+    app.add_handler(CommandHandler("ranking", cmd_ranking))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))
@@ -4226,6 +4294,13 @@ def main():
         interval=min(7200, _SONDEO_MAX),
         first=min(_reloj_first("descubrimiento", 7200, 1800), _SONDEO_MAX),
         name="descubrimiento")
+    # (Embudo v2, fase 9) Las tres puertas: cada 2 h, después de que la
+    # nota esté puesta (de ella se alimentan).
+    app.job_queue.run_repeating(
+        _con_reloj("puertas", puertas_job, 7200),
+        interval=min(7200, _SONDEO_MAX),
+        first=min(_reloj_first("puertas", 7200, 2400), _SONDEO_MAX),
+        name="puertas")
     # Post-mortem (Ola 11): la IA revisa sus decisiones cada 7 días
     app.job_queue.run_repeating(
         _con_reloj("post_mortem", post_mortem_job, 7 * 86400),
