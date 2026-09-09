@@ -27,6 +27,20 @@ os.environ.pop("DATABASE_URL", None)
 # en modo oculto, y eso solo se puede comprobar si el entorno de quien
 # ejecuta las pruebas no lo ha cambiado.
 os.environ.pop("RADAR_SILENCIOSO", None)
+# (Fase 10, 09/09) El embudo v2 viene ENCENDIDO de fabrica: solo alertan
+# y se copian las que pasaron las tres puertas. Casi toda esta suite se
+# escribio antes y monta billeteras sin `wallet_stage`, asi que con el
+# embudo al mando el conjunto operativo sale vacio y ~25 pruebas fallan
+# — no por un fallo del bot, sino porque miden el OTRO modo.
+#
+# Ese otro modo NO es historia: es lo que hace `/embudo off`, el
+# interruptor de emergencia del dueño. Esas pruebas son su suite de
+# regresion y tienen que seguir corriendo tal cual.
+#
+# Asi que la suite fija el modo POR DEFECTO en apagado y las pruebas de
+# la fase 10 lo encienden a proposito. Una prueba no debe depender de un
+# defecto que puede cambiar: lo dice.
+os.environ["EMBUDO_V2_ACTIVO"] = "0"
 os.environ.setdefault("HELIUS_API_KEY", "clave-de-prueba")
 os.environ.setdefault("TELEGRAM_TOKEN", "0:token-de-prueba")
 os.environ.setdefault("TELEGRAM_CHAT_ID", "1")
@@ -2521,8 +2535,14 @@ def prueba_top50():
                           (wallet_ident.posicion, "wallet_ident.posicion")):
             fuente = inspect.getsource(fn)
             comprobar(f"{dueno}: usa db.orden_top() (no una copia del ORDER BY)",
-                      "orden_top()" in fuente
+                      "orden_top(" in fuente
                       and "wallet_score DESC" not in fuente)
+            # (Fase 10) Y sus parametros salen de params_top: la cadena
+            # cambia de forma con el embudo, asi que pasarlos a mano seria
+            # un descuadre esperando a pasar.
+            comprobar(f"{dueno}: los parametros del ORDER BY salen de "
+                      f"db.params_top(), no escritos a mano",
+                      "params_top(" in fuente)
 
         # El contrato, en el unico sitio donde se decide.
         comprobar("en_top(None, x) deja pasar (sin filtro)",
@@ -12583,8 +12603,10 @@ def prueba_19ah():
                        (_db._operativas, "db._operativas"),
                        (wi.posicion, "wallet_ident.posicion")):
         comprobar(f"{nombre} pide el ORDER BY a db.orden_top() (un solo sitio)",
-                  "orden_top()" in _insp.getsource(fn)
+                  "orden_top(" in _insp.getsource(fn)
                   and "wallet_score DESC" not in _insp.getsource(fn))
+        comprobar(f"{nombre} pide los parametros a db.params_top()",
+                  "params_top(" in _insp.getsource(fn))
 
     # ── 5) /top enseña lo medido; el job lo recalcula ─────────────────
     import wallet_admin as wa
@@ -13505,10 +13527,19 @@ def prueba_19an():
     import db as _db
     au.fallos.clear()
     n5 = au.clase5_consultas_reales()
-    comprobar("M12: clase 5 ejecuta las 3 consultas del top sin hallazgos",
-              n5 == 3 and au.fallos == [], (n5, au.fallos))
+    # (Fase 10) Seis y no tres: las mismas tres consultas con el embudo
+    # apagado y encendido. La cadena tiene dos formas y probar una sola
+    # dejaria la otra sin cubrir.
+    comprobar("M12: clase 5 ejecuta las 3 consultas del top en LOS DOS "
+              "modos del embudo, sin hallazgos",
+              n5 == 6 and au.fallos == [], (n5, au.fallos))
     _ot0 = _db.orden_top
-    _db.orden_top = lambda: "w.is_tracked DESC, w.wallet_scoree DESC"
+    # Se rompe una columna DENTRO de la cadena real, conservando sus `?`:
+    # devolver una cadena sin placeholders fallaria por el numero de
+    # parametros y no por la columna, que es lo que se quiere probar.
+    _db.orden_top = (lambda *a, **k:
+                     _ot0(*a, **k).replace("w.wallet_score DESC",
+                                           "w.wallet_scoree DESC"))
     try:
         au.fallos.clear()
         with contextlib.redirect_stdout(io.StringIO()):
@@ -16933,6 +16964,249 @@ def prueba_19bk():
     conn.close()
 
 
+
+def prueba_19bl():
+    bloque("19-BL (fase 10) - EL EMBUDO MANDA: solo alertan y se copian "
+           "las que pasan las tres puertas; las copiables suben a ⭐ y "
+           "nadie se degrada")
+    import contextlib
+    import io
+    import os as _os
+    import time as _t
+    import db as _db
+    import puertas as PU
+    import wallet_ident as _wi
+    import config as _cfg
+    from db import get_conn, set_setting
+
+    ahora = int(_t.time())
+    conn = get_conn()
+    for t in ("wallets", "positions", "analysis_events"):
+        conn.execute(f"DELETE FROM {t}")
+    # COPIA:   copiable, ⭐, operó hace 10 días  → DEBE alertar
+    # LENTA:   copiable, ⭐, operó hace 40 días  → fuera hasta de los 30 d
+    # NUEVA:   copiable, NO ⭐, operó hace 3 días → hasta que se ascienda
+    # VIEJATOP: ⭐ confirmada y ACTIVA, pero solo `observacion`
+    for addr, tracked, etapa, dias in (
+            ("COPIA", 1, "copiable", 10),
+            ("LENTA", 1, "copiable", 40),
+            ("NUEVA", 0, "copiable", 3),
+            ("VIEJATOP", 1, "observacion", 0)):
+        # NUEVA llega por la cacería: NUNCA fue `confirmada` por el
+        # filtro viejo, porque nadie la había mirado. Si el embudo
+        # exigiera las dos cosas, las descubiertas no entrarían jamás.
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, confirmada, is_bot, "
+            "wallet_score, wallet_stage) VALUES (?,?,?,0,80,?)",
+            (addr, tracked, 0 if addr == "NUEVA" else 1, etapa))
+        conn.execute("INSERT INTO positions (wallet, mint, tokens, last_ts) "
+                     "VALUES (?,?,?,?)",
+                     (addr, "M" + addr, 1.0, ahora - dias * 86400))
+    conn.commit()
+
+    def _emb(v):
+        set_setting(conn, "embudo_v2_activo", v)
+        _db.invalidar_copiables()
+
+    # ── 1) APAGADO: exactamente lo de siempre ────────────────────────
+    _emb(0)
+    comprobar("apagado, manda() dice que no", PU.manda(conn) is False)
+    oper_off = _db._operativas(conn, 10)
+    comprobar("apagado, alerta la ⭐ confirmada y activa aunque NO pase las "
+              "puertas (comportamiento de siempre)", "VIEJATOP" in oper_off,
+              oper_off)
+    comprobar("apagado, la copiable de 10 días NO alerta: para el corte de "
+              "48 h está dormida", "COPIA" not in oper_off, oper_off)
+    _orden_off = _db.orden_top(False)
+    comprobar("apagado, el ORDER BY no menciona la etapa",
+              "wallet_stage" not in _orden_off)
+    comprobar("apagado, la cadena lleva DOS `?` y params_top da DOS valores",
+              _orden_off.count("?") == 2 and len(_db.params_top(False)) == 2,
+              (_orden_off.count("?"), _db.params_top(False)))
+
+    # ── 2) ENCENDIDO: manda la etapa ─────────────────────────────────
+    _emb(1)
+    comprobar("encendido, manda() dice que sí", PU.manda(conn) is True)
+    oper = _db._operativas(conn, 10)
+    comprobar("encendido, la ⭐ que NO pasa las puertas deja de alertar, "
+              "aunque esté activa y confirmada", "VIEJATOP" not in oper, oper)
+    comprobar("encendido, la copiable de 10 días SÍ alerta: su ventana es "
+              "de 30 días, no de 48 h", "COPIA" in oper, oper)
+    comprobar("pero la de 40 días no: 30 días es un corte, no una barra "
+              "libre", "LENTA" not in oper, oper)
+    comprobar("y la copiable que aún no es ⭐ tampoco: el bot solo tiene "
+              "datos en tiempo real de las que vigila", "NUEVA" not in oper,
+              oper)
+    _orden_on = _db.orden_top(True)
+    comprobar("la cadena y sus parámetros salen de UNA sola decisión: no "
+              "pueden descuadrarse (un descuadre revienta la consulta y "
+              "`top_addresses` lo lee como 'sin filtro' — o sea, abriría "
+              "la puerta a todas)",
+              all(_db.orden_top(e).count("?") == len(_db.params_top(e))
+                  for e in (False, True)),
+              [(e, _db.orden_top(e).count("?"), len(_db.params_top(e)))
+               for e in (False, True)])
+    comprobar("encendido, la cadena lleva TRES `?` y params_top da TRES "
+              "valores — si se descuadran, la consulta revienta en el "
+              "camino que decide quién alerta",
+              _orden_on.count("?") == 3 and len(_db.params_top(True)) == 3,
+              (_orden_on.count("?"), _db.params_top(True)))
+    comprobar("y la consulta REAL se ejecuta en los dos modos sin reventar",
+              len(_db.top_wallets(conn, 5)) >= 1
+              and _wi.posicion(conn, "COPIA", 10) is not None)
+    # La banda de 30 días tiene que estar en el ORDEN, no solo en el
+    # filtro: si la copiable se hunde como "dormida", se cae del tope y
+    # el conjunto operativo se queda vacío aunque el filtro fuera bien.
+    # Con tope 1 se ve; con tope 10 no se veía, y por eso una mutación
+    # que cambiaba los cortes de sitio se escapó.
+    orden_on = [r["address"] for r in _db.top_wallets(conn, 10)]
+    comprobar("encendido, la copiable de 10 días NO se hunde como dormida: "
+              "va por delante de la ⭐ que no pasa las puertas",
+              orden_on.index("COPIA") < orden_on.index("VIEJATOP"),
+              orden_on)
+    comprobar("y por eso sobrevive a un tope de 1: si se hundiera, el "
+              "conjunto operativo se quedaría VACÍO",
+              _db._operativas(conn, 1) == {"COPIA"},
+              (_db._operativas(conn, 1), orden_on))
+
+    # ── 3) Ascender: sube, nunca baja ────────────────────────────────
+    comprobar("ascender sube a ⭐ a una copiable que no lo era",
+              PU.ascender(conn, "NUEVA", {"wallet_stage": "copiable"}) is True)
+    conn.commit()
+    comprobar("y ahora sí entra en el conjunto operativo AUNQUE no sea "
+              "`confirmada`: las tres puertas sustituyen a aquel filtro, "
+              "no se suman a él",
+              "NUEVA" in _db._operativas(conn, 10)
+              and conn.execute("SELECT confirmada c FROM wallets WHERE "
+                               "address='NUEVA'").fetchone()["c"] == 0,
+              _db._operativas(conn, 10))
+    # OJO: probarlo con VIEJATOP no valdria — ya es ⭐, asi que el UPDATE
+    # no tocaria ninguna fila y devolveria False igual aunque el filtro de
+    # etapa hubiera desaparecido. Hace falta una que NO sea ⭐.
+    conn.execute("INSERT INTO wallets (address, is_tracked, confirmada, "
+                 "is_bot, wallet_score, wallet_stage) "
+                 "VALUES ('MALILLA',0,1,0,80,'candidata')")
+    conn.commit()
+    comprobar("ascender NO sube a quien no pasa las puertas",
+              PU.ascender(conn, "MALILLA",
+                          {"wallet_stage": "candidata"}) is False)
+    conn.commit()
+    comprobar("y de verdad sigue sin ser ⭐ en la base",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='MALILLA'").fetchone()["t"] == 0)
+    comprobar("ascender NO toca a quien no pasa las puertas",
+              PU.ascender(conn, "VIEJATOP",
+                          {"wallet_stage": "observacion"}) is False)
+    comprobar("ni repite el ascenso de una que ya era ⭐",
+              PU.ascender(conn, "COPIA", {"wallet_stage": "copiable"})
+              is False)
+    comprobar("y la ⭐ que no pasa CONSERVA su is_tracked y su historial: "
+              "no alerta, pero no se le borra nada",
+              conn.execute("SELECT is_tracked t FROM wallets WHERE "
+                           "address='VIEJATOP'").fetchone()["t"] == 1)
+
+    # ── 4) El interruptor es de verdad reversible ────────────────────
+    _emb(0)
+    oper_vuelta = _db._operativas(conn, 10)
+    comprobar("apagarlo devuelve a VIEJATOP al conjunto operativo: el "
+              "cambio se deshace entero", "VIEJATOP" in oper_vuelta,
+              oper_vuelta)
+    comprobar("el ajuste de la base MANDA sobre config (si no, apagarlo "
+              "exigiría un despliegue)",
+              _db.embudo_manda(conn) is False and _cfg.EMBUDO_V2_ACTIVO == 0)
+    _cfg_prev = _cfg.EMBUDO_V2_ACTIVO
+    try:
+        _cfg.EMBUDO_V2_ACTIVO = 1
+        comprobar("con el ajuste en 0 y config en 1, gana el ajuste",
+                  _db.embudo_manda(conn) is False)
+        conn.execute("DELETE FROM settings WHERE key='embudo_v2_activo'")
+        conn.commit()
+        comprobar("sin ajuste, decide config", _db.embudo_manda(conn) is True)
+        comprobar("y sin conexión también (no se queda a medias)",
+                  _db.embudo_manda() is True)
+    finally:
+        _cfg.EMBUDO_V2_ACTIVO = _cfg_prev
+        set_setting(conn, "embudo_v2_activo", 0)
+        _db.invalidar_copiables()
+
+    # ── 5) Un fallo CIERRA, no abre ──────────────────────────────────
+    _leer = _db.get_setting
+    try:
+        def _revienta(*a, **k):
+            raise RuntimeError("base caída")
+        _db.get_setting = _revienta
+        comprobar("si no se puede leer el ajuste, se cae a config y NO a "
+                  "'sin filtro': un fallo cierra la puerta, nunca la abre",
+                  _db.embudo_manda(conn) is False)
+    finally:
+        _db.get_setting = _leer
+
+    # ── 6) De fábrica viene encendido (el dueño lo pidió) ────────────
+    # Rutas absolutas: una prueba anterior puede haber dejado el
+    # directorio de trabajo en otro sitio, y entonces esto reventaba en
+    # vez de fallar limpiamente.
+    _raiz = _os.path.dirname(_os.path.abspath(__file__))
+    _cfgtxt = open(_os.path.join(_raiz, "config.py"), encoding="utf-8").read()
+    comprobar("de fábrica el embudo viene ENCENDIDO en config.py — esta "
+              "suite lo apaga a propósito para medir el otro modo",
+              '_int("EMBUDO_V2_ACTIVO", 1)' in _cfgtxt)
+    comprobar("y hay un comando para apagarlo sin desplegar",
+              'CommandHandler("embudo", cmd_embudo)' in
+              open(_os.path.join(_raiz, "telegram_bot.py"),
+                   encoding="utf-8").read())
+
+    # ── 6b) La pasada completa: asciende SOLO con el embudo al mando ──
+    # (Sin esto se escapaba una mutación que ascendía siempre: probar
+    # `ascender` suelta no basta, hay que probar la pasada.)
+    conn.execute("DELETE FROM wallets WHERE address='ASCENSO'")
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, confirmada, is_bot, "
+        "wallet_score, q_score, q_consistency, hold_median_h, "
+        "mult_realizado) VALUES ('ASCENSO',0,0,0,80,77,80,50.0,2.5)")
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO wallet_positions (wallet, mint, position_status, "
+            "history_complete, sol_in) VALUES ('ASCENSO',?, 'cerrada',1,2.0)",
+            (f"Masc{i}",))
+    conn.commit()
+    _emb(0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        PU.revisar(50)
+    comprobar("con el embudo APAGADO la pasada la etiqueta copiable pero "
+              "NO la asciende: apagado no cambia nada de sitio",
+              conn.execute("SELECT wallet_stage e, COALESCE(is_tracked,0) t "
+                           "FROM wallets WHERE address='ASCENSO'"
+                           ).fetchone()["e"] == "copiable"
+              and conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                               "WHERE address='ASCENSO'").fetchone()["t"] == 0)
+    _emb(1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        PU.revisar(50)
+    comprobar("y ENCENDIDO la misma pasada sí la sube a ⭐",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='ASCENSO'").fetchone()["t"] == 1)
+    comprobar("dejando escrito el ascenso, para poder discutirlo",
+              conn.execute("SELECT COUNT(*) c FROM analysis_events WHERE "
+                           "entity_id='ASCENSO' AND decision='ascendida'"
+                           ).fetchone()["c"] >= 1)
+
+    # ── 7) Los textos no mienten en ninguno de los dos modos ─────────
+    _emb(1)
+    comprobar("encendido, /ranking dice que MANDA",
+              "MANDA" in PU.ranking_text(conn, 5))
+    _emb(0)
+    comprobar("apagado, /ranking dice que todavía no cambia nada",
+              "todavía no cambia" in PU.ranking_text(conn, 5))
+
+    for t in ("wallets", "positions", "analysis_events",
+              "wallet_positions"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.execute("DELETE FROM settings WHERE key='embudo_v2_activo'")
+    conn.commit()
+    conn.close()
+    _db.invalidar_copiables()
+
+
 def prueba_19bj():
     bloque("19-BJ (fase 9) - las tres puertas: se pasan EN ORDEN y basta "
            "fallar una; y NO deciden todavia a quien se copia")
@@ -17083,13 +17357,20 @@ def prueba_19bj():
               "todavía no deciden" in PU.porque_text(conn, "Wpu_buena")
               and "no cambia a quién se copia" in PU.ranking_text(conn, 5))
     _pu = open("puertas.py", encoding="utf-8").read()
-    comprobar("el modulo NO toca is_tracked, score ni el paper trading",
-              "is_tracked =" not in _pu and "SET score" not in _pu
+    # (Fase 10) Ya NO se pide que el modulo no toque `is_tracked`: ahora
+    # asciende a las copiables, que fue una decision del dueño. Lo que se
+    # sigue exigiendo —y es lo que de verdad protegia esta prueba— es que
+    # no toque el dinero ni degrade a nadie.
+    comprobar("el modulo NO toca el paper trading ni el score",
+              "SET score" not in _pu
               and "import paper_trading" not in _pu
               and "from paper_trading" not in _pu)
-    comprobar("solo escribe wallet_stage",
-              _pu.count("UPDATE wallets SET") == 1
-              and "SET wallet_stage" in _pu)
+    comprobar("y NO degrada: nunca escribe is_tracked = 0",
+              "is_tracked = 0" not in _pu and "is_tracked=0" not in _pu)
+    comprobar("solo escribe wallet_stage e is_tracked = 1, nada mas",
+              _pu.count("UPDATE wallets SET") == 2
+              and "SET wallet_stage" in _pu
+              and "SET is_tracked = 1" in _pu)
     _e = _cfg.EMBUDO_V2_ACTIVO
     try:
         _cfg.EMBUDO_V2_ACTIVO = 1
@@ -17205,6 +17486,7 @@ def main():
     prueba_19bi()
     prueba_19bj()
     prueba_19bk()
+    prueba_19bl()
 
     print("\n" + "─" * 60)
     if _FALLOS:
