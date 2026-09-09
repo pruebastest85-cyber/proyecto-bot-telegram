@@ -516,8 +516,43 @@ def clasificar(conn) -> dict:
             if getattr(cur, "rowcount", 1) != 0:
                 n_prueba += 1
             continue
+        # (19-BM, 09/09) EL RETIRO POR INACTIVIDAD NO SE APLICA A LAS QUE
+        # PASARON LAS TRES PUERTAS, con el embudo v2 al mando.
+        #
+        # Aqui chocan dos reglas del sistema. Esta retira a la ⭐ que
+        # lleva `prueba_dias` (14) sin operar, y tiene todo el sentido en
+        # el embudo viejo: alli una ⭐ callada era una ⭐ abandonada.
+        #
+        # Las `copiable` del embudo NUEVO estan seleccionadas justo por lo
+        # contrario: la puerta 3 pide aguantar mas de un dia con poco
+        # capital, y quien aguanta 50, 90 o 280 horas por posicion opera
+        # cada dos o tres semanas. MEDIDO el 09/09: de las 47 copiables,
+        # CERO habian operado en 48 h y CERO en 7 dias, pero 39 de 47 si
+        # en el ultimo mes. Con 14 dias de plazo, este retiro se llevaria
+        # por delante a media lista antes de su siguiente operacion —
+        # exactamente a la gente que el embudo acaba de encontrar.
+        #
+        # Su inactividad es el rasgo, no el abandono. Lo que si les
+        # aplica es su ventana propia de 30 dias en el conjunto operativo
+        # (`db.corte_copiable`): si de verdad se retiran, dejan de alertar
+        # por ahi, sin perder la ⭐ ni el historial.
+        #
+        # Con el embudo apagado esta verja no existe y el retiro se
+        # comporta como siempre.
+        _es_copiable_protegida = False
+        try:
+            from db import embudo_manda as _emb_manda
+            if _emb_manda(conn):
+                _f = conn.execute(
+                    "SELECT wallet_stage e FROM wallets WHERE address = ?",
+                    (w,)).fetchone()
+                _es_copiable_protegida = bool(_f and _f["e"] == "copiable")
+        except Exception as _ex:
+            print(f"· retiro: no pude mirar la etapa de {w[:8]}… ({_ex})")
         # Retiro por inactividad: lleva toda la prueba sin operar.
-        if desde < corte_prueba \
+        if _es_copiable_protegida:
+            n_prueba += 1
+        elif desde < corte_prueba \
                 and (ult_senal.get(w) or 0) < corte_prueba:
             # `AND prueba_desde = ?` es un candado sobre el reloj que se
             # acaba de leer: si entre el SELECT y este UPDATE el dueño

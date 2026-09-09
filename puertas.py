@@ -247,6 +247,24 @@ def ascender(conn, wallet: str, veredicto: dict) -> bool:
     (`db._operativas`), que es reversible con apagar el embudo. Quitar
     `is_tracked` seria destructivo y no hace falta para lo que el dueño
     pidio.
+
+    POR QUE TAMBIEN `ai_follow` (19-BM, mismo dia, fallo medido)
+    -------------------------------------------------------------
+    La primera version ponia SOLO `is_tracked = 1`. La pasada de las
+    22:11 ascendio a 18 billeteras y a los pocos minutos estaban las 18
+    otra vez sin ⭐. Causa raiz: `db.recompute_scores` barre a toda ⭐ que
+    no tenga `ai_follow` puesto y le quita la estrella.
+
+    O sea: **una ⭐ sin `ai_follow` no existe** en este sistema; es la
+    regla que impide que una candidata sin aprobar acabe alertando en
+    tiempo real. El promotor legitimo
+    (`filtro_calidad`, "promovida por el embudo") pone las dos banderas
+    juntas; aqui se ponia media, asi que cada pasada ascendia y cada
+    barrida deshacia: un vaiven que no convergia nunca.
+
+    Aqui `ai_follow = 1` significa exactamente lo que la bandera dice —
+    "aprobada para vigilarla" — y quien aprueba son las tres puertas.
+    Solo se pone con el embudo al mando; apagado, esta funcion no corre.
     """
     if not wallet or not veredicto:
         return False
@@ -254,8 +272,8 @@ def ascender(conn, wallet: str, veredicto: dict) -> bool:
         return False
     try:
         cur = conn.execute(
-            "UPDATE wallets SET is_tracked = 1 WHERE address = ? "
-            "AND COALESCE(is_tracked, 0) = 0", (wallet,))
+            "UPDATE wallets SET is_tracked = 1, ai_follow = 1 "
+            "WHERE address = ? AND COALESCE(is_tracked, 0) = 0", (wallet,))
         return bool(cur.rowcount)
     except Exception as _ex:
         _avisar_ex("puertas:ascender", _ex)
