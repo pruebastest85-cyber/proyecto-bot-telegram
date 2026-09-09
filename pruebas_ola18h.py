@@ -16812,6 +16812,191 @@ def prueba_19bi():
     conn.commit()
     conn.close()
 
+def prueba_19bj():
+    bloque("19-BJ (fase 9) - las tres puertas: se pasan EN ORDEN y basta "
+           "fallar una; y NO deciden todavia a quien se copia")
+    import config as _cfg
+    import puertas as PU
+    from db import get_conn
+
+    def _d(**kw):
+        base = {"is_bot": 0, "hold_median_h": 50.0, "mult_realizado": 2.5,
+                "q_consistency": 70.0, "posiciones": 5,
+                "capital_tipico": 2.0}
+        base.update(kw)
+        return base
+
+    # ── 1) la que pasa las tres ──────────────────────────────────────
+    v = PU.evaluar(_d())
+    comprobar("una que aguanta, gana y opera con poco pasa las tres",
+              v["wallet_stage"] == "copiable"
+              and (v["p1"], v["p2"], v["p3"]) == (True, True, True))
+
+    # ── 2) puerta 1: ¿se le puede copiar? ────────────────────────────
+    v = PU.evaluar(_d(is_bot=1))
+    comprobar("un bot se descarta en la primera puerta, por bien que "
+              "opere", v["wallet_stage"] == "descartada"
+              and "bot" in v["motivo"])
+    v = PU.evaluar(_d(hold_median_h=0.2))
+    comprobar("quien entra y sale en 12 minutos se descarta: cuando la "
+              "alerta llegue ya se fue",
+              v["wallet_stage"] == "descartada" and v["p1"] is False)
+    comprobar("y el motivo lo explica en cristiano, no con un numero "
+              "suelto", "alerta" in v["motivo"])
+
+    # ── 3) puerta 2: ¿gana de verdad? ────────────────────────────────
+    v = PU.evaluar(_d(posiciones=1))
+    comprobar("con una sola operacion no se juzga: se queda en candidata",
+              v["wallet_stage"] == "candidata" and v["p1"] is True)
+    v = PU.evaluar(_d(mult_realizado=0.9))
+    comprobar("quien no gana (x0,9 tipico) se queda en candidata",
+              v["wallet_stage"] == "candidata"
+              and "no gana" in v["motivo"])
+    v = PU.evaluar(_d(q_consistency=30.0))
+    comprobar("acertar solo 3 de cada 10 tampoco pasa",
+              v["wallet_stage"] == "candidata")
+
+    # ── 4) puerta 3: la estrategia que el dueño pidio ────────────────
+    v = PU.evaluar(_d(hold_median_h=6.0))
+    comprobar("gana, pero voltea en 6 h: se queda en OBSERVACION, no "
+              "descartada — gana, solo que no como el dueño quiere",
+              v["wallet_stage"] == "observacion"
+              and (v["p1"], v["p2"], v["p3"]) == (True, True, False))
+    v = PU.evaluar(_d(capital_tipico=120.0))
+    comprobar("la ballena que mueve 120 SOL por operacion se queda en "
+              "observacion: gana a menudo pero multiplica poco",
+              v["wallet_stage"] == "observacion"
+              and "multiplica poco" in v["motivo"])
+    v = PU.evaluar(_d(capital_tipico=0.02))
+    comprobar("y la de migajas tampoco pasa: con 0,02 SOL el multiplo no "
+              "significa nada", v["wallet_stage"] == "observacion")
+
+    # ── 5) sin datos NO es un suspenso ───────────────────────────────
+    v = PU.evaluar({})
+    comprobar("sin nada medido la etapa es 'sin_datos', que no es lo "
+              "mismo que suspender", v["wallet_stage"] == "sin_datos")
+    v = PU.evaluar(_d(hold_median_h=None))
+    comprobar("y un dato que falta se dice, no se supone",
+              v["p1"] is False and "no se sabe" in v["motivo"])
+
+    # ── 6) los umbrales se leen de la configuracion ──────────────────
+    _h, _c2 = _cfg.HOLD_MIN_HOURS, _cfg.PUERTA_MIN_CONSISTENCIA
+    try:
+        _cfg.HOLD_MIN_HOURS = 100.0
+        comprobar("si el dueño sube la vara del aguante a 100 h, el de "
+                  "50 h deja de pasar la tercera",
+                  PU.evaluar(_d())["wallet_stage"] == "observacion")
+        _cfg.HOLD_MIN_HOURS = _h
+        _cfg.PUERTA_MIN_CONSISTENCIA = 90.0
+        comprobar("y si sube la de aciertos al 90 %, el del 70 % se cae "
+                  "en la segunda",
+                  PU.evaluar(_d())["wallet_stage"] == "candidata")
+    finally:
+        _cfg.HOLD_MIN_HOURS, _cfg.PUERTA_MIN_CONSISTENCIA = _h, _c2
+
+    # ── 7) el orden importa: fallar la 1 tapa lo demas ───────────────
+    v = PU.evaluar(_d(is_bot=1, mult_realizado=0.1, posiciones=1))
+    comprobar("quien falla la primera se descarta ahi, sin fingir que se "
+              "miraron las otras", v["wallet_stage"] == "descartada")
+
+    # ── 8) contra la base ────────────────────────────────────────────
+    conn = get_conn()
+    conn.execute("DELETE FROM wallet_positions WHERE wallet LIKE 'Wpu%'")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wpu%'")
+    conn.commit()
+    H = 3600
+    for w, entra, sale, horas in (("Wpu_buena", 2.0, 6.0, 50),
+                                  ("Wpu_ballena", 120.0, 200.0, 50)):
+        for i in range(4):
+            conn.execute(
+                """INSERT INTO wallet_positions (wallet, mint, sol_in,
+                     sol_out, realized_pnl, roi_pct, holding_seconds,
+                     held_24h, position_status, history_complete,
+                     sell_count) VALUES (?,?,?,?,?,?,?,1,'cerrada',1,1)""",
+                (w, f"Mpu{i}", entra, sale, sale - entra,
+                 (sale - entra) / entra * 100.0, int(horas * H)))
+        conn.execute("""INSERT INTO wallets (address, first_seen,
+                        last_updated, q_score, q_consistency,
+                        hold_median_h, mult_realizado, estrategia)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                     (w, "2026-01-01", "2026-01-01", 70.0, 100.0,
+                      float(horas), sale / entra, "aguanta"))
+    conn.commit()
+
+    d = PU.datos(conn, "Wpu_buena")
+    comprobar("los datos salen de la base: posiciones y capital tipico",
+              d["posiciones"] == 4 and abs(d["capital_tipico"] - 2.0) < 1e-9)
+    comprobar("guardar escribe la etapa",
+              PU.guardar(conn, "Wpu_buena",
+                         PU.evaluar(d)) is True)
+    conn.commit()
+    comprobar("y queda como copiable",
+              conn.execute("SELECT wallet_stage s FROM wallets WHERE "
+                           "address='Wpu_buena'").fetchone()["s"] == "copiable")
+    d2 = PU.datos(conn, "Wpu_ballena")
+    PU.guardar(conn, "Wpu_ballena", PU.evaluar(d2))
+    conn.commit()
+    comprobar("la ballena queda en observacion aunque su nota sea igual "
+              "de alta",
+              conn.execute("SELECT wallet_stage s FROM wallets WHERE "
+                           "address='Wpu_ballena'").fetchone()["s"]
+              == "observacion")
+    comprobar("solo la buena sale entre las copiables",
+              [x["address"] for x in PU.copiables(conn, 10)] == ["Wpu_buena"])
+    comprobar("una billetera sin ficha no rompe: se crea al guardar",
+              PU.guardar(conn, "Wpu_nueva",
+                         {"wallet_stage": "sin_datos"}) is True)
+    conn.commit()
+
+    txt = PU.porque_text(conn, "Wpu_ballena")
+    comprobar("/porque enseña las TRES puertas, no solo el veredicto",
+              "Puerta 1" in txt and "Puerta 2" in txt and "Puerta 3" in txt)
+    comprobar("y marca cuales pasa y cual no",
+              "✅" in txt and "❌" in txt)
+
+    # ── 9) LO MAS IMPORTANTE: todavia no decide nada ─────────────────
+    comprobar("con EMBUDO_V2_ACTIVO en 0, las puertas NO mandan sobre a "
+              "quien se copia", _cfg.EMBUDO_V2_ACTIVO == 0
+              and PU.manda() is False)
+    comprobar("y los textos lo dicen, para que nadie se confunda",
+              "todavía no deciden" in PU.porque_text(conn, "Wpu_buena")
+              and "no cambia a quién se copia" in PU.ranking_text(conn, 5))
+    _pu = open("puertas.py", encoding="utf-8").read()
+    comprobar("el modulo NO toca is_tracked, score ni el paper trading",
+              "is_tracked =" not in _pu and "SET score" not in _pu
+              and "import paper_trading" not in _pu
+              and "from paper_trading" not in _pu)
+    comprobar("solo escribe wallet_stage",
+              _pu.count("UPDATE wallets SET") == 1
+              and "SET wallet_stage" in _pu)
+    _e = _cfg.EMBUDO_V2_ACTIVO
+    try:
+        _cfg.EMBUDO_V2_ACTIVO = 1
+        comprobar("y el dia que el dueño lo encienda, hay UN solo sitio "
+                  "que lo dice", PU.manda() is True)
+    finally:
+        _cfg.EMBUDO_V2_ACTIVO = _e
+
+    # ── 10) cableado ─────────────────────────────────────────────────
+    comprobar("hay interruptor propio y umbrales configurables",
+              hasattr(_cfg, "PUERTAS_ACTIVO")
+              and hasattr(_cfg, "PUERTA_MIN_MULTIPLO")
+              and hasattr(_cfg, "PUERTA_MIN_HOLD_COPIABLE_H"))
+    _tb = open("telegram_bot.py", encoding="utf-8").read()
+    comprobar("el job mira su interruptor de verdad",
+              'int(getattr(_c, "PUERTAS_ACTIVO", 1))' in _tb)
+    comprobar("esta dado de alta con reloj persistente",
+              '_con_reloj("puertas"' in _tb and '_reloj_first("puertas"' in _tb)
+    comprobar("y /porque y /ranking estan registrados y anunciados",
+              'CommandHandler("porque"' in _tb
+              and 'CommandHandler("ranking"' in _tb
+              and 'BotCommand("ranking"' in _tb)
+
+    conn.execute("DELETE FROM wallet_positions WHERE wallet LIKE 'Wpu%'")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wpu%'")
+    conn.commit()
+    conn.close()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -16897,6 +17082,7 @@ def main():
     prueba_19bf()
     prueba_19bg()
     prueba_19bi()
+    prueba_19bj()
 
     print("\n" + "─" * 60)
     if _FALLOS:
