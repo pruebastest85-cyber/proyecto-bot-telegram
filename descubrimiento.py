@@ -178,15 +178,60 @@ def elegir_candidatas(buys: list[dict], sells: list[dict],
     return out[:int(limite)]
 
 
-def _ya_medidas(conn) -> set:
-    """Billeteras de las que ya tenemos historial propio: no hace falta
-    volver a pagarlas."""
+def es_bot(conn, wallet: str) -> bool:
+    """¿Esta billetera ya esta marcada como bot en NUESTRA base?
+
+    Importa porque `trades_store.guardar` se niega a guardar el historial
+    de una billetera con `is_bot=1`: la descarga entera acaba en la
+    basura. Pagarla no devuelve ni un dato — el veredicto ya lo teniamos.
+    """
     try:
-        return {f["wallet"] for f in conn.execute(
+        f = conn.execute(
+            "SELECT COALESCE(is_bot, 0) b FROM wallets WHERE address = ?",
+            (wallet,)).fetchone()
+        return bool(f and f["b"])
+    except Exception as _ex:
+        _avisar_ex("descubrimiento:es_bot", _ex)
+        return False          # ante la duda, no bloquear la caceria
+
+
+def _ya_medidas(conn) -> set:
+    """Billeteras que NO hay que volver a pagar.
+
+    Dos motivos distintos, los dos salidos de lo ya medido:
+
+    1. Ya tenemos su historial propio (`trades`): pagarlo otra vez es
+       comprar lo mismo dos veces.
+    2. Ya esta marcada como bot: `trades_store.guardar` tira su historial
+       nada mas llegar (mira `is_bot` y devuelve 0 sin guardar), asi que
+       la descarga se paga entera y no deja NI UNA fila.
+
+    MEDIDO en la base del dueño el 09/09/2026: de las 125 billeteras que
+    la caceria habia perfilado, **44 estaban marcadas como bot desde
+    julio** — semanas antes de encolarlas. Ninguna dejo una sola
+    operacion. Son ~10.000 creditos comprando una respuesta que ya
+    estaba escrita en la base.
+
+    OJO, y esto es decision del dueño, no mia: la marca `is_bot` del
+    embudo VIEJO se aplico de mas (ver `wallet_profiler`: ~3.190
+    marcadas por un calculo de horas que ya esta corregido). Saltarlas
+    aqui no las esconde mas de lo que ya estan —hoy se pagan y se tiran
+    igual—, y el dia que el dueño desmarque a las falsas volveran solas
+    a la caceria sin tocar este codigo.
+    """
+    fuera = set()
+    try:
+        fuera |= {f["wallet"] for f in conn.execute(
             "SELECT DISTINCT wallet FROM trades").fetchall()}
     except Exception as _ex:
         _avisar_ex("descubrimiento:_ya_medidas", _ex)
-        return set()
+    try:
+        fuera |= {f["address"] for f in conn.execute(
+            "SELECT address FROM wallets "
+            "WHERE COALESCE(is_bot, 0) = 1").fetchall()}
+    except Exception as _ex:
+        _avisar_ex("descubrimiento:_ya_medidas:bots", _ex)
+    return fuera
 
 
 # ── la cola ───────────────────────────────────────────────────────────
@@ -334,7 +379,7 @@ def atender_cola(conn, tope_creditos: int, inicio_ts: int,
     if limite is None:
         limite = _int("DESCUBRIMIENTO_PERFILES_POR_PASADA", 25)
     from analysis_events import registrar
-    hechas = 0
+    hechas = saltadas = 0
     for fila in pendientes(conn, limite):
         if _gastado_desde(conn, inicio_ts) >= tope_creditos:
             print(f"  ⛔ Descubrimiento: tope de {tope_creditos} créditos "
@@ -344,6 +389,18 @@ def atender_cola(conn, tope_creditos: int, inicio_ts: int,
             print("  ⛔ Descubrimiento: freno global de Helius activo")
             break
         w = fila["entity_id"]
+        # Verja tardia: una candidata puede haberse marcado como bot
+        # DESPUES de entrar en la cola (o venir de una pasada anterior al
+        # arreglo). Perfilarla cuesta lo mismo y `trades_store` tira la
+        # descarga entera, asi que se cierra sin gastar.
+        if es_bot(conn, w):
+            marcar(conn, w, "hecha", int(fila.get("intentos") or 0))
+            saltadas += 1
+            registrar(conn, "wallet", w, "descubrimiento", "saltada",
+                      "ya marcada como bot: su historial se tiraría al "
+                      "guardarlo, así que no se paga",
+                      data_source="wallets.is_bot")
+            continue
         try:
             # `profile_wallet` ya declara su sobre ("billeteras") y guarda
             # las operaciones en `trades`: de ahi salen solas las
@@ -363,6 +420,9 @@ def atender_cola(conn, tope_creditos: int, inicio_ts: int,
         registrar(conn, "wallet", w, "descubrimiento", "perfilada",
                   (fila.get("reason") or "")[:200],
                   score=p.get("tx_sampled"), data_source="helius:historial")
+    if saltadas:
+        print(f"  · {saltadas} candidatas saltadas por estar ya marcadas "
+              f"como bot (0 créditos)")
     return hechas
 
 
