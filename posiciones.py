@@ -283,8 +283,21 @@ def reconstruir_mint(conn, mint: str, precios: dict | None = None) -> int:
 
 def _mints_objetivo(conn, limite: int) -> list[str]:
     """Los tokens que interesan: los que cruzaron MIN_WINNER_MC y de los
-    que ademas tenemos operaciones guardadas. Se empieza por los que mas
-    operaciones tienen (mas material para medir)."""
+    que tenemos operaciones TODAVIA SIN CONVERTIR en posicion.
+
+    (19-BI) Antes se pedian los tokens SIN NINGUNA posicion, y eso
+    convertia la reconstruccion en algo de una sola vez: en cuanto un
+    token tenia una posicion, las operaciones que llegaran despues —las
+    de cada billetera nueva que el perfilador o la caceria trajeran— no
+    se convertian JAMAS. Medido en la base del dueño el 09/09: 362 de los
+    369 tokens con hito tenian trabajo pendiente, y de las 75 billeteras
+    cazadas solo 154 de sus 324 pares (billetera, token) tenian posicion.
+    Por eso solo UNA de las 75 llego a tener nota.
+
+    Ahora la condicion mira el PAR (billetera, token): entra el token que
+    tiene al menos una billetera sin reconstruir. Como `reconstruir_mint`
+    rehace el token entero, de paso se refrescan las que ya estaban.
+    """
     nivel = float(getattr(config, "MIN_WINNER_MC", 500_000))
     try:
         filas = conn.execute(
@@ -292,7 +305,8 @@ def _mints_objetivo(conn, limite: int) -> list[str]:
                WHERE EXISTS (SELECT 1 FROM token_milestones m
                              WHERE m.mint = t.mint AND m.milestone_usd = ?)
                  AND NOT EXISTS (SELECT 1 FROM wallet_positions p
-                                 WHERE p.mint = t.mint)
+                                 WHERE p.mint = t.mint
+                                   AND p.wallet = t.wallet)
                GROUP BY t.mint ORDER BY n DESC LIMIT ?""",
             (nivel, int(limite))).fetchall()
         return [f["mint"] for f in filas]

@@ -248,14 +248,33 @@ def posiciones_de(conn, wallet: str) -> list[dict]:
 def guardar(conn, wallet: str, nota: dict) -> bool:
     """Escribe las columnas `q_*` de esa billetera. No toca `score`,
     `is_tracked` ni `grade`: la nota vieja sigue mandando hasta que el
-    dueño decida lo contrario."""
+    dueño decida lo contrario.
+
+    (19-BI) Antes esto era un UPDATE a secas que devolvia True SIEMPRE.
+    Si la billetera no tenia fila en `wallets` —el caso normal de las que
+    trae la caceria, que llegan por su historial y no por una aparicion—
+    el UPDATE no tocaba nada y la nota se perdia EN SILENCIO. Medido el
+    09/09: 8 billeteras con material de sobra sin nota por esto, y de las
+    75 cazadas solo 26 tenian fila. Ahora se crea la fila si falta (el
+    mismo `INSERT OR IGNORE` que usa `upsert_wallet_appearance`, que el
+    motor traduce solo a Postgres) y se devuelve False si de verdad no se
+    escribio nada.
+    """
     if not wallet or not nota:
         return False
     try:
+        from db import now_iso
+        conn.execute(
+            """INSERT OR IGNORE INTO wallets (address, first_seen,
+                                              last_updated)
+               VALUES (?,?,?)""", (wallet, now_iso(), now_iso()))
+    except Exception as _ex:
+        _avisar_ex("wallet_quality:guardar:alta", _ex)
+    try:
         sets = ", ".join(f"{c} = ?" for c in COLUMNAS)
-        conn.execute(f"UPDATE wallets SET {sets} WHERE address = ?",
-                     (*[nota.get(c) for c in COLUMNAS], wallet))
-        return True
+        cur = conn.execute(f"UPDATE wallets SET {sets} WHERE address = ?",
+                           (*[nota.get(c) for c in COLUMNAS], wallet))
+        return bool(cur.rowcount)
     except Exception as _ex:
         _avisar_ex("wallet_quality:guardar", _ex)
         return False
