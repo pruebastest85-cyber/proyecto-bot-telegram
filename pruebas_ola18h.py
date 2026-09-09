@@ -16812,6 +16812,127 @@ def prueba_19bi():
     conn.commit()
     conn.close()
 
+
+def prueba_19bk():
+    bloque("19-BK - la caceria pagaba por billeteras que ya sabiamos que "
+           "eran bots: 44 de 125 medidas el 09/09, ~10.000 creditos "
+           "comprando una respuesta que ya estaba en la base")
+    import descubrimiento as D
+    from db import get_conn
+
+    AHORA = 1_700_000_000
+
+    def _c(w, sol, ts=AHORA):
+        return {"wallet": w, "sol": sol, "tokens": 1000.0, "time": ts,
+                "signature": f"c{w}"}
+
+    conn = get_conn()
+    for t in ("helius_queue", "analysis_events", "trades"):
+        conn.execute(f"DELETE FROM {t}")
+    for w in ("Wbot", "Wbuena", "Wmedida", "Wcolabot"):
+        conn.execute("DELETE FROM wallets WHERE address = ?", (w,))
+    conn.execute("INSERT INTO wallets (address, is_bot) VALUES ('Wbot', 1)")
+    conn.execute("INSERT INTO wallets (address, is_bot) VALUES ('Wbuena', 0)")
+    conn.execute("INSERT INTO wallets (address, is_bot) "
+                 "VALUES ('Wcolabot', 1)")
+    conn.execute("INSERT INTO trades (wallet, mint, side, ts, sol, tokens, "
+                 "signature) VALUES ('Wmedida','M','buy',?,1.0,10.0,'s1')",
+                 (AHORA,))
+    conn.commit()
+
+    # -- 1) la razon de fondo: el almacen tira lo que se paga ---------
+    _ts = open("trades_store.py", encoding="utf-8").read()
+    comprobar("el almacen de operaciones se niega a guardar el historial "
+              "de una marcada como bot (por eso pagarla no deja NADA)",
+              "COALESCE(is_bot,0) b FROM wallets WHERE address=?" in _ts)
+
+    # -- 2) quien queda fuera de la caceria ---------------------------
+    fuera = D._ya_medidas(conn)
+    comprobar("la ya medida no se vuelve a pagar (esto ya estaba)",
+              "Wmedida" in fuera)
+    comprobar("la ya marcada como bot TAMPOCO se paga",
+              "Wbot" in fuera)
+    comprobar("y la que no es ninguna de las dos si es cazable",
+              "Wbuena" not in fuera)
+
+    cands = [c["wallet"] for c in D.elegir_candidatas(
+        [_c("Wbot", 2.0), _c("Wbuena", 2.0), _c("Wmedida", 2.0)], [],
+        fuera)]
+    comprobar("asi que el bot no llega ni a candidata, aunque metiera "
+              "justo en el punto dulce", cands == ["Wbuena"], cands)
+
+    # -- 3) es_bot lee la base, no adivina ----------------------------
+    comprobar("es_bot dice que si de la marcada", D.es_bot(conn, "Wbot"))
+    comprobar("y que no de la limpia", not D.es_bot(conn, "Wbuena"))
+    comprobar("de una desconocida dice que no: ante la duda, se caza",
+              not D.es_bot(conn, "Wjamasvista"))
+
+    # -- 4) la verja tardia: las que YA estaban en la cola ------------
+    D.encolar(conn, "Wcolabot", 900, "de una pasada anterior")
+    D.encolar(conn, "Wbuena", 800, "candidata normal")
+    conn.commit()
+    perfiladas = []
+    import sys as _sys
+    import types as _types
+    _mod = _types.ModuleType("wallet_profiler")
+
+    def _fake(w, with_holdings=False):
+        perfiladas.append(w)
+        return {"historial_entero": True, "tx_sampled": 10}
+    _mod.profile_wallet = _fake
+    _prev = _sys.modules.get("wallet_profiler")
+    _sys.modules["wallet_profiler"] = _mod
+    _gastado, _presu = D._gastado_desde, D._hay_presupuesto
+    try:
+        D._gastado_desde = lambda c, t: 0
+        D._hay_presupuesto = lambda: True
+        import io as _io
+        import contextlib as _ctx
+        with _ctx.redirect_stdout(_io.StringIO()) as sal:
+            hechas = D.atender_cola(conn, 10**9, 0)
+        conn.commit()
+        comprobar("la que ya estaba encolada y es bot NO se perfila: no "
+                  "se le gasta un credito", "Wcolabot" not in perfiladas,
+                  perfiladas)
+        comprobar("pero la buena si se perfila", "Wbuena" in perfiladas)
+        comprobar("y solo cuenta como hecha la que de verdad se pago",
+                  hechas == 1, hechas)
+        comprobar("se dice por pantalla cuantas se saltaron",
+                  "saltadas" in sal.getvalue(), sal.getvalue())
+    finally:
+        D._gastado_desde, D._hay_presupuesto = _gastado, _presu
+        if _prev is not None:
+            _sys.modules["wallet_profiler"] = _prev
+        else:
+            _sys.modules.pop("wallet_profiler", None)
+
+    comprobar("la saltada sale de la cola (no se reintenta cada pasada)",
+              conn.execute("SELECT estado FROM helius_queue WHERE "
+                           "entity_id='Wcolabot'").fetchone()["estado"]
+              == "hecha")
+    comprobar("y queda escrito POR QUE se salto, para poder discutirlo",
+              conn.execute(
+                  "SELECT COUNT(*) c FROM analysis_events WHERE "
+                  "entity_id='Wcolabot' AND decision='saltada'"
+              ).fetchone()["c"] == 1)
+
+    # -- 5) lo que este arreglo NO hace -------------------------------
+    _d = open("descubrimiento.py", encoding="utf-8").read()
+    comprobar("no desmarca a nadie: la caceria solo LEE is_bot",
+              "SET is_bot" not in _d and "is_bot=1," not in _d)
+    comprobar("y el dia que el dueño desmarque a las falsas, vuelven "
+              "solas sin tocar codigo (se consulta en cada pasada, no "
+              "hay lista fija)",
+              "_ya_medidas(conn)" in _d)
+
+    for t in ("helius_queue", "analysis_events", "trades"):
+        conn.execute(f"DELETE FROM {t}")
+    for w in ("Wbot", "Wbuena", "Wmedida", "Wcolabot"):
+        conn.execute("DELETE FROM wallets WHERE address = ?", (w,))
+    conn.commit()
+    conn.close()
+
+
 def prueba_19bj():
     bloque("19-BJ (fase 9) - las tres puertas: se pasan EN ORDEN y basta "
            "fallar una; y NO deciden todavia a quien se copia")
@@ -17083,6 +17204,7 @@ def main():
     prueba_19bg()
     prueba_19bi()
     prueba_19bj()
+    prueba_19bk()
 
     print("\n" + "─" * 60)
     if _FALLOS:
