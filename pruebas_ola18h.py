@@ -16708,6 +16708,110 @@ def prueba_19bg():
     conn.commit()
     conn.close()
 
+def prueba_19bi():
+    bloque("19-BI - dos fugas medidas el 09/09: las operaciones nuevas de "
+           "un token ya reconstruido no se convertian nunca, y la nota de "
+           "una billetera sin fila se perdia en silencio")
+    import config as _cfg
+    import posiciones as P
+    import wallet_quality as Q
+    from db import get_conn
+
+    AHORA = 1_700_000_000
+    H = 3600
+    conn = get_conn()
+    for t in ("wallet_positions", "trades", "token_milestones",
+              "winning_tokens"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wbi%'")
+    conn.commit()
+    nivel = float(_cfg.MIN_WINNER_MC)
+    conn.execute("INSERT INTO token_milestones (mint, milestone_usd, "
+                 "first_reached_ts, source, confidence) VALUES "
+                 "('Mbi',?,?,'prueba','alta')", (nivel, AHORA))
+    for i, (w, side, sol, tok, ts) in enumerate([
+            ("Wbi_vieja", "compra", 1.0, 100.0, AHORA),
+            ("Wbi_vieja", "venta", 3.0, 100.0, AHORA + 50 * H),
+            ("Wbi_nueva", "compra", 2.0, 200.0, AHORA),
+            ("Wbi_nueva", "venta", 6.0, 200.0, AHORA + 60 * H)]):
+        conn.execute("INSERT INTO trades (wallet, signature, mint, side, "
+                     "sol, tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                     (w, f"s{i}", "Mbi", side, sol, tok, ts))
+    conn.commit()
+
+    # ── 1) el token entra en la cola y se reconstruye entero ─────────
+    comprobar("un token con operaciones sin convertir entra en la cola",
+              "Mbi" in P._mints_objetivo(conn, 10))
+    P.reconstruir_mint(conn, "Mbi")
+    comprobar("y se construyen las posiciones de las dos billeteras",
+              conn.execute("SELECT COUNT(*) c FROM wallet_positions WHERE "
+                           "mint='Mbi'").fetchone()["c"] == 2)
+    comprobar("ya reconstruido del todo, NO vuelve a la cola",
+              "Mbi" not in P._mints_objetivo(conn, 10))
+
+    # ── 2) el fallo medido: llega una billetera NUEVA al mismo token ──
+    # Antes la cola pedia "tokens SIN NINGUNA posicion", asi que este
+    # token ya no volvia jamas y las operaciones de la recien llegada no
+    # se convertian nunca. En la base del dueño eso dejaba 362 de 369
+    # tokens con trabajo pendiente invisible.
+    for i, (side, sol, tok, ts) in enumerate([
+            ("compra", 1.5, 150.0, AHORA), ("venta", 7.5, 150.0,
+                                            AHORA + 30 * H)]):
+        conn.execute("INSERT INTO trades (wallet, signature, mint, side, "
+                     "sol, tokens, ts) VALUES (?,?,?,?,?,?,?)",
+                     ("Wbi_recien", f"r{i}", "Mbi", side, sol, tok, ts))
+    conn.commit()
+    comprobar("al llegar una billetera nueva a un token YA reconstruido, "
+              "el token vuelve a la cola (era la fuga)",
+              "Mbi" in P._mints_objetivo(conn, 10))
+    P.reconstruir_mint(conn, "Mbi")
+    comprobar("y su posicion aparece, sin duplicar las que ya estaban",
+              conn.execute("SELECT COUNT(*) c FROM wallet_positions WHERE "
+                           "mint='Mbi'").fetchone()["c"] == 3)
+
+    # ── 3) la nota de una billetera SIN fila en `wallets` ────────────
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wbi%'")
+    conn.commit()
+    comprobar("de partida, la billetera cazada no tiene fila en wallets "
+              "(llega por su historial, no por una aparicion)",
+              conn.execute("SELECT COUNT(*) c FROM wallets WHERE "
+                           "address='Wbi_recien'").fetchone()["c"] == 0)
+    nota = Q.calcular([
+        {"mint": "M1", "sol_in": 1.0, "sol_out": 3.0, "realized_pnl": 2.0,
+         "roi_pct": 200.0, "holding_seconds": 50 * H},
+        {"mint": "M2", "sol_in": 1.0, "sol_out": 2.0, "realized_pnl": 1.0,
+         "roi_pct": 100.0, "holding_seconds": 60 * H},
+        {"mint": "M3", "sol_in": 1.0, "sol_out": 2.5, "realized_pnl": 1.5,
+         "roi_pct": 150.0, "holding_seconds": 40 * H}])
+    comprobar("guardar la nota CREA la fila si falta y devuelve True",
+              Q.guardar(conn, "Wbi_recien", nota) is True)
+    conn.commit()
+    f = conn.execute("SELECT q_score, estrategia, score, "
+                     "COALESCE(is_tracked,0) t FROM wallets WHERE "
+                     "address='Wbi_recien'").fetchone()
+    comprobar("la nota queda escrita de verdad, no se pierde en silencio",
+              f is not None and f["q_score"] is not None
+              and f["estrategia"] == "aguanta")
+    comprobar("y la fila recien creada no trae estrella ni nota vieja",
+              f is not None and f["score"] == 0 and f["t"] == 0)
+
+    # Y si de verdad no se puede escribir, se dice.
+    class _ConnRoto:
+        def execute(self, *a, **k):
+            raise RuntimeError("base caida")
+    comprobar("si la base falla, guardar devuelve False en vez de mentir",
+              Q.guardar(_ConnRoto(), "Wbi_recien", nota) is False)
+    comprobar("sin nota o sin billetera tampoco se inventa nada",
+              Q.guardar(conn, "", nota) is False
+              and Q.guardar(conn, "Wbi_recien", {}) is False)
+
+    for t in ("wallet_positions", "trades", "token_milestones",
+              "winning_tokens"):
+        conn.execute(f"DELETE FROM {t}")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wbi%'")
+    conn.commit()
+    conn.close()
+
 def main():
     _vigilante()
     prueba_grave1()
@@ -16792,6 +16896,7 @@ def main():
     prueba_19be()
     prueba_19bf()
     prueba_19bg()
+    prueba_19bi()
 
     print("\n" + "─" * 60)
     if _FALLOS:
