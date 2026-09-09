@@ -45,18 +45,20 @@ def posicion(conn, address: str, tope: int = 200):
         # esta escrito aqui: lo hace `db.corte_actividad()`, el mismo que
         # usan `top_wallets` y `_operativas`, asi que los tres espejos no
         # pueden discrepar aunque alguien cambie el defecto en un sitio.
-        from db import corte_actividad, corte_medidas, orden_top
-        corte = corte_actividad()
-        corte_m = corte_medidas()
         # (19-AH) El ORDER BY sale de db.orden_top(): un solo sitio.
+        # (Fase 10) Y sus parametros de db.params_top(): con el embudo
+        # encendido la cadena lleva un `?` mas, y pasarlos a mano en tres
+        # sitios era pedir un descuadre.
+        from db import orden_top, params_top, embudo_manda
+        _emb = embudo_manda(conn)
         rows = conn.execute(
             f"""SELECT w.address FROM wallets w
                LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                           GROUP BY wallet) actividad
                     ON actividad.wallet = w.address
                WHERE w.is_bot = 0
-               ORDER BY {orden_top()}
-               LIMIT ?""", (corte_m, corte, tope)).fetchall()
+               ORDER BY {orden_top(_emb)}
+               LIMIT ?""", (*params_top(_emb), tope)).fetchall()
         for i, r in enumerate(rows, 1):
             if r["address"] == address:
                 return i

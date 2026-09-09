@@ -1829,14 +1829,104 @@ def corte_medidas() -> int:
     return int(_t.time()) - int(_horas * 3600)
 
 
+def corte_copiable() -> int:
+    """(Fase 10, 09/09/2026) Corte de actividad para las que pasaron LAS
+    TRES PUERTAS: 30 dias (TOP_COPIABLE_HOURS).
+
+    POR QUE HACE FALTA, medido en la base del dueño el 09/09: de las 47
+    `copiable`, **cero** habian operado en 48 h y **cero** en 7 dias —
+    pero 39 de 47 habian operado en el ultimo mes. No estan muertas: es
+    justo lo que las puertas seleccionan. La puerta 3 pide aguantar mas
+    de un dia con poco capital, y quien aguanta 50, 90 o 280 horas por
+    posicion no opera todos los dias.
+
+    El corte de 48 h se puso el 19/8 con el embudo VIEJO, donde una nota
+    alta no decia nada sobre el aguante y el top se llenaba de retiradas.
+    Con el embudo nuevo ese mismo corte tira precisamente a la gente que
+    el embudo acaba de encontrar: desde fuera, "aguanta mucho" y "esta
+    dormida" se ven igual. Sin este corte propio, encender el embudo
+    dejaria el bot MUDO.
+
+    Solo se aplica con el embudo v2 al mando; apagado, nada cambia.
+    """
+    import os as _os
+    import time as _t
+    _crudo = _os.getenv("TOP_COPIABLE_HOURS", "720")
+    try:
+        _horas = float(str(_crudo).replace(",", "."))
+        if _horas <= 0:
+            raise ValueError("debe ser > 0")
+    except (TypeError, ValueError) as _e:
+        print(f"· TOP_COPIABLE_HOURS={_crudo!r} no es un numero de horas "
+              f"valido ({_e}); se usa el defecto de 720 h")
+        _horas = 720.0
+    return int(_t.time()) - int(_horas * 3600)
+
+
+def embudo_manda(conn=None) -> bool:
+    """¿Manda el embudo v2 (las tres puertas) sobre quien alerta y se
+    copia?
+
+    Dos fuentes, y el ajuste de la base MANDA sobre el codigo: asi el
+    dueño puede apagarlo desde Telegram (`/embudo off`) en segundos, sin
+    esperar a un despliegue, si ve que se queda sin alertas. Sin `conn`
+    (o si la consulta falla) se cae al valor de `config`.
+    """
+    if conn is not None:
+        try:
+            v = get_setting(conn, "embudo_v2_activo", None)
+            if v is not None and str(v).strip() != "":
+                return bool(int(float(v)))
+        except (TypeError, ValueError):
+            pass
+        except Exception as _ex:
+            _avisar_ex("db:embudo_manda", _ex)
+    try:
+        import config as _cfg
+        return bool(int(getattr(_cfg, "EMBUDO_V2_ACTIVO", 0)))
+    except (TypeError, ValueError):
+        return False
+
+
 # (19-AH) EL ORDEN DEL TOP, EN UN SOLO SITIO. Antes estaba escrito tres
 # veces (top_wallets, _operativas, wallet_ident.posicion) con la obligacion
 # de mantenerlas iguales a mano. Ahora las tres piden esta cadena.
-# Parametros posicionales, en este orden: (corte_medidas, corte_actividad).
+#
+# (Fase 10) La cadena y sus parametros DEPENDEN del embudo, asi que ya no
+# se pasan a mano: `params_top(embudo)` devuelve la tupla que le toca a
+# `orden_top(embudo)`. Antes el orden de los `?` era un contrato escrito
+# en un comentario y mantenido a mano en tres sitios; con dos formas
+# posibles de la cadena eso se rompe solo. Quien llama hace siempre:
+#     ORDER BY {orden_top(emb)} ... , (*params_top(emb), limite)
 MIN_N_MEDIDA = 5
 
 
-def orden_top() -> str:
+def _bandas_top(embudo: bool) -> tuple:
+    """UNA sola decision: el trozo de SQL de las bandas de actividad Y los
+    cortes que consume, juntos.
+
+    Por que juntos y no en dos funciones: la cadena y sus parametros
+    tienen que cuadrar en numero, y si viven separados se pueden
+    desincronizar. Eso no da un error bonito — da
+    "Incorrect number of bindings" dentro de `_operativas`, y ahi
+    `top_addresses` trata la excepcion como "no hay filtro" y **deja
+    alertar a todo el mundo**. Un fallo de codigo abriendo la puerta de
+    par en par es justo lo que no puede pasar en el camino que decide a
+    quien se copia. Con una sola fuente, cambiar la rama cambia sus
+    parametros a la vez y el descuadre deja de ser posible.
+    """
+    if embudo:
+        return ("WHEN w.wallet_stage = 'copiable' THEN ?",
+                (corte_copiable(), corte_medidas(), corte_actividad()))
+    return ("", (corte_medidas(), corte_actividad()))
+
+
+def params_top(embudo: bool = False) -> tuple:
+    """Los cortes que consume `orden_top(embudo)`, EN SU ORDEN."""
+    return _bandas_top(bool(embudo))[1]
+
+
+def orden_top(embudo: bool = False) -> str:
     # (19-AS, 05/09) Decision del dueño: "la numero 1 la mejor en todos
     # los aspectos, luego la segunda…". Manda lo MEDIDO al copiar: entre
     # las medidas decide la nota copiable (ni `confirmada` ni el PnL del
@@ -1845,6 +1935,16 @@ def orden_top() -> str:
     # medidas siguen las reglas de siempre: confirmada, PnL del perfil
     # no negativo (decision del 19/8: una perdedora activa va detras de
     # las dormidas), nota del perfil.
+    #
+    # (Fase 10) Con el embudo APAGADO la cadena no menciona `wallet_stage`
+    # y lleva los mismos DOS `?` de siempre: el orden resultante es el de
+    # antes de esta ola, y hay una prueba que compara el ranking entero
+    # contra el de la version anterior sobre la misma base. Encendido se
+    # antepone una banda de actividad para las `copiable` y entonces
+    # `params_top(True)` aporta el `?` extra que esa rama consume. La
+    # cadena y sus parametros salen SIEMPRE de la misma pareja de
+    # funciones, para que no puedan descuadrarse.
+    _BANDA_COPIABLE = _bandas_top(bool(embudo))[0]
     return f"""w.is_tracked DESC,
                -- (19-AH) Bandas: 0 = medida y copiarla GANA, 1 = sin medir
                -- (por perfil), 2 = medida y copiarla PIERDE (al final).
@@ -1867,9 +1967,13 @@ def orden_top() -> str:
                          AND w.pnl_total IS NOT NULL AND w.pnl_total < 0
                     THEN 1 ELSE 0 END,
                -- Dormidas al fondo de su banda: 7 dias si esta medida,
-               -- 48 h si no (ver corte_medidas / corte_actividad).
+               -- 48 h si no (ver corte_medidas / corte_actividad). Con el
+               -- embudo v2 al mando se antepone una banda mas: la que
+               -- paso las tres puertas tiene 30 dias (corte_copiable),
+               -- porque aguantar semanas es su rasgo, no su abandono.
                CASE WHEN COALESCE(actividad.ult, 0) <
-                         (CASE WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
+                         (CASE {_BANDA_COPIABLE}
+                               WHEN COALESCE(w.copi_n, 0) >= {MIN_N_MEDIDA}
                                THEN ? ELSE ? END)
                     THEN 1 ELSE 0 END,
                -- Dentro de las medidas: mejor nota copiable primero.
@@ -1902,8 +2006,7 @@ def top_wallets(conn, limit=20):
     # Ajustable sin codigo con TOP_ACTIVITY_HOURS. Espejo obligatorio en
     # wallet_ident.posicion() y en _operativas(): los tres usan
     # `corte_actividad()` para que no puedan discrepar (19-A).
-    corte = corte_actividad()
-    corte_m = corte_medidas()
+    _emb = embudo_manda(conn)
     return conn.execute(
         f"""SELECT w.address, w.winning_tokens_count, w.total_buys_sol,
                   w.score, w.is_tracked, w.ai_class, w.alias, w.pnl_30d,
@@ -1915,9 +2018,9 @@ def top_wallets(conn, limit=20):
                       GROUP BY wallet) actividad
                 ON actividad.wallet = w.address
            WHERE w.is_bot = 0
-           ORDER BY {orden_top()}
+           ORDER BY {orden_top(_emb)}
            LIMIT ?""",
-        (corte_m, corte, limit),
+        (*params_top(_emb), limit),
     ).fetchall()
 
 
@@ -1965,18 +2068,40 @@ def _operativas(conn, limit: int) -> set:
     # puesto 148; copiar peor no es mejor que copiar menos.
     corte = corte_actividad()          # espejo de top_wallets (19-A)
     corte_m = corte_medidas()
+    _emb = embudo_manda(conn)
+    corte_c = corte_copiable()
     rows = conn.execute(
         f"""SELECT w.address, w.is_tracked, w.confirmada,
                   COALESCE(actividad.ult, 0) AS ult,
-                  COALESCE(w.copi_n, 0) AS copi_n
+                  COALESCE(w.copi_n, 0) AS copi_n,
+                  w.wallet_stage
            FROM wallets w
            LEFT JOIN (SELECT wallet, MAX(last_ts) AS ult FROM positions
                       GROUP BY wallet) actividad
                 ON actividad.wallet = w.address
            WHERE w.is_bot = 0
-           ORDER BY {orden_top()}
+           ORDER BY {orden_top(_emb)}
            LIMIT ?""",
-        (corte_m, corte, limit)).fetchall()
+        (*params_top(_emb), limit)).fetchall()
+    if _emb:
+        # (Fase 10) EL EMBUDO MANDA: solo alerta y se copia quien paso
+        # LAS TRES PUERTAS. Decision del dueño el 09/09: "descartar todo
+        # lo que no queremos, que se quede lo bueno".
+        #
+        # Las tres puertas SUSTITUYEN aqui a `confirmada` (el filtro de
+        # tres puertas viejo, ola 18-L): son una version mas exigente de
+        # la misma pregunta, y exigir las dos dejaria fuera a las que el
+        # embudo nuevo acaba de descubrir, que nunca fueron `confirmada`
+        # porque nadie las habia mirado.
+        #
+        # `is_tracked` SI se sigue exigiendo: el bot solo tiene datos en
+        # tiempo real de las que vigila. `puertas.revisar` asciende a ⭐ a
+        # las copiables, asi que entran solas en la pasada siguiente.
+        #
+        # El corte de actividad es el suyo: 30 dias (ver corte_copiable).
+        return {r["address"] for r in rows
+                if r["is_tracked"] and r["wallet_stage"] == "copiable"
+                and (r["ult"] or 0) >= corte_c}
     # Se comprueba por verdad y no por `== 1`: las columnas son INTEGER
     # en los dos motores, pero cualquier driver que devolviera booleano
     # romperia una comparacion estricta sin que ninguna prueba (que corren

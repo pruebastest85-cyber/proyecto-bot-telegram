@@ -457,23 +457,45 @@ def clase5_consultas_reales():
     rota en el ORDER BY comun pasaba con "Sin hallazgos" y tumbaba /top,
     el conjunto operativo y la posicion de las tarjetas (reproducido el
     05/09 con `w.wallet_scoree`). Aqui se EJECUTAN de verdad contra la
-    base temporal: si revientan, es hallazgo."""
+    base temporal: si revientan, es hallazgo.
+
+    (Fase 10, 09/09) Se ejecutan con el embudo APAGADO y ENCENDIDO. Desde
+    la fase 10 la cadena tiene DOS formas —encendida lleva una rama y un
+    `?` mas, el de la banda de las `copiable`— y sus parametros salen de
+    `db.params_top()`. Probar una sola forma dejaria la otra sin cubrir, y
+    un descuadre entre `?` y parametros no se ve al importar: se ve en
+    produccion, en el camino que decide quien alerta."""
     n = 0
     try:
         import db as dbmod
         import wallet_ident as wimod
         c = dbmod.get_conn()
         try:
-            for nombre, fn in (("db.top_wallets", lambda: dbmod.top_wallets(c, 5)),
-                               ("db._operativas", lambda: dbmod._operativas(c, 5)),
-                               ("wallet_ident.posicion",
-                                lambda: wimod.posicion(c, "x" * 44, 5))):
-                n += 1
-                try:
-                    fn()
-                except Exception as e:
-                    print(f"· clase 5: {nombre} revienta: {e}")
-                    fallos.append(f"{nombre}: la consulta real revienta — {e}")
+            # El modo se fuerza SUSTITUYENDO `embudo_manda`, no escribiendo
+            # el ajuste: el auditor se presenta como de solo lectura y no
+            # debe dejar rastro en la base que audita (la 19-Z ya costo un
+            # susto con este mismo patron).
+            _orig = dbmod.embudo_manda
+            try:
+                for emb in (0, 1):
+                    dbmod.embudo_manda = (lambda *a, **k: bool(emb))
+                    etq = "embudo on" if emb else "embudo off"
+                    for nombre, fn in (
+                            ("db.top_wallets",
+                             lambda: dbmod.top_wallets(c, 5)),
+                            ("db._operativas",
+                             lambda: dbmod._operativas(c, 5)),
+                            ("wallet_ident.posicion",
+                             lambda: wimod.posicion(c, "x" * 44, 5))):
+                        n += 1
+                        try:
+                            fn()
+                        except Exception as e:
+                            print(f"· clase 5: {nombre} ({etq}) revienta: {e}")
+                            fallos.append(f"{nombre} ({etq}): la consulta "
+                                          f"real revienta — {e}")
+            finally:
+                dbmod.embudo_manda = _orig
         finally:
             c.close()
     except Exception as e:

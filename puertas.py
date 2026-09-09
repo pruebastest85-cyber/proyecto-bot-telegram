@@ -35,13 +35,26 @@ ETAPAS
 - `descartada`   — falla la 1.
 - `sin_datos`    — no hay con que juzgarla; NO es un suspenso.
 
-LO QUE ESTO **NO** HACE (regla 55 del encargo)
-----------------------------------------------
-No mueve dinero, no abre ni cierra nada, y **no cambia a quien se copia**.
-Escribe `wallet_stage` y lo enseña. Que la etapa mande sobre las alertas y
-el paper trading depende de `EMBUDO_V2_ACTIVO`, que sigue en 0 hasta que
-el dueño diga lo contrario; hay una prueba dedicada a que con el
-interruptor apagado nada cambia de sitio.
+QUE MANDA Y QUE NO (fase 10, 09/09/2026)
+-----------------------------------------
+El dueño lo encendio: "descartar todo lo que no queremos, que se quede lo
+bueno". Desde la fase 10, con el embudo al mando:
+- solo alertan y se copian las `copiable` (lo aplica `db._operativas`);
+- una `copiable` que no era ⭐ pasa a serlo (`ascender`), porque el bot
+  solo vigila en tiempo real a las ⭐ y si nadie la escucha no puede
+  generar ni una señal;
+- **no se degrada a nadie**: las ⭐ que no pasan conservan `is_tracked` y
+  su historial entero. Que no alerten lo decide el conjunto operativo, y
+  eso se revierte apagando el interruptor.
+
+Sigue en pie la regla 55: esto NO mueve dinero real. Todo termina en
+señales y en paper trading.
+
+El interruptor vive en `db.embudo_manda()`, que mira primero el ajuste
+`embudo_v2_activo` de la base — el que escribe `/embudo` — y se cae a
+`config.EMBUDO_V2_ACTIVO`. Asi apagarlo es un mensaje de Telegram y no un
+despliegue. Hay pruebas de que con el interruptor APAGADO nada cambia de
+sitio, que es el modo al que se vuelve con `/embudo off`.
 
 DE DONDE SALEN LOS UMBRALES
 ---------------------------
@@ -219,6 +232,36 @@ def guardar(conn, wallet: str, veredicto: dict) -> bool:
         return False
 
 
+def ascender(conn, wallet: str, veredicto: dict) -> bool:
+    """(Fase 10) Con el embudo al mando, una `copiable` pasa a ⭐.
+
+    POR QUE: el bot solo vigila en tiempo real a las ⭐. El 09/09 habia
+    **24 billeteras que pasaban las tres puertas y no eran ⭐**: nadie las
+    escuchaba, asi que no podian generar ni una señal y el embudo nuevo
+    no tenia forma de demostrar si acierta. Decision del dueño ese dia:
+    ascenderlas.
+
+    Lo que esta funcion NO hace: **no degrada a nadie**. Las ⭐ que no
+    pasan las puertas conservan su `is_tracked` y su historial; que no
+    alerten ni se copien lo decide el conjunto operativo
+    (`db._operativas`), que es reversible con apagar el embudo. Quitar
+    `is_tracked` seria destructivo y no hace falta para lo que el dueño
+    pidio.
+    """
+    if not wallet or not veredicto:
+        return False
+    if veredicto.get("wallet_stage") != "copiable":
+        return False
+    try:
+        cur = conn.execute(
+            "UPDATE wallets SET is_tracked = 1 WHERE address = ? "
+            "AND COALESCE(is_tracked, 0) = 0", (wallet,))
+        return bool(cur.rowcount)
+    except Exception as _ex:
+        _avisar_ex("puertas:ascender", _ex)
+        return False
+
+
 # ── la pasada ────────────────────────────────────────────────────────
 
 def _a_evaluar(conn, limite: int) -> list[str]:
@@ -242,6 +285,8 @@ def revisar(limite: int | None = None) -> dict:
     try:
         cuenta = {e: 0 for e in ETAPAS}
         cambios = []
+        ascendidas = []
+        _manda = manda(conn)
         for w in _a_evaluar(conn, limite):
             d = datos(conn, w)
             v = evaluar(d)
@@ -252,7 +297,17 @@ def revisar(limite: int | None = None) -> dict:
                 if antes != v["wallet_stage"]:
                     cambios.append((w, antes, v["wallet_stage"],
                                     v["motivo"]))
+                if _manda and ascender(conn, w, v):
+                    ascendidas.append(w)
         conn.commit()
+        if ascendidas:
+            # El conjunto operativo se cachea 60 s: sin esto, las recien
+            # ascendidas no alertarian hasta que caducara la cache.
+            try:
+                from db import invalidar_copiables
+                invalidar_copiables()
+            except Exception as _ex:
+                _avisar_ex("puertas:revisar:cache", _ex)
         try:
             from analysis_events import registrar_lote, registrar
             registrar_lote(conn, [
@@ -264,11 +319,21 @@ def revisar(limite: int | None = None) -> dict:
                       " · ".join(f"{k} {v}" for k, v in cuenta.items() if v),
                       score=sum(cuenta.values()),
                       data_source="wallet_positions+wallets")
+            if ascendidas:
+                registrar_lote(conn, [
+                    {"entity_type": "wallet", "entity_id": w,
+                     "stage": "puertas", "decision": "ascendida",
+                     "reason": "pasa las tres puertas: pasa a ⭐ para que "
+                               "el bot la vigile en tiempo real"}
+                    for w in ascendidas[:200]])
+                conn.commit()
         except Exception as _ex:
             _avisar_ex("puertas:revisar:eventos", _ex)
         print("✓ Puertas: " + " · ".join(f"{k} {v}" for k, v in
                                          cuenta.items() if v)
-              + f" ({len(cambios)} cambios) · 0 créditos")
+              + f" ({len(cambios)} cambios"
+              + (f", {len(ascendidas)} ascendidas a ⭐" if ascendidas else "")
+              + ") · 0 créditos")
         return cuenta
     finally:
         conn.close()
@@ -276,14 +341,22 @@ def revisar(limite: int | None = None) -> dict:
 
 # ── lo que decide (o no) ─────────────────────────────────────────────
 
-def manda() -> bool:
-    """¿La etapa decide ya a quien se copia?
+def manda(conn=None) -> bool:
+    """¿La etapa decide ya a quien alerta y se copia?
 
-    Hoy NO: `EMBUDO_V2_ACTIVO` esta en 0. Existe para que el dia que el
-    dueño lo encienda no haya que tocar codigo, y para que quede UN solo
-    sitio donde mirarlo.
+    (Fase 10, 09/09) SI, si el dueño no lo ha apagado. El interruptor
+    vive en UN solo sitio de verdad —`db.embudo_manda`—, que mira primero
+    el ajuste `embudo_v2_activo` de la base (lo que pone `/embudo`) y se
+    cae a `config.EMBUDO_V2_ACTIVO` si no hay ajuste. Asi apagarlo es un
+    mensaje de Telegram y no un despliegue: si el bot se queda sin
+    alertas, el dueño lo revierte en segundos desde el movil.
     """
-    return bool(_i("EMBUDO_V2_ACTIVO", 0))
+    try:
+        from db import embudo_manda
+        return embudo_manda(conn)
+    except Exception as _ex:
+        _avisar_ex("puertas:manda", _ex)
+        return bool(_i("EMBUDO_V2_ACTIVO", 0))
 
 
 def copiables(conn, limite: int = 50) -> list[dict]:
@@ -322,8 +395,11 @@ def porque_text(conn, wallet: str) -> str:
     L.append(f"Operación típica: x{(d.get('mult_realizado') or 0):.2f} · "
              f"{(d.get('hold_median_h') or 0):.0f} h dentro · "
              f"{cap:.2f} SOL" if cap is not None else "")
-    if not manda():
-        L.append("")
+    L.append("")
+    if manda(conn):
+        L.append("_Las puertas MANDAN: solo alertan y se copian las que "
+                 "pasan las tres. Apagar: `/embudo off`._")
+    else:
         L.append("_Las puertas todavía no deciden a quién se copia: eso "
                  "sigue mandándolo el top de siempre._")
     return "\n".join(x for x in L if x is not None)
@@ -359,8 +435,11 @@ def ranking_text(conn, limite: int = 15) -> str:
         L.append("")
         L.append("_Ninguna pasa las tres todavía. `/porque <billetera>` "
                  "dice en cuál se cae cada una._")
-    if not manda():
-        L.append("")
+    L.append("")
+    if manda(conn):
+        L.append("_El embudo MANDA: solo estas alertan y se copian. "
+                 "Apagar: `/embudo off`._")
+    else:
         L.append("_Esto todavía no cambia a quién se copia._")
     return "\n".join(L)
 

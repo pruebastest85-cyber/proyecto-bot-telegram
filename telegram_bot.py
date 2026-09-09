@@ -3004,6 +3004,7 @@ async def _post_init(app: Application):
             BotCommand("creditos", "En qué se van los créditos de Helius"),
             BotCommand("cazar", "Billeteras nuevas que multiplican con poco"),
             BotCommand("ranking", "Las que pasan las tres puertas"),
+            BotCommand("embudo", "Interruptor del embudo v2 (on/off)"),
             BotCommand("porque", "Por qué una billetera está donde está"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
@@ -3294,6 +3295,65 @@ async def cmd_ranking(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         conn = get_conn()
         try:
             return ranking_text(conn, 15)
+        finally:
+            conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_embudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(Embudo v2, fase 10) El interruptor maestro: ¿mandan las tres
+    puertas sobre quién alerta y se copia?
+
+    Existe para que apagarlo sea un mensaje y no un despliegue. Si el bot
+    se queda sin alertas porque las copiables operan poco, `/embudo off`
+    lo revierte en segundos desde el móvil.
+    """
+    args = ctx.args or []
+
+    def _trabajo() -> str:
+        from db import get_conn, set_setting, embudo_manda
+        conn = get_conn()
+        try:
+            if args and args[0].strip().lower() in ("on", "off"):
+                encender = args[0].strip().lower() == "on"
+                set_setting(conn, "embudo_v2_activo", 1 if encender else 0)
+                try:
+                    from db import invalidar_copiables
+                    invalidar_copiables()
+                except Exception as _ex:
+                    _avisar_ex("telegram_bot:cmd_embudo:cache", _ex)
+                if encender:
+                    return ("🚦 *Embudo v2 ENCENDIDO.*\nSolo alertan y se "
+                            "copian las que pasan las TRES puertas. Las "
+                            "demás ⭐ conservan su historial: no se borra "
+                            "nada y `/embudo off` lo revierte entero.")
+                return ("🚦 *Embudo v2 APAGADO.*\nVuelve el comportamiento "
+                        "de siempre: alertan las ⭐ confirmadas y activas. "
+                        "Las etapas se siguen calculando y se ven con "
+                        "`/ranking`, pero no deciden nada.")
+            activo = embudo_manda(conn)
+            n = {}
+            try:
+                for f in conn.execute(
+                        "SELECT wallet_stage e, COUNT(*) c FROM wallets "
+                        "WHERE wallet_stage IS NOT NULL GROUP BY 1"):
+                    n[f["e"]] = f["c"]
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:cmd_embudo:cuenta", _ex)
+            L = [f"🚦 *Embudo v2:* {'ENCENDIDO' if activo else 'apagado'}"]
+            if n:
+                L.append("")
+                L.append(" · ".join(f"{k} {v}" for k, v in sorted(
+                    n.items(), key=lambda x: -x[1])))
+            L.append("")
+            L.append("Encendido, solo alertan y se copian las `copiable`."
+                     if activo else
+                     "Apagado, las etapas se calculan pero no deciden.")
+            L.append("Cambiar: `/embudo on` · `/embudo off`")
+            return "\n".join(L)
         finally:
             conn.close()
 
@@ -4078,6 +4138,7 @@ def main():
     app.add_handler(CommandHandler("cazar", cmd_cazar))
     app.add_handler(CommandHandler("porque", cmd_porque))
     app.add_handler(CommandHandler("ranking", cmd_ranking))
+    app.add_handler(CommandHandler("embudo", cmd_embudo))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))

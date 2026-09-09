@@ -264,8 +264,22 @@ DEXSCREENER_DELAY = 0.3
 # leidas a pelo en dos modulos. La regla 40 del encargo pide una sola
 # fuente.
 
-# Interruptor maestro. 0 = el bot se comporta EXACTAMENTE como hoy.
-EMBUDO_V2_ACTIVO = _int("EMBUDO_V2_ACTIVO", 0)
+# Interruptor maestro. 0 = el bot se comporta EXACTAMENTE como antes de
+# la fase 10; 1 = solo alertan y se copian las que pasan LAS TRES PUERTAS.
+#
+# (Fase 10, 09/09/2026) El dueño lo pidió encendido: "descartar todo lo
+# que no queremos, que se quede lo bueno". El valor de verdad lo tiene
+# `db.embudo_manda()`, que mira ANTES el ajuste `embudo_v2_activo` de la
+# base — el que escribe `/embudo` — para que apagarlo sea un mensaje de
+# Telegram y no un despliegue. Esta constante es solo el defecto.
+EMBUDO_V2_ACTIVO = _int("EMBUDO_V2_ACTIVO", 1)
+
+# (Fase 10) La ventana de actividad de las `copiable` (30 días por
+# defecto) NO se define aquí a propósito: vive en `db.corte_copiable()`,
+# junto a sus dos hermanas TOP_ACTIVITY_HOURS y TOP_MEDIDAS_HOURS, que
+# también se leen del entorno. Tenerla en dos sitios sería justo la
+# duplicación que este bloque intenta quitar. Se ajusta con la variable
+# de entorno TOP_COPIABLE_HOURS.
 # Version de la configuracion, para `analysis_events.config_version`:
 # permite saber con que reglas se tomo cada decision.
 CONFIG_VERSION = os.getenv("CONFIG_VERSION", "v2.0-fase3")
