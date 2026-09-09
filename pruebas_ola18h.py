@@ -16995,10 +16995,14 @@ def prueba_19bl():
         # NUEVA llega por la cacería: NUNCA fue `confirmada` por el
         # filtro viejo, porque nadie la había mirado. Si el embudo
         # exigiera las dos cosas, las descubiertas no entrarían jamás.
+        # `ai_follow` va con `is_tracked`: en este sistema una ⭐ sin esa
+        # bandera la barre `recompute_scores`. Las de fixture que ya son
+        # ⭐ vienen del embudo viejo, así que la llevan.
         conn.execute(
-            "INSERT INTO wallets (address, is_tracked, confirmada, is_bot, "
-            "wallet_score, wallet_stage) VALUES (?,?,?,0,80,?)",
-            (addr, tracked, 0 if addr == "NUEVA" else 1, etapa))
+            "INSERT INTO wallets (address, is_tracked, ai_follow, "
+            "confirmada, is_bot, wallet_score, wallet_stage) "
+            "VALUES (?,?,?,?,0,80,?)",
+            (addr, tracked, tracked, 0 if addr == "NUEVA" else 1, etapa))
         conn.execute("INSERT INTO positions (wallet, mint, tokens, last_ts) "
                      "VALUES (?,?,?,?)",
                      (addr, "M" + addr, 1.0, ahora - dias * 86400))
@@ -17092,6 +17096,25 @@ def prueba_19bl():
                           {"wallet_stage": "candidata"}) is False)
     conn.commit()
     comprobar("y de verdad sigue sin ser ⭐ en la base",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='MALILLA'").fetchone()["t"] == 0)
+    # (19-BM) EL FALLO QUE SE ME ESCAPÓ Y COSTÓ UNA PASADA EN PRODUCCIÓN:
+    # ascender ponía `is_tracked=1` pero NO `ai_follow`, y
+    # `db.recompute_scores` barre con
+    #   WHERE is_tracked = 1 AND COALESCE(ai_follow,0) <> 1
+    # así que las 18 ascendidas a las 22:11 estaban sin ⭐ minutos
+    # después. Una ⭐ sin `ai_follow` no existe en este sistema.
+    comprobar("ascender pone TAMBIÉN ai_follow: una ⭐ sin esa bandera la "
+              "barre recompute_scores en la pasada siguiente",
+              conn.execute("SELECT COALESCE(ai_follow,0) a FROM wallets "
+                           "WHERE address='NUEVA'").fetchone()["a"] == 1)
+    _db.recompute_scores(conn, 1)
+    conn.commit()
+    comprobar("y por eso el ascenso SOBREVIVE a recompute_scores (esto es "
+              "lo que falló en producción el 09/09)",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='NUEVA'").fetchone()["t"] == 1)
+    comprobar("mientras que MALILLA, que nunca debió subir, sigue fuera",
               conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
                            "WHERE address='MALILLA'").fetchone()["t"] == 0)
     comprobar("ascender NO toca a quien no pasa las puertas",
@@ -17189,6 +17212,56 @@ def prueba_19bl():
               conn.execute("SELECT COUNT(*) c FROM analysis_events WHERE "
                            "entity_id='ASCENSO' AND decision='ascendida'"
                            ).fetchone()["c"] >= 1)
+
+    # ── 6c) El retiro por inactividad NO se lleva a las copiables ────
+    # (19-BM) Segundo choque entre el embudo viejo y el nuevo: el retiro
+    # jubila a la ⭐ que lleva 14 días sin operar, y las copiables operan
+    # cada 2-4 semanas por diseño. Sin esta verja, el embudo se comería
+    # solo a la gente que acaba de encontrar.
+    import filtro_calidad as _fc
+    conn.execute("DELETE FROM wallets WHERE address='DORMILONA'")
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, ai_follow, confirmada, "
+        "is_bot, wallet_score, wallet_stage, prueba_desde) "
+        "VALUES ('DORMILONA',1,1,0,0,80,'copiable',?)",
+        (int(_t.time()) - 40 * 86400,))
+    # Y una que NO pasa las puertas y lleva lo mismo sin operar: esa SÍ
+    # se retira. La verja es para las copiables, no una amnistía general.
+    conn.execute("DELETE FROM wallets WHERE address='DORMILONA2'")
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, ai_follow, confirmada, "
+        "is_bot, wallet_score, wallet_stage, prueba_desde) "
+        "VALUES ('DORMILONA2',1,1,0,0,80,'observacion',?)",
+        (int(_t.time()) - 40 * 86400,))
+    conn.commit()
+    _emb(1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        _fc.clasificar(conn)
+    conn.commit()
+    comprobar("con el embudo al mando, la copiable que lleva 40 días sin "
+              "operar CONSERVA su ⭐: su quietud es el rasgo, no el "
+              "abandono",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DORMILONA'").fetchone()["t"] == 1)
+    comprobar("pero la que NO pasa las puertas y lleva lo mismo callada SÍ "
+              "se retira: la verja protege a las copiables, no a todas",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DORMILONA2'").fetchone()["t"] == 0)
+    conn.execute("DELETE FROM wallets WHERE address='DORMILONA2'")
+    conn.execute("UPDATE wallets SET is_tracked=1, ai_follow=1, "
+                 "prueba_desde=? WHERE address='DORMILONA'",
+                 (int(_t.time()) - 40 * 86400,))
+    conn.commit()
+    _emb(0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        _fc.clasificar(conn)
+    conn.commit()
+    comprobar("y con el embudo APAGADO el retiro se comporta como siempre: "
+              "esa misma billetera pierde la ⭐",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DORMILONA'").fetchone()["t"] == 0)
+    conn.execute("DELETE FROM wallets WHERE address='DORMILONA'")
+    conn.commit()
 
     # ── 7) Los textos no mienten en ninguno de los dos modos ─────────
     _emb(1)
