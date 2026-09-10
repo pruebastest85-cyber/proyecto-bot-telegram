@@ -17418,6 +17418,54 @@ def prueba_19bl():
     comprobar("apagado, /ranking dice que todavía no cambia nada",
               "todavía no cambia" in PU.ranking_text(conn, 5))
 
+    # ── 6d) La cola atiende PRIMERO lo que tiene acción pendiente ────
+    # (19-BO) Medido el 10/09: con el orden viejo ("sin etapa primero,
+    # luego la nota más reciente") la primera pasada con degradación viva
+    # sólo alcanzó a 4 de las 88 ⭐ pendientes — las otras 84 quedaban
+    # detrás de billeteras recién puntuadas, y como `q_ts` se refresca sin
+    # parar, esa cola no se vaciaba nunca. La limpieza podía no converger.
+    for t in ("wallets",):
+        conn.execute(f"DELETE FROM {t}")
+    # Una ⭐ pendiente de degradar, con la nota VIEJA (queda al fondo si el
+    # orden es por q_ts).
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, ai_follow, is_bot, "
+        "q_score, q_ts, wallet_stage) "
+        "VALUES ('COLA_PEND',1,1,0,50,?,'candidata')", (ahora - 10 * 86400,))
+    # Y una copiable que aún no es ⭐, también con nota vieja.
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, ai_follow, is_bot, "
+        "q_score, q_ts, wallet_stage) "
+        "VALUES ('COLA_SUBE',0,0,0,50,?,'copiable')", (ahora - 10 * 86400,))
+    # Y 40 recién puntuadas que ya tienen su etiqueta puesta: sin el orden
+    # nuevo, estas 40 se comen la pasada.
+    for i in range(40):
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, is_bot, q_score, "
+            "q_ts, wallet_stage) VALUES (?,0,0,50,?,'observacion')",
+            (f"COLA_RUIDO{i}", ahora - i))
+    conn.commit()
+    _cola = PU._a_evaluar(conn, 5)
+    comprobar("con hueco para 5, la ⭐ pendiente de degradar entra igual "
+              "aunque su nota sea de hace 10 días",
+              "COLA_PEND" in _cola, _cola[:5])
+    comprobar("y sin ella la pasada no tendría nada que degradar (o sea: "
+              "esto es lo que hace que la limpieza converja)",
+              len([x for x in _cola if x.startswith("COLA_")]) >= 2, _cola)
+    comprobar("y la copiable pendiente de ascender, también",
+              "COLA_SUBE" in _cola, _cola[:5])
+    # `.index()` revienta si no está, y una prueba debe FALLAR, no
+    # explotar: con un puesto ficticio al fondo el fallo se lee solo.
+    def _puesto(lista, addr):
+        return lista.index(addr) if addr in lista else 9999
+    comprobar("las que ya tienen su etiqueta y nada que hacer van detrás",
+              _puesto(_cola, "COLA_PEND") < 2
+              and _puesto(_cola, "COLA_SUBE") < 2,
+              _cola[:5])
+    conn.execute("DELETE FROM wallets")
+    conn.commit()
+
+
     for t in ("wallets", "positions", "analysis_events",
               "wallet_positions"):
         conn.execute(f"DELETE FROM {t}")
