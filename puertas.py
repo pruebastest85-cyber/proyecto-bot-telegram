@@ -363,11 +363,47 @@ def degradar(conn, wallet: str, veredicto: dict) -> bool:
 # ── la pasada ────────────────────────────────────────────────────────
 
 def _a_evaluar(conn, limite: int) -> list[str]:
-    """Billeteras con nota, empezando por las que no tienen etapa."""
+    """Billeteras con nota, LAS QUE TIENEN ALGO PENDIENTE PRIMERO.
+
+    (19-BO, 10/09) El orden anterior era "sin etapa primero, luego la nota
+    mas reciente". Servia en la fase 9, cuando la pasada solo ETIQUETABA:
+    daba igual el orden porque tarde o temprano todas recibian su etapa.
+
+    Desde que la pasada tambien ASCIENDE (fase 10) y DEGRADA (fase 11) ese
+    orden mata el trabajo. MEDIDO en la base del dueño el 10/09, en la
+    primera pasada con la degradacion viva:
+
+        632 billeteras con nota · la pasada mira 300
+        de esas 300, ⭐ pendientes de degradar:   4
+        ⭐ pendientes que se quedaban FUERA:     76
+
+    O sea que la limpieza avanzaba de 12 en 12, y las 76 restantes se
+    quedaban detras de billeteras recien puntuadas. Y `q_ts` se refresca
+    sin parar (148 re-puntuadas ese mismo dia), asi que la cola de delante
+    NO SE VACIA NUNCA: la degradacion podia no converger jamas.
+
+    Ahora delante va lo que tiene ACCION PENDIENTE, que es lo unico que
+    cambia algo:
+
+      0. sin etapa — nunca juzgada.
+      1. ⭐ que no es `copiable`  → le toca perder la estrella.
+         `copiable` que no es ⭐  → le toca ganarla.
+      2. el resto, por nota mas reciente — eso es solo re-confirmar una
+         etiqueta que ya esta puesta.
+
+    Con las ~88 acciones pendientes que habia caben de sobra en una sola
+    pasada de 300. Y el orden aguanta cuando la base crezca: lo pendiente
+    va delante sea cual sea el tamaño.
+    """
     try:
         filas = conn.execute(
             """SELECT address FROM wallets WHERE q_score IS NOT NULL
-               ORDER BY CASE WHEN wallet_stage IS NULL THEN 0 ELSE 1 END,
+               ORDER BY CASE WHEN wallet_stage IS NULL THEN 0
+                             WHEN COALESCE(is_tracked, 0) = 1
+                                  AND wallet_stage <> 'copiable' THEN 1
+                             WHEN COALESCE(is_tracked, 0) = 0
+                                  AND wallet_stage = 'copiable' THEN 1
+                             ELSE 2 END,
                         q_ts DESC LIMIT ?""", (int(limite),)).fetchall()
         return [f["address"] for f in filas]
     except Exception as _ex:
