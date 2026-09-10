@@ -43,9 +43,12 @@ bueno". Desde la fase 10, con el embudo al mando:
 - una `copiable` que no era ⭐ pasa a serlo (`ascender`), porque el bot
   solo vigila en tiempo real a las ⭐ y si nadie la escucha no puede
   generar ni una señal;
-- **no se degrada a nadie**: las ⭐ que no pasan conservan `is_tracked` y
-  su historial entero. Que no alerten lo decide el conjunto operativo, y
-  eso se revierte apagando el interruptor.
+- y desde la FASE 11 (10/09) una ⭐ ya juzgada que NO pasa las puertas
+  deja de ser ⭐ (`degradar`), porque re-perfilarla cada 3 dias costaba
+  ~7.500 creditos al dia en gente que el embudo ya habia descartado. No
+  se degrada a quien todavia no tiene etapa ni a quien tiene una posicion
+  de papel abierta. El historial NUNCA se borra: solo se apaga la
+  escucha.
 
 Sigue en pie la regla 55: esto NO mueve dinero real. Todo termina en
 señales y en paper trading.
@@ -280,6 +283,83 @@ def ascender(conn, wallet: str, veredicto: dict) -> bool:
         return False
 
 
+# etapas que NO justifican quitarle la ⭐ a nadie: `copiable` la merece, y
+# `sin_datos` significa que TODAVIA no se la ha juzgado.
+_NO_DEGRADABLES = ("copiable", "sin_datos")
+
+
+def degradar(conn, wallet: str, veredicto: dict) -> bool:
+    """(Fase 11, 10/09/2026) Con el embudo al mando, una ⭐ YA JUZGADA que
+    no pasa las tres puertas deja de ser ⭐.
+
+    POR QUE, y esto lo pidio el dueño con un motivo que resulto medible:
+    "no nos sirven de nada, es acumular y gastar creditos en nada".
+    Comprobado en su base el 10/09 — el bot re-perfila cada ⭐ cada 3 dias
+    (`REEVAL_DAYS`) a ~230 creditos de Helius cada una, y la cola de
+    re-perfilado estaba asi:
+
+        98 que NO pasan las puertas   ← ~7.500 creditos/dia
+        31 copiables
+        43 sin evaluar
+
+    O sea que el **70 % del presupuesto de perfilado** se iba en re-medir
+    a gente que el embudo ya habia descartado, y encima les quitaba el
+    turno a las candidatas nuevas de la caceria. Dejar de escucharlas no
+    es solo cosmetica: es la mayor fuga de creditos del sistema.
+
+    DOS EXCEPCIONES, y las dos importan
+    ------------------------------------
+    1. **`sin_datos` / sin etapa NO se degrada.** No ha sido juzgada
+       todavia; quitarle la ⭐ seria condenarla sin juicio, y encima el
+       perfilado es justo lo que le daria su etapa. Eran 44 el 10/09.
+    2. **Con una posicion de papel ABIERTA tampoco.** Si el bot deja de
+       escucharla no vera su venta, y esa posicion se quedaria colgada
+       hasta que la recojan TP/SL/tiempo con un precio peor. Eran 12.
+
+    LO QUE ESTO CUESTA, dicho claro
+    --------------------------------
+    Es casi definitivo. Al dejar de escucharla sus datos se congelan: sin
+    operaciones nuevas no puede mejorar su nota, asi que la puerta de
+    vuelta es estrecha — solo si la caceria vuelve a encontrarla por su
+    cuenta, o si `filtro_calidad.promocion` (que mira a TODA la base, no
+    solo a las ⭐) la re-promueve con lo que ya hay. El dueño lo sabe y
+    lo pidio asi.
+
+    El historial NO se borra: `signals`, `trades`, `appearances` y la
+    ficha se quedan enteros. Lo unico que se apaga es la escucha.
+    """
+    if not wallet or not veredicto:
+        return False
+    etapa = veredicto.get("wallet_stage")
+    if not etapa or etapa in _NO_DEGRADABLES:
+        return False
+    try:
+        abierta = conn.execute(
+            "SELECT 1 FROM paper_trades WHERE wallet = ? "
+            "AND status = 'abierta' LIMIT 1", (wallet,)).fetchone()
+        if abierta:
+            return False
+    except Exception as _ex:
+        # Si no se puede comprobar, NO se degrada: un fallo tiene que
+        # cerrar la puerta, no abrirla. Perder la venta de una posicion
+        # abierta cuesta dinero de verdad.
+        _avisar_ex("puertas:degradar:abiertas", _ex)
+        return False
+    motivo = (f" · 🚦 sin ⭐: no pasa las tres puertas ({etapa}): "
+              f"{veredicto.get('motivo', '')}")
+    try:
+        cur = conn.execute(
+            """UPDATE wallets SET is_tracked = 0, ai_follow = 0,
+                   confirmada = 0, prueba_desde = NULL, turno_desde = NULL,
+                   ai_reason = SUBSTR(COALESCE(ai_reason,'') || ?, 1, 500)
+               WHERE address = ? AND COALESCE(is_tracked, 0) = 1""",
+            (motivo, wallet))
+        return bool(cur.rowcount)
+    except Exception as _ex:
+        _avisar_ex("puertas:degradar", _ex)
+        return False
+
+
 # ── la pasada ────────────────────────────────────────────────────────
 
 def _a_evaluar(conn, limite: int) -> list[str]:
@@ -304,6 +384,7 @@ def revisar(limite: int | None = None) -> dict:
         cuenta = {e: 0 for e in ETAPAS}
         cambios = []
         ascendidas = []
+        degradadas = []
         _manda = manda(conn)
         for w in _a_evaluar(conn, limite):
             d = datos(conn, w)
@@ -315,12 +396,15 @@ def revisar(limite: int | None = None) -> dict:
                 if antes != v["wallet_stage"]:
                     cambios.append((w, antes, v["wallet_stage"],
                                     v["motivo"]))
-                if _manda and ascender(conn, w, v):
-                    ascendidas.append(w)
+                if _manda:
+                    if ascender(conn, w, v):
+                        ascendidas.append(w)
+                    elif degradar(conn, w, v):
+                        degradadas.append(w)
         conn.commit()
-        if ascendidas:
-            # El conjunto operativo se cachea 60 s: sin esto, las recien
-            # ascendidas no alertarian hasta que caducara la cache.
+        if ascendidas or degradadas:
+            # El conjunto operativo se cachea 60 s: sin esto, los cambios
+            # no se notarian hasta que caducara la cache.
             try:
                 from db import invalidar_copiables
                 invalidar_copiables()
@@ -344,6 +428,15 @@ def revisar(limite: int | None = None) -> dict:
                      "reason": "pasa las tres puertas: pasa a ⭐ para que "
                                "el bot la vigile en tiempo real"}
                     for w in ascendidas[:200]])
+            if degradadas:
+                registrar_lote(conn, [
+                    {"entity_type": "wallet", "entity_id": w,
+                     "stage": "puertas", "decision": "degradada",
+                     "reason": "no pasa las tres puertas: se deja de "
+                               "escuchar para no gastar créditos en "
+                               "re-perfilarla"}
+                    for w in degradadas[:200]])
+            if ascendidas or degradadas:
                 conn.commit()
         except Exception as _ex:
             _avisar_ex("puertas:revisar:eventos", _ex)
@@ -351,6 +444,7 @@ def revisar(limite: int | None = None) -> dict:
                                          cuenta.items() if v)
               + f" ({len(cambios)} cambios"
               + (f", {len(ascendidas)} ascendidas a ⭐" if ascendidas else "")
+              + (f", {len(degradadas)} sin ⭐" if degradadas else "")
               + ") · 0 créditos")
         return cuenta
     finally:
