@@ -17213,6 +17213,153 @@ def prueba_19bl():
                            "entity_id='ASCENSO' AND decision='ascendida'"
                            ).fetchone()["c"] >= 1)
 
+    # ── 6b-bis) DEGRADAR: la ⭐ juzgada que no pasa deja de escucharse ─
+    # (Fase 11) Pedido del dueño con motivo medido: re-perfilar cada 3 días
+    # a las que el embudo ya descartó se comía ~7.500 créditos/día.
+    for addr, etapa, tracked in (("DEG_MALA", "candidata", 1),
+                                 ("DEG_OBS", "observacion", 1),
+                                 ("DEG_SINJUZGAR", None, 1),
+                                 ("DEG_SINDATOS", "sin_datos", 1),
+                                 ("DEG_ABIERTA", "candidata", 1)):
+        conn.execute("DELETE FROM wallets WHERE address = ?", (addr,))
+        conn.execute(
+            "INSERT INTO wallets (address, is_tracked, ai_follow, "
+            "confirmada, is_bot, wallet_score, wallet_stage) "
+            "VALUES (?,?,1,1,0,80,?)", (addr, tracked, etapa))
+    conn.execute("DELETE FROM paper_trades WHERE wallet='DEG_ABIERTA'")
+    conn.execute(
+        "INSERT INTO paper_trades (signature, wallet, mint, status, "
+        "entry_ts) VALUES ('sigabierta','DEG_ABIERTA','Mab','abierta',?)",
+        (ahora,))
+    conn.commit()
+    _emb(1)
+    comprobar("la ⭐ que falla la puerta 2 pierde la estrella",
+              PU.degradar(conn, "DEG_MALA",
+                          {"wallet_stage": "candidata",
+                           "motivo": "no gana"}) is True)
+    comprobar("y la que falla la 3, también",
+              PU.degradar(conn, "DEG_OBS",
+                          {"wallet_stage": "observacion",
+                           "motivo": "mueve demasiado"}) is True)
+    conn.commit()
+    comprobar("de verdad dejan de ser ⭐ y de escucharse",
+              conn.execute("SELECT COUNT(*) c FROM wallets WHERE address IN "
+                           "('DEG_MALA','DEG_OBS') AND COALESCE(is_tracked,0)=1"
+                           ).fetchone()["c"] == 0)
+    comprobar("y queda escrito POR QUÉ, sin borrar la ficha anterior",
+              "no pasa las tres puertas" in (
+                  conn.execute("SELECT ai_reason r FROM wallets WHERE "
+                               "address='DEG_MALA'").fetchone()["r"] or ""))
+    comprobar("también se les quita ai_follow: si no, volverían solas en "
+              "la siguiente barrida (la lección de la 19-BM al revés)",
+              conn.execute("SELECT COALESCE(ai_follow,1) a FROM wallets "
+                           "WHERE address='DEG_MALA'").fetchone()["a"] == 0)
+    # Excepción 0, y la más importante: NUNCA a una copiable.
+    # En `revisar` el flujo es `if ascender(...) elif degradar(...)`, y
+    # `ascender` devuelve False cuando la billetera YA era ⭐ (no tocó
+    # ninguna fila). O sea que una copiable que ya tiene estrella cae en
+    # el `elif` y llega a `degradar` en cada pasada: si esta verja no
+    # estuviera, el embudo se comería justo a las que quiere conservar.
+    conn.execute("DELETE FROM wallets WHERE address='DEG_BUENA'")
+    conn.execute(
+        "INSERT INTO wallets (address, is_tracked, ai_follow, confirmada, "
+        "is_bot, wallet_score, wallet_stage) "
+        "VALUES ('DEG_BUENA',1,1,1,0,80,'copiable')")
+    conn.commit()
+    comprobar("degradar NUNCA toca a una copiable, ni llamándola a mano",
+              PU.degradar(conn, "DEG_BUENA",
+                          {"wallet_stage": "copiable",
+                           "motivo": "pasa las tres"}) is False)
+    conn.commit()
+    comprobar("y la copiable que ya era ⭐ sigue siéndolo tras una pasada "
+              "entera (es la que cae en el `elif` cada vez)",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DEG_BUENA'").fetchone()["t"] == 1)
+
+    # Excepción 1: sin juzgar
+    comprobar("la que TODAVÍA no tiene etapa NO se degrada: sería "
+              "condenarla sin juicio",
+              PU.degradar(conn, "DEG_SINJUZGAR", {"wallet_stage": None})
+              is False)
+    comprobar("y `sin_datos` tampoco, que significa lo mismo",
+              PU.degradar(conn, "DEG_SINDATOS",
+                          {"wallet_stage": "sin_datos"}) is False)
+    conn.commit()
+    comprobar("las dos conservan su ⭐",
+              conn.execute("SELECT COUNT(*) c FROM wallets WHERE address IN "
+                           "('DEG_SINJUZGAR','DEG_SINDATOS') AND "
+                           "COALESCE(is_tracked,0)=1").fetchone()["c"] == 2)
+    # Excepción 2: posición de papel abierta
+    comprobar("la que tiene una posición de papel ABIERTA no se suelta: "
+              "sin escucharla no veríamos su venta",
+              PU.degradar(conn, "DEG_ABIERTA",
+                          {"wallet_stage": "candidata",
+                           "motivo": "no gana"}) is False)
+    conn.commit()
+    comprobar("y sigue siendo ⭐ mientras la posición viva",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DEG_ABIERTA'").fetchone()["t"] == 1)
+    # Y si NO se puede comprobar si tiene posiciones abiertas, tampoco se
+    # degrada: un fallo tiene que cerrar la puerta, no abrirla. Perder la
+    # venta de una posición viva cuesta dinero de verdad.
+    class _ConnRota:
+        def __init__(self, real): self._r = real
+        def execute(self, sql, *a, **k):
+            if "paper_trades" in sql:
+                raise RuntimeError("base caída")
+            return self._r.execute(sql, *a, **k)
+        def __getattr__(self, n): return getattr(self._r, n)
+    comprobar("si no se puede mirar si tiene posiciones abiertas, NO se "
+              "degrada: el fallo cierra la puerta, nunca la abre",
+              PU.degradar(_ConnRota(conn), "DEG_ABIERTA",
+                          {"wallet_stage": "candidata",
+                           "motivo": "no gana"}) is False)
+    conn.commit()
+    comprobar("y sigue con su ⭐ intacta",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DEG_ABIERTA'").fetchone()["t"] == 1)
+    conn.execute("UPDATE paper_trades SET status='cerrada' "
+                 "WHERE wallet='DEG_ABIERTA'")
+    conn.commit()
+    comprobar("cerrada la posición, ya sí se puede soltar",
+              PU.degradar(conn, "DEG_ABIERTA",
+                          {"wallet_stage": "candidata",
+                           "motivo": "no gana"}) is True)
+    # Con el embudo apagado no degrada nadie (lo comprueba LA PASADA).
+    # OJO: hace falta `q_score`, porque `_a_evaluar` solo mira a las que
+    # tienen nota. Sin él la billetera ni se evaluaba y la prueba pasaba
+    # sin comprobar nada — así se escapó una mutación.
+    conn.execute("UPDATE wallets SET is_tracked=1, ai_follow=1, q_score=50, "
+                 "hold_median_h=NULL WHERE address='DEG_MALA'")
+    conn.commit()
+    _v_mala = PU.evaluar(PU.datos(conn, "DEG_MALA"))
+    comprobar("montaje: DEG_MALA sí se evalúa y su etapa es degradable",
+              _v_mala["wallet_stage"] not in ("copiable", "sin_datos"),
+              _v_mala["wallet_stage"])
+    _emb(0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        PU.revisar(400)
+    conn.commit()
+    comprobar("con el embudo APAGADO la pasada NO degrada a nadie",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DEG_MALA'").fetchone()["t"] == 1)
+    _emb(1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        PU.revisar(400)
+    conn.commit()
+    comprobar("y ENCENDIDO la misma pasada sí se la quita",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='DEG_MALA'").fetchone()["t"] == 0)
+    comprobar("dejando escrita la degradación, para poder discutirla",
+              conn.execute("SELECT COUNT(*) c FROM analysis_events WHERE "
+                           "entity_id='DEG_MALA' AND decision='degradada'"
+                           ).fetchone()["c"] >= 1)
+    for a_ in ("DEG_MALA", "DEG_OBS", "DEG_SINJUZGAR", "DEG_SINDATOS",
+               "DEG_ABIERTA", "DEG_BUENA"):
+        conn.execute("DELETE FROM wallets WHERE address = ?", (a_,))
+    conn.execute("DELETE FROM paper_trades WHERE wallet='DEG_ABIERTA'")
+    conn.commit()
+
     # ── 6c) El retiro por inactividad NO se lleva a las copiables ────
     # (19-BM) Segundo choque entre el embudo viejo y el nuevo: el retiro
     # jubila a la ⭐ que lleva 14 días sin operar, y las copiables operan
@@ -17438,10 +17585,15 @@ def prueba_19bj():
               "SET score" not in _pu
               and "import paper_trading" not in _pu
               and "from paper_trading" not in _pu)
-    comprobar("y NO degrada: nunca escribe is_tracked = 0",
-              "is_tracked = 0" not in _pu and "is_tracked=0" not in _pu)
-    comprobar("solo escribe wallet_stage e is_tracked = 1, nada mas",
-              _pu.count("UPDATE wallets SET") == 2
+    # (Fase 11) Ya NO se pide que nunca degrade: el dueño lo pidió al
+    # medir que re-perfilar a las descartadas se comía el 70 % del
+    # presupuesto. Lo que se exige es que degrade SOLO a las juzgadas y
+    # que no toque el dinero.
+    comprobar("degrada, pero por una sola vía y con motivo escrito",
+              _pu.count("is_tracked = 0") == 1
+              and "no pasa las tres puertas" in _pu)
+    comprobar("tres escrituras y ni una mas: etapa, ascenso y degradacion",
+              _pu.count("UPDATE wallets SET") == 3
               and "SET wallet_stage" in _pu
               and "SET is_tracked = 1" in _pu)
     _e = _cfg.EMBUDO_V2_ACTIVO
