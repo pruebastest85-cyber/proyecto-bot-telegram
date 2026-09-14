@@ -617,7 +617,15 @@ def _c_ia_local(conn):
     """¿Responde la IA local? Ahora es la pieza critica: sin nube con
     creditos, si esto se cae el sistema se queda sin IA."""
     try:
-        from decision_ia import _url, _modelo
+        from decision_ia import _url, _modelo, conectada
+        # (19-BQ) Desconectada A PROPOSITO no es una averia: avisar de
+        # ella seria ruido que tapa los avisos de verdad. Y va ANTES de
+        # `_url`, que ya devuelve None en ese caso: sin esto el chequeo
+        # diria "sin URL configurada", que es mentira.
+        if not conectada(conn):
+            return _chk("IA local", OK,
+                        "desconectada por el dueño · `/ialocal conectar` "
+                        "para volver")
         url = _url(conn)
         if not url:
             return _chk("IA local", WARN, "sin URL configurada",
@@ -668,6 +676,18 @@ def _c_apis():
     except Exception as _ex:
         _avisar_ex("salud:_c_apis:658", _ex)
         ia_ok = not sin_nube
+    # (19-BQ) Si el dueño desconectó la local y no hay nube, "sin IA" es
+    # exactamente lo que pidió: se informa, no se avisa.
+    try:
+        from decision_ia import conectada as _conectada
+        _desconectada = not _conectada()
+    except Exception as _ex:
+        _avisar_ex("salud:_c_apis:conectada", _ex)
+        _desconectada = False
+    if not ia_ok and _desconectada:
+        return _chk("Claves API", OK,
+                    "todas presentes · sin IA (local desconectada por el "
+                    "dueño, sin nube)")
     if not ia_ok:
         return _chk("Claves API", WARN, "sin IA disponible (ni local ni nube)",
                     "configura /ialocal <url> o una clave de la nube")

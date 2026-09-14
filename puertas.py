@@ -19,11 +19,46 @@ LAS TRES, EN LAS PALABRAS DEL DUEÑO
    que cuando nuestra alerta llegue ya se haya ido. Da igual lo bien que
    opere: si no se le puede seguir, no sirve.
 2. **¿Gana de verdad?** Con material suficiente para saberlo (no una
-   operacion con suerte), multiplo tipico por encima de 1 y mas aciertos
-   que fallos.
-3. **¿Es la estrategia que quiero?** Aguanta mas de un dia y lo hace con
-   POCO capital. Esta es la puerta que separa lo que el dueño busca de lo
-   que el embudo viejo encontraba.
+   operacion con suerte), multiplo tipico por encima de 1, HABER PEGADO
+   ALGUNA VEZ UN x10, y ganar mas SOL de los que pierde.
+3. **¿Es la estrategia que quiero?** Aguanta al menos unas horas y mueve
+   entre 1 y 100 SOL por operacion.
+
+QUE CAMBIO EL 14/09 Y POR QUE (19-BS)
+--------------------------------------
+El embudo se quedo mudo: 0 alertas en 4 dias, 6 billeteras con permiso
+para alertar de 34.131 en la base. La auditoria de ese dia encontro que
+el 79 % de la actividad venia de billeteras que el embudo no podia
+juzgar, y que las `copiable` producian 31 señales en 4 dias entre 5.
+
+El dueño reescribio el criterio, y lo medido le da la razon:
+
+  criterio viejo (0,5-5 SOL · 24 h · acierta >=50 %) →  47 billeteras, 10 activas
+  criterio nuevo (1-100 SOL · algun x10 · PF >=2 · 5 h) → 59 billeteras, 14 activas
+
+Los tres cambios, con sus palabras:
+
+· **Capital 1-100 SOL** (antes 0,5-5). "No poner un minimo de inversion
+  de 1 solana y el maximo de inversion 100 solanas". La banda vieja daba
+  por hecho que solo multiplica quien entra con poco; dejaba fuera
+  billeteras con x231 y x145 medidos que mueven 12 o 20 SOL.
+
+· **Algun x10** (nuevo). "Que hayan obtenido buenas ganancias, se hayan
+  marcado minimo un x10". En memecoins lo que paga es el pelotazo, no
+  ganar poquito muchas veces.
+
+· **Cuanto gana, no cuantas veces acierta.** "Si gano 3 y perdio 6 pero
+  en esas 3 que gano se marco un x30, es muy rentable la billetera".
+  Medido: 51 billeteras aciertan menos veces de las que fallan y aun asi
+  tienen un x20 dentro y ganan de sobra. El winrate las echaba a todas.
+  Ahora manda el profit factor y el winrate queda APAGADO de fabrica
+  (`PUERTA_MIN_CONSISTENCIA = 0`), encendible sin desplegar.
+
+Se retiro ademas la puerta doble de aguante de la 19-BP, que nunca llego
+a subirse: medida sobre la base del dueño se llevaba 2 de las 4
+copiables que de verdad operaban, una de ellas por seis segundos (29,9
+min contra un minimo de 30). Apretar un embudo ahogado iba en direccion
+contraria.
 
 ETAPAS
 ------
@@ -63,12 +98,14 @@ DE DONDE SALEN LOS UMBRALES
 ---------------------------
 De lo medido en la base, no de mi cabeza — y cada uno se puede mover por
 configuracion:
-- El capital tipico se compara con la banda de la fase 8 (0,5-5 SOL), que
-  salio de las 2.555 posiciones medidas: por debajo de medio SOL solo el
-  37 % acaba en ganancia, y por encima de 30 el multiplo tipico se cae a
-  x2,6.
-- "Aguantar" es HOLD_MIN_HOURS (24 h), el criterio que el dueño puso por
-  escrito.
+- El capital tipico se compara con la banda que fijo el dueño el 14/09:
+  DESCUBRIMIENTO_MIN_SOL (1) a DESCUBRIMIENTO_MAX_SOL (100).
+- "Aguantar" es PUERTA_MIN_HOLD_H (5 h). OJO: NO es `HOLD_MIN_HOURS`,
+  que sigue en 24 h y define `q_hold` en `wallet_quality`. Son dos cosas
+  distintas a proposito: mover la puerta no debe cambiar la NOTA de
+  todas las billeteras de la base.
+- El pelotazo minimo es PUERTA_MIN_MULT_MAX (x10) y el factor de
+  ganancia minimo PUERTA_MIN_PF (2).
 - El minimo de posiciones medidas es el mismo de la fase 6 (3): con una
   sola operacion no se distingue el acierto de la suerte.
 """
@@ -122,39 +159,90 @@ def puerta2(d: dict) -> tuple:
     mult = d.get("mult_realizado")
     if mult is None:
         return (False, "sin múltiplo medido")
-    if mult <= _f("PUERTA_MIN_MULTIPLO", 1.0):
+    # (19-BS) Apagado de fabrica: ver la nota de PUERTA_MIN_MULTIPLO en
+    # config. Exigir que la operacion TIPICA gane es el winrate con otro
+    # nombre, y echaba a 41 billeteras con un x10 dentro que ganan mas de
+    # lo que pierden.
+    _minm = _f("PUERTA_MIN_MULTIPLO", 0.0)
+    if _minm > 0 and mult <= _minm:
         return (False, f"su operación típica es x{mult:.2f}: no gana")
+    # (19-BS) EL GOLPE GORDO. Palabras del dueño: "que se hayan marcado
+    # mínimo un x10". No basta con ganar poquito muchas veces: lo que
+    # paga en memecoins es haber acertado un pelotazo alguna vez.
+    mejor = d.get("mejor_multiplo")
+    minx = _f("PUERTA_MIN_MULT_MAX", 10.0)
+    if mejor is None:
+        return (False, "sin ninguna operación medida de punta a punta")
+    if mejor < minx:
+        return (False, f"su mejor operación fue x{mejor:.1f}: nunca ha "
+                       f"pegado un x{minx:.0f}")
+    # (19-BS) CUÁNTO gana por cada SOL que pierde, en vez de CUÁNTAS
+    # veces acierta. Textual del dueño: "si ganó 3 y perdió 6 pero en
+    # esas 3 que ganó se marcó un x30 de su inversión inicial, es muy
+    # rentable la billetera". Medido en su base el 14/09: 51 billeteras
+    # aciertan menos veces de las que fallan y aun asi tienen un x20
+    # dentro y ganan de sobra. El filtro del winrate las echaba a todas.
+    pf = d.get("profit_factor")
+    minpf = _f("PUERTA_MIN_PF", 2.0)
+    if pf is None:
+        return (False, "sin operaciones cerradas para medir cuánto gana "
+                       "por cada SOL que pierde")
+    if pf < minpf:
+        return (False, f"gana {pf:.2f} SOL por cada SOL que pierde "
+                       f"(mínimo {minpf:g}): sus aciertos no compensan "
+                       f"sus fallos")
+    # El winrate deja de ser una puerta y pasa a ser un ajuste OPCIONAL,
+    # apagado de fabrica (0). Mismo patron que `FILTRO_PF_MIN` en la
+    # 19-N: el codigo se queda, la exigencia no, y encenderla es una
+    # decision del dueño y no un despliegue.
     cons = d.get("q_consistency")
-    minc = _f("PUERTA_MIN_CONSISTENCIA", 50.0)
-    if cons is None:
-        return (False, "sin medida de cuántas veces acierta")
-    if cons < minc:
-        return (False, f"acierta el {cons:.0f} % de las veces, menos de "
-                       f"{minc:.0f} %")
-    return (True, f"x{mult:.2f} típico acertando el {cons:.0f} % en "
-                  f"{n} operaciones")
+    minc = _f("PUERTA_MIN_CONSISTENCIA", 0.0)
+    if minc > 0:
+        if cons is None:
+            return (False, "sin medida de cuántas veces acierta")
+        if cons < minc:
+            return (False, f"acierta el {cons:.0f} % de las veces, menos "
+                           f"de {minc:.0f} %")
+    return (True, f"mejor golpe x{mejor:.0f} · gana {pf:.1f} SOL por cada "
+                  f"SOL que pierde · x{mult:.2f} típico en {n} operaciones")
 
 
 def puerta3(d: dict) -> tuple:
     """¿Es la estrategia que el dueño quiere? (bool, motivo)"""
     h = d.get("hold_median_h")
-    hold_h = _f("HOLD_MIN_HOURS", 24.0)
+    # (19-BS) La puerta tiene su PROPIO minimo (5 h, elegido por el dueño
+    # el 14/09) y ya NO reutiliza `HOLD_MIN_HOURS`. Ese ajuste sigue
+    # valiendo 24 h porque define `q_hold` en `wallet_quality` —"que
+    # parte de sus posiciones aguanto mas de X"— y moverlo habria
+    # cambiado la NOTA de todas las billeteras de la base como efecto
+    # colateral de tocar una puerta. Dos cosas distintas, dos ajustes.
+    #
+    # Por que 5 h y no 24: medido sobre la base del dueño, exigir 24 h
+    # dejaba 32 billeteras (11 activas) de las 110 que cumplen el resto;
+    # con 5 h son 59 (14 activas). Y por debajo de 1 h entran los que
+    # entran y salen en segundos, que no se pueden copiar.
+    hold_h = _f("PUERTA_MIN_HOLD_H", 5.0)
     if h is None or h < hold_h:
         if h is None:
             return (False, "no se sabe cuánto aguanta")
-        return (False, f"aguanta {h:.1f} h de media, menos del día que "
-                       f"pides")
+        return (False, f"aguanta {h:.1f} h de media, menos de las "
+                       f"{hold_h:g} h que pides")
     cap = d.get("capital_tipico")
-    lo = _f("DESCUBRIMIENTO_MIN_SOL", 0.5)
-    hi = _f("DESCUBRIMIENTO_MAX_SOL", 5.0)
+    # (19-BS) Banda 1-100 SOL (antes 0,5-5). El dueño, textual: "no poner
+    # un minimo de inversion de 1 solana y el maximo de inversion 100
+    # solanas". La banda vieja daba por hecho que solo multiplica quien
+    # entra con poco, y eso dejaba fuera a billeteras con x100 y x200
+    # medidos que mueven 12, 20 o 35 SOL por operacion.
+    lo = _f("DESCUBRIMIENTO_MIN_SOL", 1.0)
+    hi = _f("DESCUBRIMIENTO_MAX_SOL", 100.0)
     if cap is None:
         return (False, "no se sabe con cuánto capital opera")
     if cap > hi:
-        return (False, f"mueve {cap:.1f} SOL por operación: gana a menudo "
-                       f"pero multiplica poco")
+        return (False, f"mueve {cap:.1f} SOL por operación, más de los "
+                       f"{hi:g} que pides")
     if cap < lo:
-        return (False, f"mueve {cap:.2f} SOL por operación: con tan poco, "
-                       f"el múltiplo no significa nada")
+        return (False, f"mueve {cap:.2f} SOL por operación: con menos de "
+                       f"{lo:g} SOL el múltiplo no significa nada")
     return (True, f"aguanta {h:.0f} h con {cap:.1f} SOL típicos")
 
 
@@ -198,16 +286,40 @@ def datos(conn, wallet: str) -> dict | None:
                            "mult_realizado": None, "estrategia": None,
                            "wallet_stage": None, "is_tracked": 0}
     try:
+        # (19-BS) En la MISMA consulta salen el mejor golpe y el factor de
+        # ganancia. `MAX(sol_out/sol_in)` con la guarda `sol_in > 0` para
+        # no dividir por cero; las dos sumas son las dos patas del factor.
         r = conn.execute(
-            """SELECT COUNT(*) n, AVG(sol_in) cap FROM wallet_positions
+            """SELECT COUNT(*) n, AVG(sol_in) cap,
+                      MAX(CASE WHEN sol_in > 0 THEN sol_out / sol_in END)
+                          AS mejor,
+                      SUM(CASE WHEN sol_out > sol_in
+                               THEN sol_out - sol_in ELSE 0 END) AS gana,
+                      SUM(CASE WHEN sol_out <= sol_in
+                               THEN sol_in - sol_out ELSE 0 END) AS pierde
+               FROM wallet_positions
                WHERE wallet = ? AND history_complete = 1
                  AND position_status = 'cerrada'""", (wallet,)).fetchone()
         d["posiciones"] = int(r["n"] or 0)
         d["capital_tipico"] = r["cap"]
+        d["mejor_multiplo"] = r["mejor"]
+        _g, _p = float(r["gana"] or 0.0), float(r["pierde"] or 0.0)
+        if _p > 0:
+            d["profit_factor"] = _g / _p
+        elif _g > 0:
+            # Sin una sola perdida. Se usa el mismo tope simbolico que
+            # `wallet_metrics` y `filtro_calidad` (99.99) en vez de un
+            # infinito inventado; la puerta de `posiciones` va delante y
+            # evita que tres operaciones con suerte parezcan un genio.
+            d["profit_factor"] = 99.99
+        else:
+            d["profit_factor"] = None
     except Exception as _ex:
         _avisar_ex("puertas:datos:posiciones", _ex)
         d["posiciones"] = 0
         d["capital_tipico"] = None
+        d["mejor_multiplo"] = None
+        d["profit_factor"] = None
     return d
 
 
@@ -394,10 +506,43 @@ def _a_evaluar(conn, limite: int) -> list[str]:
     Con las ~88 acciones pendientes que habia caben de sobra en una sola
     pasada de 300. Y el orden aguanta cuando la base crezca: lo pendiente
     va delante sea cual sea el tamaño.
+
+    (19-BR, 11/09) El WHERE ya no es solo `q_score IS NOT NULL`. Ese
+    filtro dejaba fuera PARA SIEMPRE a un grupo que el dueño veia en
+    pantalla y no entendia. MEDIDO en su base el 11/09:
+
+        98 ⭐ · 47 copiable · 4 observacion · 3 candidata
+        44 SIN ETAPA — y las 44 con q_score NULL
+
+    No era que les faltara la pasada: `wallet_quality.calcular` devuelve
+    None por debajo de CALIDAD_MIN_POSICIONES (3) posiciones cerradas y
+    completas, y NINGUNA de las 44 llegaba a 3. Sin nota nunca entraban
+    aqui, sin entrar nunca recibian etapa, y sin etapa `degradar` no las
+    tocaba (`_NO_DEGRADABLES` protege a la que no tiene etiqueta). ⭐
+    eterna: no alertaban ni se copiaban —el conjunto operativo exige
+    `copiable`— pero 37 de las 44 seguian entrando en la cola de
+    re-perfilado de `ai_analyst` cada REEVAL_DAYS (3) dias, gastando
+    creditos de Helius en billeteras que no podian llegar a copiable.
+
+    Decision del dueño (11/09), con el numero delante: que entren y se
+    resuelvan. Las que no se pueden medir fallan la puerta 1 ("no se
+    sabe cuanto aguanta") y pierden la ⭐. No se pierde nada: el
+    historial queda, y si algun dia reunen sus 3 posiciones el embudo
+    puede volver a subirlas.
+
+    La condicion es "o tiene nota, o lleva ⭐". Acotarla a "⭐ SIN ETAPA"
+    era lo primero que escribi y esta MAL: en cuanto la primera pasada le
+    pone `descartada`, la billetera deja de cumplirla y —sin nota— vuelve
+    a ser invisible, con su estrella intacta. Lo cazo la prueba de la
+    pasada completa, no la de la funcion. Quien lleva estrella puesta
+    tiene que poder ser mirado SIEMPRE; y como las ⭐ se cuentan por
+    decenas, no hay riesgo de inundar el LIMIT.
     """
     try:
         filas = conn.execute(
-            """SELECT address FROM wallets WHERE q_score IS NOT NULL
+            """SELECT address FROM wallets
+               WHERE q_score IS NOT NULL
+                  OR COALESCE(is_tracked, 0) = 1
                ORDER BY CASE WHEN wallet_stage IS NULL THEN 0
                              WHEN COALESCE(is_tracked, 0) = 1
                                   AND wallet_stage <> 'copiable' THEN 1

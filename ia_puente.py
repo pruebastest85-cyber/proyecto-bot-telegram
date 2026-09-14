@@ -399,8 +399,18 @@ def hay_ia() -> bool:
     con completar(): en modo "local" la clave de nube no cuenta, y en
     modo "nube" lo local solo cuenta como respaldo."""
     orden = str(_setting("ia_proveedor", "local_primero") or "local_primero")
-    local_ok = bool(os.getenv("LOCAL_AI_URL", "")
-                    or _setting("local_ai_url", ""))
+    # (19-BQ) Con la IA local DESCONECTADA por el dueño, lo local no
+    # cuenta aunque la URL siga escrita: si no, `hay_ia()` decia que si y
+    # los que preguntan antes de llamar (realtime, salud) se iban a pedir
+    # un texto que nunca iba a llegar.
+    try:
+        from decision_ia import conectada as _conectada
+        _local_on = _conectada()
+    except Exception as _ex:
+        _avisar_ex("ia_puente:hay_ia:conectada", _ex)
+        _local_on = True
+    local_ok = bool(_local_on and (os.getenv("LOCAL_AI_URL", "")
+                                   or _setting("local_ai_url", "")))
     nube_ok = bool(os.getenv("ANTHROPIC_API_KEY", ""))
     if orden == "local":
         return local_ok

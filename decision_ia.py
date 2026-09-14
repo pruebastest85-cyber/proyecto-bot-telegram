@@ -36,7 +36,58 @@ MAX_HOLD_MIN = 120    # tope duro al hold que la IA puede pedir
 MIN_HOLD_MIN = 5
 
 
+def conectada(conn=None) -> bool:
+    """¿Esta el bot conectado a la IA local? (19-BQ, 11/09/2026)
+
+    El dueño: "desconecta la IA local del bot, no quiero que use Qwen
+    aunque este montado en LM Studio". Hasta ahora no habia forma de
+    hacerlo desde Telegram: `/ialocal off` solo apaga el A/B de salidas
+    (`ia_local_activa`); el analista y el chat seguian llamando al
+    modelo, y `ia_proveedor nube` CAE a la local como respaldo. La unica
+    via era vaciar `LOCAL_AI_URL` del entorno Y el ajuste `local_ai_url`,
+    en dos sitios distintos y con reinicio.
+
+    Este es el interruptor de verdad, y vive aqui porque `_url()` es el
+    unico sitio por el que pasan TODOS los caminos al modelo: el puente
+    (`ia_puente._local`), el chat con herramientas (`ai_agent`) y el
+    chequeo de `/salud`. Apagarlo aqui los apaga a los tres.
+
+    Mismo patron que `db.embudo_manda`: manda el ajuste de la base (lo
+    escribe `/ialocal desconectar`, sin desplegar) y si no se puede leer
+    se cae a `config.IA_LOCAL_CONECTADA`. De fabrica viene conectada:
+    desplegar esto no le cambia el comportamiento a nadie.
+    """
+    v = None
+    try:
+        from db import get_setting
+        if conn is not None:
+            v = get_setting(conn, "ia_local_conectada", None)
+        else:
+            from db import get_conn
+            c = get_conn()
+            try:
+                v = get_setting(c, "ia_local_conectada", None)
+            finally:
+                c.close()
+    except Exception as _ex:
+        _avisar_ex("decision_ia:conectada", _ex)
+        v = None
+    if v is not None:
+        return str(v).strip() in ("1", "1.0", "true", "True", "si", "sí")
+    try:
+        import config as _c
+        return bool(int(getattr(_c, "IA_LOCAL_CONECTADA", 1)))
+    except (TypeError, ValueError) as _ex:
+        _avisar_ex("decision_ia:conectada:config", _ex)
+        return True
+
+
 def _url(conn) -> str | None:
+    # (19-BQ) El interruptor va PRIMERO, antes incluso del entorno: si
+    # fuera despues, `LOCAL_AI_URL` de bot_local.env seguiria ganando y
+    # el bot hablaria con Qwen igual.
+    if not conectada(conn):
+        return None
     u = os.getenv("LOCAL_AI_URL", "").strip()
     if not u:
         try:

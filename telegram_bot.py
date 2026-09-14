@@ -3673,7 +3673,35 @@ async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     set_setting(conn, "ia_local_activa", 0)
                     return ("🤖 IA local APAGADA: todo vuelve a reglas, "
                             "también en las posiciones que ya estaban "
-                            "abiertas (19-C).")
+                            "abiertas (19-C).\n"
+                            "⚠️ Esto solo apaga las SALIDAS. El analista "
+                            "y el chat siguen hablando con el modelo: "
+                            "para cortarlo del todo, "
+                            "`/ialocal desconectar`.")
+                # (19-BQ) Desconectar DE VERDAD: ningún camino del bot
+                # vuelve a llamar al modelo local (analista, chat con
+                # herramientas y el chequeo de /salud incluidos), aunque
+                # LM Studio tenga Qwen cargado y `LOCAL_AI_URL` siga
+                # puesta en bot_local.env.
+                if a.lower() in ("desconectar", "desconecta"):
+                    set_setting(conn, "ia_local_conectada", 0)
+                    set_setting(conn, "ia_local_activa", 0)
+                    return ("🔌 IA local DESCONECTADA del bot.\n"
+                            "Ningún camino vuelve a llamar a Qwen: ni el "
+                            "analista, ni el chat, ni /salud. Da igual "
+                            "que LM Studio lo tenga cargado.\n"
+                            "Sigue igual: alertas, embudo, señales y "
+                            "paper trading — todo eso son reglas y "
+                            "medidas, sin IA.\n"
+                            "Pierdes: el chat libre conmigo por "
+                            "Telegram.\n"
+                            "Volver: `/ialocal conectar`")
+                if a.lower() in ("conectar", "conecta"):
+                    set_setting(conn, "ia_local_conectada", 1)
+                    return ("🔌 IA local RECONECTADA: el analista y el "
+                            "chat vuelven a usarla.\n"
+                            "Las salidas del paper van aparte: eso es "
+                            "`/ialocal on`.")
                 if a.lower() == "proveedor":
                     if len(args) > 1 and args[1].lower() in (
                             "local", "nube", "local_primero"):
@@ -3720,14 +3748,25 @@ async def cmd_ialocal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             "enciendo yo por cambiar una URL). "
                             "Encenderlo: `/ialocal on`")
                 return ("Uso: /ialocal <url> · /ialocal on · "
-                        "/ialocal off")
+                        "/ialocal off · /ialocal desconectar · "
+                        "/ialocal conectar")
             activa = get_setting(conn, "ia_local_activa", "0")
             url = get_setting(conn, "local_ai_url", "") or "(sin URL)"
             estado = "🟢 encendida" if str(activa) in ("1", "1.0") \
                 else "🔴 apagada"
-            return (f"🤖 IA local: {estado}\nURL: {url}\n"
+            # (19-BQ) La conexión se enseña PRIMERO porque manda sobre
+            # todo lo demás: desconectada, da igual lo que digan las
+            # otras dos líneas.
+            from decision_ia import conectada as _conectada
+            if not _conectada(conn):
+                return ("🔌 IA local: *DESCONECTADA del bot*\n"
+                        "Ningún camino llama a Qwen, esté o no cargado "
+                        f"en LM Studio.\nURL guardada: {url} (sin uso)\n"
+                        "Reconectar: `/ialocal conectar`")
+            return (f"🔌 IA local: conectada\n"
+                    f"🤖 Gestión de salidas (A/B): {estado}\nURL: {url}\n"
                     "Cambiar: /ialocal <url> · /ialocal on · "
-                    "/ialocal off")
+                    "/ialocal off · /ialocal desconectar")
         finally:
             conn.close()
 

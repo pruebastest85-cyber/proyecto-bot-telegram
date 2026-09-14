@@ -325,6 +325,19 @@ SURVIVAL_MIN_VOL24_USD = _int("SURVIVAL_MIN_VOL24_USD", 25_000)
 # Cuanto puede haber caido desde su maximo sin considerarlo muerto.
 SURVIVAL_MIN_PCT_ATH = _float("SURVIVAL_MIN_PCT_ATH", 10.0)
 
+# ── IA local (LM Studio en el PC del dueño) ──────────────────────────
+# (19-BQ, 11/09/2026) Interruptor MAESTRO: con esto en 0 el bot no habla
+# con el modelo local por NINGUN camino (puente, chat con herramientas,
+# chequeo de /salud), aunque LM Studio tenga Qwen cargado y aunque
+# `LOCAL_AI_URL` siga puesta en bot_local.env. Lo aplica
+# `decision_ia.conectada()`, y manda sobre esto el ajuste
+# `ia_local_conectada` de la base (lo escribe `/ialocal desconectar`,
+# sin desplegar). De fabrica CONECTADA: desplegar no cambia nada.
+#
+# No confundir con `ia_local_activa`, que es mas estrecho: ese solo
+# decide si la IA gestiona las salidas del paper (el A/B).
+IA_LOCAL_CONECTADA = _int("IA_LOCAL_CONECTADA", 1)
+
 # ── Holder (lo que el dueño busca) ────────────────────────────────────
 # Vara principal: mantener la posicion mas de un dia.
 HOLD_MIN_HOURS = _float("HOLD_MIN_HOURS", 24.0)
@@ -443,8 +456,14 @@ DESCUBRIMIENTO_ACTIVO = _int("DESCUBRIMIENTO_ACTIVO", 1)
 # (percentil 90 en x8,5, uno de cada cuatro pasa de x3); por encima de
 # 30 SOL se gana a menudo pero se multiplica x2,6, que es lo contrario
 # de lo que se busca.
-DESCUBRIMIENTO_MIN_SOL = _float("DESCUBRIMIENTO_MIN_SOL", 0.5)
-DESCUBRIMIENTO_MAX_SOL = _float("DESCUBRIMIENTO_MAX_SOL", 5.0)
+# (19-BS, 14/09/2026) La banda pasa de 0,5-5 a 1-100 por decision del
+# dueño: "no poner un minimo de inversion de 1 solana y el maximo de
+# inversion 100 solanas". El parrafo de arriba sigue siendo cierto sobre
+# los PROMEDIOS, pero promediar escondia lo que el dueño busca: entre las
+# que mueven 12, 20 y 35 SOL por operacion hay billeteras con x231, x145
+# y x103 medidos, y la banda vieja las tiraba a la basura sin mirarlas.
+DESCUBRIMIENTO_MIN_SOL = _float("DESCUBRIMIENTO_MIN_SOL", 1.0)
+DESCUBRIMIENTO_MAX_SOL = _float("DESCUBRIMIENTO_MAX_SOL", 100.0)
 # El PUNTO DULCE dentro de la banda, que es por donde se ordenan las
 # candidatas. No es el minimo: la primera caceria real saco 30 candidatas
 # todas entre 0,50 y 0,77 SOL porque se ordenaba por "la mas pequeña", y
@@ -475,10 +494,32 @@ PUERTAS_POR_PASADA = _int("PUERTAS_POR_PASADA", 300)
 # se habra ido. No es el criterio de "aguantar" (ese es HOLD_MIN_HOURS y
 # vive en la puerta 3): es el minimo para que copiarla sea POSIBLE.
 PUERTA_MIN_HOLD_COPIABLE_H = _float("PUERTA_MIN_HOLD_COPIABLE_H", 1.0)
-# Puerta 2: multiplo tipico por encima de 1 (o sea, que gane) y mas
-# aciertos que fallos.
-PUERTA_MIN_MULTIPLO = _float("PUERTA_MIN_MULTIPLO", 1.0)
-PUERTA_MIN_CONSISTENCIA = _float("PUERTA_MIN_CONSISTENCIA", 50.0)
+# Puerta 2: multiplo tipico por encima de 1 (o sea, que gane), haber
+# pegado alguna vez un x10, y ganar mas SOL de los que pierde.
+# (19-BS) APAGADO (0). Exigir que la operacion TIPICA pase de x1 es el
+# winrate disfrazado: quien gana 3 y pierde 6 tiene una perdida por
+# mediana AUNQUE sea muy rentable, que es justo el perfil que el dueño
+# quiere copiar. Medido el 14/09: 167 billeteras caian aqui y 41 de
+# ellas tenian un x10 dentro y ganaban mas de lo que perdian. Con el x10
+# y el profit factor delante, esta puerta solo estorbaba.
+PUERTA_MIN_MULTIPLO = _float("PUERTA_MIN_MULTIPLO", 0.0)
+# (19-BS) El pelotazo minimo. "Que se hayan marcado minimo un x10".
+PUERTA_MIN_MULT_MAX = _float("PUERTA_MIN_MULT_MAX", 10.0)
+# (19-BS) SOL ganados por cada SOL perdido. Sustituye al winrate como
+# puerta: "si gano 3 y perdio 6 pero en esas 3 se marco un x30, es muy
+# rentable la billetera".
+PUERTA_MIN_PF = _float("PUERTA_MIN_PF", 2.0)
+# (19-BS) El winrate queda APAGADO de fabrica (0 = no se exige), igual
+# que FILTRO_PF_MIN en la 19-N: el codigo se queda por si el dueño
+# quiere volver a encenderlo, pero encenderlo es decision suya y no un
+# despliegue. Medido el 14/09: exigir el 50 % echaba 51 billeteras que
+# fallan mas veces de las que aciertan y aun asi ganan de sobra.
+PUERTA_MIN_CONSISTENCIA = _float("PUERTA_MIN_CONSISTENCIA", 0.0)
+# (19-BS) Aguante de la puerta 3. SEPARADO de HOLD_MIN_HOURS (24 h), que
+# define `q_hold` en wallet_quality: mover la puerta no debe cambiar la
+# nota de toda la base. 5 h elegido por el dueño el 14/09 (con 24 h
+# quedaban 32 billeteras y 11 activas; con 5 h son 59 y 14).
+PUERTA_MIN_HOLD_H = _float("PUERTA_MIN_HOLD_H", 5.0)
 
 # ── Replay de copia (regla 26) ────────────────────────────────────────
 COPY_DELAY_TESTS = [int(x) for x in _lista_num(

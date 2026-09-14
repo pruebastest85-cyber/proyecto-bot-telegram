@@ -16530,22 +16530,46 @@ def prueba_19bg():
     # candidatas todas entre 0,50 y 0,77 SOL, que es el PEOR tramo de la
     # banda (45 % de aciertos frente al 57 % de 1-3 SOL). Se ordena por
     # cercania al punto dulce medido.
+    # (19-BS) La banda es 1-100, asi que el ejemplo de abajo usa 1,05
+    # (dentro, pegado al suelo) en vez del 0,51 de antes, que ahora esta
+    # FUERA. El punto dulce sigue en 2 SOL: medido sobre las 7.062
+    # posiciones de la base, el tramo 1-3 es el que mas multiplica
+    # (percentil 90 en x5,5) y por encima de 30 se cae a x2,3.
     orden = D.elegir_candidatas(
-        [_c("Wmini", 0.51), _c("Wdulce", 2.0), _c("Wgrandecito", 4.8)], [])
+        [_c("Wmini", 1.05), _c("Wdulce", 2.0), _c("Wgrandecito", 4.8)], [])
     comprobar("ordena por cercania al PUNTO DULCE, no por el minimo: "
-              "2 SOL va antes que 0,51",
+              "2 SOL va antes que 1,05",
               [x["wallet"] for x in orden][0] == "Wdulce",
               [x["wallet"] for x in orden])
+    comprobar("(19-BS) y quien mueve 40 SOL YA entra en la banda: con la "
+              "vieja (0,5-5) se quedaba fuera sin mirarla",
+              "Wgorda" in [x["wallet"] for x in
+                           D.elegir_candidatas([_c("Wgorda", 40.0)], [])])
     # La distancia se mide en escala logaritmica, que es como se comparan
     # los multiplos: lo que cuenta es CUANTAS VECES te separas del
     # optimo, no cuantos SOL. 4,8 son 2,4 veces el optimo; 0,51 es la
     # cuarta parte — o sea que 0,51 esta MAS lejos, aunque en SOL
     # parezca lo contrario.
-    comprobar("la distancia es logaritmica: 4,8 (x2,4 del optimo) esta "
-              "mas cerca que 0,51 (la cuarta parte)",
-              [x["wallet"] for x in orden] == ["Wdulce", "Wgrandecito",
-                                               "Wmini"],
-              [x["wallet"] for x in orden])
+    # (19-BS) Para enseñar que la distancia es LOGARITMICA hace falta un
+    # caso donde el orden en SOL y el orden en veces se contradigan: uno
+    # que este mas lejos en veces pero mas cerca en SOL. Con la banda
+    # nueva (suelo en 1 SOL) y el optimo en 2 ya no cabe ninguno asi por
+    # debajo, porque lo mas lejos que se puede estar es la mitad. Se
+    # mueve el optimo a 8 SOL solo para esta comprobacion: 2 SOL es la
+    # CUARTA PARTE (lejos en veces, a 6 SOL de distancia) y 19,2 es x2,4
+    # (mas cerca en veces, pero a 11,2 SOL). Gana el de 19,2.
+    _op2 = _cfg.DESCUBRIMIENTO_OPTIMO_SOL
+    try:
+        _cfg.DESCUBRIMIENTO_OPTIMO_SOL = 8.0
+        _log = D.elegir_candidatas(
+            [_c("Wcuarta", 2.0), _c("Wx24", 19.2)], [])
+        comprobar("la distancia es logaritmica: 19,2 (x2,4 del optimo) "
+                  "esta mas cerca que 2 (la cuarta parte), aunque en SOL "
+                  "parezca al reves",
+                  [x["wallet"] for x in _log] == ["Wx24", "Wcuarta"],
+                  [x["wallet"] for x in _log])
+    finally:
+        _cfg.DESCUBRIMIENTO_OPTIMO_SOL = _op2
     simetria = D.elegir_candidatas(
         [_c("Wmitad", 1.0), _c("Wdoble", 4.0)], [])
     comprobar("y es simetrica en veces: la mitad del optimo y el doble "
@@ -16557,17 +16581,18 @@ def prueba_19bg():
         comprobar("y el punto dulce se lee de la configuracion: movido a "
                   "4,8, gana el de 4,8",
                   D.elegir_candidatas(
-                      [_c("Wmini", 0.51), _c("Wdulce", 2.0),
+                      [_c("Wmini", 1.05), _c("Wdulce", 2.0),
                        _c("Wgrandecito", 4.8)], [])[0]["wallet"]
                   == "Wgrandecito")
     finally:
         _cfg.DESCUBRIMIENTO_OPTIMO_SOL = _op
 
     # Trocear la compra no sirve para colarse como pequeño.
-    troceada = D.elegir_candidatas([_c("Wtroza", 3.0), _c("Wtroza", 3.0),
-                                    _c("Wtroza", 3.0)], [])
+    # (19-BS) 3 x 45 = 135 SOL, por encima del techo nuevo de 100.
+    troceada = D.elegir_candidatas([_c("Wtroza", 45.0), _c("Wtroza", 45.0),
+                                    _c("Wtroza", 45.0)], [])
     comprobar("partir la compra en tres trozos NO cuela: se suma lo que "
-              "metio en total (9 SOL, fuera de banda)",
+              "metio en total (135 SOL, fuera de banda)",
               [c["wallet"] for c in troceada] == [])
 
     # A las que ya tenemos medidas no se les vuelve a pagar.
@@ -17187,10 +17212,27 @@ def prueba_19bl():
         "wallet_score, q_score, q_consistency, hold_median_h, "
         "mult_realizado) VALUES ('ASCENSO',0,0,0,80,77,80,50.0,2.5)")
     for i in range(3):
+        # (19-BS) La puerta 2 pide un x10 y ganar mas de lo que se
+        # pierde: sin `sol_out` no hay nada que medir y ASCENSO se
+        # quedaria en candidata, midiendo esta prueba otra cosa.
         conn.execute(
             "INSERT INTO wallet_positions (wallet, mint, position_status, "
-            "history_complete, sol_in) VALUES ('ASCENSO',?, 'cerrada',1,2.0)",
-            (f"Masc{i}",))
+            "history_complete, sol_in, sol_out) "
+            "VALUES ('ASCENSO',?, 'cerrada',1,2.0,?)",
+            (f"Masc{i}", 30.0 if i == 0 else 4.0))
+    # (19-BP) La puerta 3 exige tambien la medida ancha del aguante, que
+    # sale de `trades`: sin operaciones aqui ASCENSO se quedaria en
+    # "observacion" y esta prueba mediria el ascenso de otra cosa.
+    _t_asc = int(_t.time())
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO trades (wallet, signature, mint, side, sol, "
+            "tokens, ts) VALUES ('ASCENSO',?,?,'compra',2.0,1000.0,?)",
+            (f"sigCasc{i}", f"Masc{i}", _t_asc - 7200))
+        conn.execute(
+            "INSERT INTO trades (wallet, signature, mint, side, sol, "
+            "tokens, ts) VALUES ('ASCENSO',?,?,'venta',6.0,1000.0,?)",
+            (f"sigVasc{i}", f"Masc{i}", _t_asc - 3600))
     conn.commit()
     _emb(0)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -17478,6 +17520,7 @@ def prueba_19bl():
 def prueba_19bj():
     bloque("19-BJ (fase 9) - las tres puertas: se pasan EN ORDEN y basta "
            "fallar una; y NO deciden todavia a quien se copia")
+    import time
     import config as _cfg
     import puertas as PU
     from db import get_conn
@@ -17485,7 +17528,9 @@ def prueba_19bj():
     def _d(**kw):
         base = {"is_bot": 0, "hold_median_h": 50.0, "mult_realizado": 2.5,
                 "q_consistency": 70.0, "posiciones": 5,
-                "capital_tipico": 2.0}
+                "capital_tipico": 2.0,
+                # (19-BS) lo que pide ahora la puerta 2
+                "mejor_multiplo": 25.0, "profit_factor": 4.0}
         base.update(kw)
         return base
 
@@ -17511,28 +17556,42 @@ def prueba_19bj():
     v = PU.evaluar(_d(posiciones=1))
     comprobar("con una sola operacion no se juzga: se queda en candidata",
               v["wallet_stage"] == "candidata" and v["p1"] is True)
-    v = PU.evaluar(_d(mult_realizado=0.9))
-    comprobar("quien no gana (x0,9 tipico) se queda en candidata",
+    v = PU.evaluar(_d(mejor_multiplo=4.0))
+    comprobar("(19-BS) quien nunca ha pegado un x10 se queda en "
+              "candidata, por regular que sea el resto",
               v["wallet_stage"] == "candidata"
-              and "no gana" in v["motivo"])
-    v = PU.evaluar(_d(q_consistency=30.0))
-    comprobar("acertar solo 3 de cada 10 tampoco pasa",
-              v["wallet_stage"] == "candidata")
+              and "nunca ha pegado" in v["motivo"])
+    v = PU.evaluar(_d(profit_factor=0.8))
+    comprobar("(19-BS) quien pierde mas SOL de los que gana tampoco "
+              "pasa, aunque tenga un pelotazo suelto",
+              v["wallet_stage"] == "candidata"
+              and "por cada SOL que pierde" in v["motivo"])
+    # EL CAMBIO DE FONDO: acertar poco ya NO descalifica.
+    v = PU.evaluar(_d(q_consistency=30.0, mult_realizado=0.7))
+    comprobar("(19-BS) la que falla mas veces de las que acierta (30 %) "
+              "y cuya operacion TIPICA pierde SIGUE pasando, porque "
+              "tiene un x25 dentro y gana 4 SOL por cada 1 que pierde",
+              v["wallet_stage"] == "copiable")
 
     # ── 4) puerta 3: la estrategia que el dueño pidio ────────────────
-    v = PU.evaluar(_d(hold_median_h=6.0))
-    comprobar("gana, pero voltea en 6 h: se queda en OBSERVACION, no "
+    v = PU.evaluar(_d(hold_median_h=3.0))
+    comprobar("gana, pero voltea en 3 h: se queda en OBSERVACION, no "
               "descartada — gana, solo que no como el dueño quiere",
               v["wallet_stage"] == "observacion"
               and (v["p1"], v["p2"], v["p3"]) == (True, True, False))
     v = PU.evaluar(_d(capital_tipico=120.0))
-    comprobar("la ballena que mueve 120 SOL por operacion se queda en "
-              "observacion: gana a menudo pero multiplica poco",
+    comprobar("(19-BS) la ballena que mueve 120 SOL se queda fuera: el "
+              "techo es 100",
               v["wallet_stage"] == "observacion"
-              and "multiplica poco" in v["motivo"])
-    v = PU.evaluar(_d(capital_tipico=0.02))
-    comprobar("y la de migajas tampoco pasa: con 0,02 SOL el multiplo no "
-              "significa nada", v["wallet_stage"] == "observacion")
+              and "100" in v["motivo"])
+    v = PU.evaluar(_d(capital_tipico=30.0))
+    comprobar("(19-BS) pero la que mueve 30 SOL YA ENTRA: con la banda "
+              "vieja (0,5-5) se quedaba fuera",
+              v["wallet_stage"] == "copiable")
+    v = PU.evaluar(_d(capital_tipico=0.6))
+    comprobar("y la de migajas tampoco pasa: por debajo de 1 SOL el "
+              "multiplo no significa nada",
+              v["wallet_stage"] == "observacion")
 
     # ── 5) sin datos NO es un suspenso ───────────────────────────────
     v = PU.evaluar({})
@@ -17543,41 +17602,76 @@ def prueba_19bj():
               v["p1"] is False and "no se sabe" in v["motivo"])
 
     # ── 6) los umbrales se leen de la configuracion ──────────────────
-    _h, _c2 = _cfg.HOLD_MIN_HOURS, _cfg.PUERTA_MIN_CONSISTENCIA
+    _h, _c2 = _cfg.PUERTA_MIN_HOLD_H, _cfg.PUERTA_MIN_CONSISTENCIA
+    _hh = _cfg.HOLD_MIN_HOURS
     try:
-        _cfg.HOLD_MIN_HOURS = 100.0
+        _cfg.PUERTA_MIN_HOLD_H = 100.0
         comprobar("si el dueño sube la vara del aguante a 100 h, el de "
                   "50 h deja de pasar la tercera",
                   PU.evaluar(_d())["wallet_stage"] == "observacion")
-        _cfg.HOLD_MIN_HOURS = _h
+        _cfg.PUERTA_MIN_HOLD_H = _h
+        # (19-BS) `HOLD_MIN_HOURS` ya NO es la vara de la puerta: es la
+        # de `q_hold` en wallet_quality. Moverla no debe mover la puerta.
+        _cfg.HOLD_MIN_HOURS = 1000.0
+        comprobar("(19-BS) y mover HOLD_MIN_HOURS NO toca la puerta 3: "
+                  "son dos ajustes distintos a proposito",
+                  PU.evaluar(_d())["wallet_stage"] == "copiable")
+        _cfg.HOLD_MIN_HOURS = _hh
+        # El winrate viene apagado; encenderlo tiene que volver a morder.
         _cfg.PUERTA_MIN_CONSISTENCIA = 90.0
-        comprobar("y si sube la de aciertos al 90 %, el del 70 % se cae "
-                  "en la segunda",
+        comprobar("(19-BS) el winrate viene APAGADO, pero si el dueño lo "
+                  "enciende al 90 % el del 70 % vuelve a caerse",
                   PU.evaluar(_d())["wallet_stage"] == "candidata")
     finally:
-        _cfg.HOLD_MIN_HOURS, _cfg.PUERTA_MIN_CONSISTENCIA = _h, _c2
+        _cfg.PUERTA_MIN_HOLD_H, _cfg.PUERTA_MIN_CONSISTENCIA = _h, _c2
+        _cfg.HOLD_MIN_HOURS = _hh
 
     # ── 7) el orden importa: fallar la 1 tapa lo demas ───────────────
-    v = PU.evaluar(_d(is_bot=1, mult_realizado=0.1, posiciones=1))
+    v = PU.evaluar(_d(is_bot=1, mejor_multiplo=0.1, posiciones=1))
     comprobar("quien falla la primera se descarta ahi, sin fingir que se "
               "miraron las otras", v["wallet_stage"] == "descartada")
 
     # ── 8) contra la base ────────────────────────────────────────────
     conn = get_conn()
+    try:
+        from trades_store import _ensure as _ens_tr
+        _ens_tr(conn)
+    except Exception as _ex:
+        print(f"· 19-BJ: no pude preparar trades ({_ex})")
     conn.execute("DELETE FROM wallet_positions WHERE wallet LIKE 'Wpu%'")
     conn.execute("DELETE FROM wallets WHERE address LIKE 'Wpu%'")
+    conn.execute("DELETE FROM trades WHERE wallet LIKE 'Wpu%'")
     conn.commit()
     H = 3600
+    _ahora_pu = int(time.time())
     for w, entra, sale, horas in (("Wpu_buena", 2.0, 6.0, 50),
                                   ("Wpu_ballena", 120.0, 200.0, 50)):
+        # Operaciones en `trades` para que otras verjas del bot (el
+        # historial de `filtro_calidad`) tengan de donde tirar.
         for i in range(4):
+            conn.execute(
+                """INSERT INTO trades (wallet, signature, mint, side, sol,
+                                       tokens, ts) VALUES (?,?,?,?,?,?,?)""",
+                (w, f"sigC{w}{i}", f"Mpu{i}", "compra", entra, 1000.0,
+                 _ahora_pu - 7200))
+            conn.execute(
+                """INSERT INTO trades (wallet, signature, mint, side, sol,
+                                       tokens, ts) VALUES (?,?,?,?,?,?,?)""",
+                (w, f"sigV{w}{i}", f"Mpu{i}", "venta", sale, 1000.0,
+                 _ahora_pu - 3600))
+        for i in range(4):
+            # (19-BS) La cuarta operacion es el PELOTAZO: la puerta 2
+            # exige haber marcado alguna vez un x10, asi que sin el las
+            # dos fixtures se quedarian en "candidata" y la prueba de la
+            # puerta 3 no llegaria ni a correr.
+            _sale = sale * 12.0 if i == 3 else sale
             conn.execute(
                 """INSERT INTO wallet_positions (wallet, mint, sol_in,
                      sol_out, realized_pnl, roi_pct, holding_seconds,
                      held_24h, position_status, history_complete,
                      sell_count) VALUES (?,?,?,?,?,?,?,1,'cerrada',1,1)""",
-                (w, f"Mpu{i}", entra, sale, sale - entra,
-                 (sale - entra) / entra * 100.0, int(horas * H)))
+                (w, f"Mpu{i}", entra, _sale, _sale - entra,
+                 (_sale - entra) / entra * 100.0, int(horas * H)))
         conn.execute("""INSERT INTO wallets (address, first_seen,
                         last_updated, q_score, q_consistency,
                         hold_median_h, mult_realizado, estrategia)
@@ -17669,8 +17763,383 @@ def prueba_19bj():
 
     conn.execute("DELETE FROM wallet_positions WHERE wallet LIKE 'Wpu%'")
     conn.execute("DELETE FROM wallets WHERE address LIKE 'Wpu%'")
+    conn.execute("DELETE FROM trades WHERE wallet LIKE 'Wpu%'")
     conn.commit()
     conn.close()
+
+
+def prueba_19bs():
+    bloque("19-BS - el criterio del dueño (14/09): 1-100 SOL, algun x10, "
+           "y CUANTO gana en vez de CUANTAS veces acierta")
+    import config as _cfg
+    import puertas as PU
+    from db import get_conn
+
+    def _d(**kw):
+        base = {"is_bot": 0, "hold_median_h": 50.0, "mult_realizado": 2.5,
+                "q_consistency": 70.0, "posiciones": 5,
+                "capital_tipico": 2.0, "mejor_multiplo": 25.0,
+                "profit_factor": 4.0}
+        base.update(kw)
+        return base
+
+    # ── 1) EL CASO QUE DESCRIBIO EL DUEÑO, textual ──────────────────
+    # "si gano 3 y perdio 6 pero en esas 3 que gano se marco un x30 de su
+    # inversion inicial es muy rentable la billetera"
+    gana3_pierde6 = _d(q_consistency=33.0,   # acierta 3 de 9
+                       mult_realizado=0.55,  # su operacion TIPICA pierde
+                       mejor_multiplo=30.0, profit_factor=3.2,
+                       posiciones=9)
+    v = PU.evaluar(gana3_pierde6)
+    comprobar("gana 3 y pierde 6, pero con un x30 dentro y ganando 3,2 "
+              "SOL por cada 1 que pierde: ES COPIABLE",
+              v["wallet_stage"] == "copiable")
+    # El motivo de la puerta 2 vive en `motivos[1]`: `motivo` a secas es
+    # el de la ULTIMA puerta cuando se pasan todas.
+    comprobar("y el motivo de la puerta 2 habla de lo que importa: el "
+              "golpe y cuanto gana, no el porcentaje de aciertos",
+              "x30" in v["motivos"][1] and "por cada" in v["motivos"][1])
+
+    # ── 2) el x10 es obligatorio ─────────────────────────────────────
+    v = PU.evaluar(_d(mejor_multiplo=9.9))
+    comprobar("quien nunca ha pasado de x9,9 no entra: el minimo es x10",
+              v["wallet_stage"] == "candidata"
+              and "nunca ha pegado" in v["motivo"])
+    comprobar("x10 clavado SI entra (el minimo es >=, no >)",
+              PU.evaluar(_d(mejor_multiplo=10.0))["wallet_stage"]
+              == "copiable")
+
+    # ── 3) ganar mas de lo que se pierde ─────────────────────────────
+    v = PU.evaluar(_d(profit_factor=1.9))
+    comprobar("un pelotazo suelto NO basta: si gana 1,9 por cada 1 que "
+              "pierde, no llega al minimo de 2",
+              v["wallet_stage"] == "candidata")
+    comprobar("con 2,0 justo, pasa",
+              PU.evaluar(_d(profit_factor=2.0))["wallet_stage"]
+              == "copiable")
+    v = PU.evaluar(_d(profit_factor=None))
+    comprobar("y si no se puede medir, la puerta CIERRA en vez de "
+              "suponer", v["wallet_stage"] == "candidata")
+
+    # ── 4) la banda 1-100 ────────────────────────────────────────────
+    for cap, dentro in ((0.99, False), (1.0, True), (35.0, True),
+                        (100.0, True), (100.1, False)):
+        v = PU.evaluar(_d(capital_tipico=cap))
+        comprobar(f"capital {cap} SOL → "
+                  f"{'dentro' if dentro else 'fuera'} de la banda 1-100",
+                  (v["wallet_stage"] == "copiable") is dentro)
+
+    # ── 5) el aguante: 5 h, y con su PROPIO ajuste ───────────────────
+    comprobar("4,9 h no llega al minimo de 5",
+              PU.evaluar(_d(hold_median_h=4.9))["wallet_stage"]
+              == "observacion")
+    comprobar("5 h clavadas pasan",
+              PU.evaluar(_d(hold_median_h=5.0))["wallet_stage"]
+              == "copiable")
+    _prev = _cfg.HOLD_MIN_HOURS
+    try:
+        # La prueba que importa: `HOLD_MIN_HOURS` define `q_hold` en
+        # wallet_quality. Si la puerta lo reutilizara, subirlo cambiaria
+        # la NOTA de toda la base Y las puertas a la vez.
+        _cfg.HOLD_MIN_HOURS = 999.0
+        comprobar("mover HOLD_MIN_HOURS no mueve la puerta 3: son dos "
+                  "ajustes separados a proposito",
+                  PU.evaluar(_d(hold_median_h=6.0))["wallet_stage"]
+                  == "copiable")
+    finally:
+        _cfg.HOLD_MIN_HOURS = _prev
+
+    # ── 6) contra la base: los dos numeros nuevos salen de SQL ───────
+    conn = get_conn()
+    conn.execute("DELETE FROM wallet_positions WHERE wallet LIKE 'Wbs%'")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wbs%'")
+    # Wbs_pelotazo: 2 perdidas de 10→2 y una ganadora de 10→300 (x30).
+    # gana 290, pierde 16 → factor 18. Tipica: perdida.
+    for mint, sin_, sout in (("Mbs1", 10.0, 2.0), ("Mbs2", 10.0, 2.0),
+                             ("Mbs3", 10.0, 300.0)):
+        conn.execute(
+            """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+                 position_status, history_complete)
+               VALUES ('Wbs_pelotazo', ?, ?, ?, 'cerrada', 1)""",
+            (mint, sin_, sout))
+    conn.execute("""INSERT INTO wallets (address, first_seen, last_updated,
+                    q_score, q_consistency, hold_median_h, mult_realizado)
+                    VALUES ('Wbs_pelotazo','2026-01-01','2026-01-01',
+                            60.0, 33.0, 40.0, 0.2)""")
+    conn.commit()
+    d = PU.datos(conn, "Wbs_pelotazo")
+    comprobar("datos() saca el MEJOR multiplo de la base (x30)",
+              d["mejor_multiplo"] is not None
+              and abs(d["mejor_multiplo"] - 30.0) < 0.01)
+    comprobar("y el factor de ganancia (290 ganados / 16 perdidos)",
+              d["profit_factor"] is not None
+              and abs(d["profit_factor"] - 290.0 / 16.0) < 0.01)
+    comprobar("la billetera del pelotazo es copiable pese a fallar 2 de "
+              "cada 3 y a tener una operacion tipica en perdidas",
+              PU.evaluar(d)["wallet_stage"] == "copiable")
+    # Sin una sola perdida no se divide por cero: tope simbolico 99.99
+    conn.execute("""INSERT INTO wallet_positions (wallet, mint, sol_in,
+                    sol_out, position_status, history_complete)
+                    VALUES ('Wbs_perfecta','Mbs9',1.0,50.0,'cerrada',1)""")
+    conn.commit()
+    comprobar("sin perdidas, el factor no revienta: tope simbolico 99.99",
+              PU.datos(conn, "Wbs_perfecta")["profit_factor"] == 99.99)
+    conn.execute("DELETE FROM wallet_positions WHERE wallet LIKE 'Wbs%'")
+    conn.execute("DELETE FROM wallets WHERE address LIKE 'Wbs%'")
+    conn.commit()
+    conn.close()
+
+
+def prueba_19br():
+    bloque("19-BR - la ⭐ que el embudo no podia ni mirar: sin nota no "
+           "entraba en la pasada, sin entrar no recibia etapa, y sin "
+           "etapa nadie le quitaba la estrella")
+    import contextlib
+    import io
+    import time
+    import db as _db
+    import puertas as PU
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    for t in ("wallets", "wallet_positions", "analysis_events"):
+        conn.execute(f"DELETE FROM {t} WHERE 1=1")
+    ahora = int(time.time())
+
+    def _emb(v):
+        set_setting(conn, "embudo_v2_activo", v)
+        conn.commit()
+        _db.invalidar_copiables()
+
+    # ETERNA: el caso real del dueño. ⭐ de la epoca del grading, sin una
+    # sola posicion medible, luego sin `q_score`, luego sin etapa.
+    conn.execute(
+        """INSERT INTO wallets (address, is_tracked, ai_follow, confirmada,
+             is_bot, wallet_score, q_score, wallet_stage)
+           VALUES ('ETERNA', 1, 1, 1, 0, 70, NULL, NULL)""")
+    # CONNOTA: ⭐ normal, con nota — para comprobar que la pasada sigue
+    # mirando a las de siempre y no las ha desplazado.
+    conn.execute(
+        """INSERT INTO wallets (address, is_tracked, ai_follow, confirmada,
+             is_bot, wallet_score, q_score, q_ts, hold_median_h,
+             mult_realizado, q_consistency, wallet_stage)
+           VALUES ('CONNOTA', 1, 1, 1, 0, 70, 77, ?, 50.0, 2.5, 80.0,
+                   NULL)""", (ahora,))
+    try:
+        from trades_store import _ensure as _ens_br
+        _ens_br(conn)
+    except Exception as _ex:
+        print(f"· 19-BR: no pude preparar trades ({_ex})")
+    conn.execute("DELETE FROM trades WHERE wallet IN ('CONNOTA','ETERNA')")
+    for i in range(4):
+        conn.execute(
+            """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+                 position_status, history_complete)
+               VALUES ('CONNOTA', ?, 2.0, ?, 'cerrada', 1)""",
+            # (19-BS) la primera es el x10 que pide la puerta 2
+            (f"Mcn{i}", 30.0 if i == 0 else 6.0))
+        # (19-BP) La puerta 3 pide tambien la medida ancha del aguante:
+        # sin estas operaciones CONNOTA caeria en observacion y la
+        # prueba mediria otra cosa.
+        conn.execute(
+            """INSERT INTO trades (wallet, signature, mint, side, sol,
+                 tokens, ts) VALUES ('CONNOTA',?,?,'compra',2.0,1000.0,?)""",
+            (f"sgCbr{i}", f"Mcn{i}", ahora - 7200))
+        conn.execute(
+            """INSERT INTO trades (wallet, signature, mint, side, sol,
+                 tokens, ts) VALUES ('CONNOTA',?,?,'venta',6.0,1000.0,?)""",
+            (f"sgVbr{i}", f"Mcn{i}", ahora - 3600))
+    # DONNADIE: NO es ⭐ y no tiene nota. No debe entrar: si entrara, la
+    # pasada se llenaria de billeteras sin medir de toda la base.
+    conn.execute(
+        """INSERT INTO wallets (address, is_tracked, q_score, wallet_stage)
+           VALUES ('DONNADIE', 0, NULL, NULL)""")
+    conn.commit()
+
+    sel = PU._a_evaluar(conn, 300)
+    comprobar("la ⭐ sin nota YA entra en la pasada (antes no entraba "
+              "nunca: ese era el motivo de las 44 estrellas eternas)",
+              "ETERNA" in sel)
+    comprobar("la ⭐ con nota sigue entrando, no la ha desplazado",
+              "CONNOTA" in sel)
+    comprobar("y la que NO es ⭐ y no tiene nota sigue fuera: la puerta "
+              "se abre solo para las que ya llevan estrella puesta",
+              "DONNADIE" not in sel)
+
+    # La pasada COMPLETA, que es lo que importa: etiquetar no basta, la
+    # estrella tiene que caerse de verdad.
+    _emb(0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        PU.revisar(300)
+    apagada = conn.execute("SELECT wallet_stage e, COALESCE(is_tracked,0) t "
+                           "FROM wallets WHERE address='ETERNA'").fetchone()
+    comprobar("con el embudo APAGADO se la etiqueta pero NO se le quita "
+              "la ⭐: apagado no cambia nada de sitio",
+              apagada["e"] == "descartada" and apagada["t"] == 1)
+
+    _emb(1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        PU.revisar(300)
+    encendida = conn.execute(
+        "SELECT COALESCE(is_tracked,0) t, COALESCE(ai_follow,0) a, "
+        "ai_reason r FROM wallets WHERE address='ETERNA'").fetchone()
+    comprobar("ENCENDIDO, la ⭐ eterna pierde por fin la estrella",
+              encendida["t"] == 0 and encendida["a"] == 0)
+    comprobar("y deja escrito por que, para poder discutirlo",
+              "sin ⭐" in (encendida["r"] or ""))
+    comprobar("queda registrado en el historial de decisiones",
+              conn.execute("SELECT COUNT(*) c FROM analysis_events WHERE "
+                           "entity_id='ETERNA' AND decision='degradada'"
+                           ).fetchone()["c"] >= 1)
+    comprobar("la ⭐ que SI se puede medir y pasa las puertas conserva la "
+              "suya: esto no es una purga a ciegas",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='CONNOTA'").fetchone()["t"] == 1)
+
+    for t in ("wallets", "wallet_positions", "analysis_events"):
+        conn.execute(f"DELETE FROM {t} WHERE 1=1")
+    set_setting(conn, "embudo_v2_activo", 0)
+    conn.commit()
+    _db.invalidar_copiables()
+    conn.close()
+
+
+def prueba_19bq():
+    bloque("19-BQ - DESCONECTAR la IA local: ningun camino del bot llama "
+           "a Qwen, aunque LM Studio lo tenga cargado")
+    import os as _os
+    import decision_ia as DI
+    import ia_puente as IP
+    import salud as SA
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    _env_prev = _os.environ.get("LOCAL_AI_URL")
+    _key_prev = _os.environ.get("ANTHROPIC_API_KEY")
+    try:
+        # El escenario REAL del dueño: la URL esta puesta en el entorno
+        # (bot_local.env) y Qwen esta cargado en LM Studio.
+        _os.environ["LOCAL_AI_URL"] = "http://localhost:1234"
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+        set_setting(conn, "local_ai_url", "http://localhost:1234")
+        conn.commit()
+
+        # ── 1) de fabrica, conectada ─────────────────────────────────
+        set_setting(conn, "ia_local_conectada", 1)
+        conn.commit()
+        comprobar("de fabrica el bot SIGUE conectado a la IA local: "
+                  "desplegar esto no le cambia nada a nadie",
+                  DI.conectada(conn) is True
+                  and DI._url(conn) == "http://localhost:1234")
+
+        # ── 1b) sin ajuste en la base manda `config` ─────────────────
+        # Y de fabrica config dice 1: quien despliegue esto sin tocar
+        # nada sigue con su IA local igual que ayer.
+        conn.execute("DELETE FROM settings WHERE key='ia_local_conectada'")
+        conn.commit()
+        comprobar("sin ajuste guardado, el interruptor se cae a "
+                  "`config.IA_LOCAL_CONECTADA` y sigue conectado",
+                  DI.conectada(conn) is True)
+        _cfgtxt = open(_os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)), "config.py"),
+            encoding="utf-8").read()
+        comprobar("y config.py trae ese defecto en 1, no en 0",
+                  '_int("IA_LOCAL_CONECTADA", 1)' in _cfgtxt)
+        import config as _cf
+        _cf_prev = _cf.IA_LOCAL_CONECTADA
+        try:
+            _cf.IA_LOCAL_CONECTADA = 0
+            comprobar("si el dueño lo pone a 0 en bot_local.env, tambien "
+                      "desconecta (cinturon y tirantes: aguanta aunque "
+                      "la base no se pueda leer)",
+                      DI.conectada(conn) is False)
+        finally:
+            _cf.IA_LOCAL_CONECTADA = _cf_prev
+
+        # ── 2) desconectada: la URL deja de existir para el bot ──────
+        set_setting(conn, "ia_local_conectada", 0)
+        conn.commit()
+        comprobar("desconectada, `conectada()` lo dice",
+                  DI.conectada(conn) is False)
+        comprobar("y `_url` devuelve None AUNQUE `LOCAL_AI_URL` siga en "
+                  "el entorno — ese era el agujero: el entorno ganaba",
+                  DI._url(conn) is None
+                  and _os.environ.get("LOCAL_AI_URL") == "http://localhost:1234")
+
+        # ── 3) NADIE llama al modelo: ni un solo POST ────────────────
+        # La prueba de verdad no es "devuelve None", es "no marca el
+        # telefono": si algun camino hiciera la peticion, esto revienta.
+        _post_prev = IP.requests.post
+
+        def _prohibido(*a, **k):
+            raise AssertionError("se llamo al modelo local estando "
+                                 "DESCONECTADO")
+        IP.requests.post = _prohibido
+        try:
+            comprobar("el puente no llama al modelo: devuelve None sin "
+                      "tocar la red",
+                      IP._local("hola", None, 100, 5, conn) is None)
+            import ai_agent as AG
+            comprobar("el chat con herramientas tampoco: se retira sin "
+                      "llamar", AG._chat_local([{"role": "user",
+                                                 "content": "hola"}]) is None)
+        finally:
+            IP.requests.post = _post_prev
+
+        # ── 4) `hay_ia` no puede mentir ──────────────────────────────
+        comprobar("sin nube y con la local desconectada, `hay_ia()` dice "
+                  "NO: los que preguntan antes de llamar (realtime, "
+                  "salud) ya no piden un texto que no va a llegar",
+                  IP.hay_ia() is False)
+
+        # ── 5) /salud no da la alarma por algo que el dueño eligio ───
+        _chk = SA._c_ia_local(conn)
+        comprobar("/salud dice 'desconectada por el dueño' y NO avisa: "
+                  "un aviso por un estado elegido tapa los de verdad",
+                  _chk.get("estado") == SA.OK
+                  and "desconectada" in _chk.get("detalle", ""))
+
+        # ── 6) se vuelve sin desplegar ───────────────────────────────
+        set_setting(conn, "ia_local_conectada", 1)
+        conn.commit()
+        comprobar("reconectar es un mensaje de Telegram, no un "
+                  "despliegue: la URL vuelve a valer",
+                  DI.conectada(conn) is True
+                  and DI._url(conn) == "http://localhost:1234")
+
+        # ── 7) el mando existe y hace las DOS cosas ──────────────────
+        _raiz = _os.path.dirname(_os.path.abspath(__file__))
+        _tb = open(_os.path.join(_raiz, "telegram_bot.py"),
+                   encoding="utf-8").read()
+        comprobar("hay `/ialocal desconectar` y `/ialocal conectar`",
+                  '"desconectar", "desconecta"' in _tb
+                  and '"conectar", "conecta"' in _tb)
+        comprobar("y `/ialocal off` avisa de que el suyo es un apagado "
+                  "PARCIAL, para no dejar creer que corta la IA entera",
+                  "solo apaga las SALIDAS" in _tb)
+
+        # ── 8) el interruptor NO es el de las salidas ────────────────
+        # Son dos cosas distintas y confundirlas ya costo una tarde:
+        # `ia_local_activa` llevaba en 0 desde el 25/08 y el analista y
+        # el chat seguian hablando con Qwen igual.
+        set_setting(conn, "ia_local_conectada", 1)
+        set_setting(conn, "ia_local_activa", 0)
+        conn.commit()
+        comprobar("con las SALIDAS apagadas pero conectado, el bot "
+                  "SIGUE pudiendo hablar con el modelo (que es justo lo "
+                  "que pasaba antes de esta ola)",
+                  DI._url(conn) == "http://localhost:1234")
+    finally:
+        if _env_prev is None:
+            _os.environ.pop("LOCAL_AI_URL", None)
+        else:
+            _os.environ["LOCAL_AI_URL"] = _env_prev
+        if _key_prev is not None:
+            _os.environ["ANTHROPIC_API_KEY"] = _key_prev
+        set_setting(conn, "ia_local_conectada", 1)
+        conn.commit()
+        conn.close()
+
 
 def main():
     _vigilante()
@@ -17760,6 +18229,9 @@ def main():
     prueba_19bj()
     prueba_19bk()
     prueba_19bl()
+    prueba_19bs()
+    prueba_19br()
+    prueba_19bq()
 
     print("\n" + "─" * 60)
     if _FALLOS:
