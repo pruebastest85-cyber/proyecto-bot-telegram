@@ -3005,6 +3005,7 @@ async def _post_init(app: Application):
             BotCommand("cazar", "Billeteras nuevas que multiplican con poco"),
             BotCommand("ranking", "Las que pasan las tres puertas"),
             BotCommand("embudo", "Interruptor del embudo v2 (on/off)"),
+            BotCommand("puertas", "Pasa el embudo AHORA (0 créditos)"),
             BotCommand("porque", "Por qué una billetera está donde está"),
             BotCommand("datos", "Conocimiento propio acumulado"),
             BotCommand("reevaluar", "Volver a graduar las billeteras"),
@@ -3356,6 +3357,73 @@ async def cmd_embudo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return "\n".join(L)
         finally:
             conn.close()
+
+    txt = await asyncio.to_thread(_trabajo)
+    await _send_md(update.message.chat, txt)
+
+
+@solo_admin
+async def cmd_puertas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """(19-BT) Dispara AHORA la pasada de las tres puertas.
+
+    Por qué existe: la pasada va por su propio reloj de 2 h y cada
+    despliegue vuelve a anclar ese reloj. Pasó de verdad tres veces en
+    una semana: el dueño cambiaba un criterio, lanzaba `/ciclo` —que es
+    descubrimiento + análisis y NO toca las puertas—, veía el mismo
+    número de ⭐ y daba el cambio por roto. El código estaba bien; lo que
+    faltaba era poder mirar cuando él quisiera.
+
+    Cero créditos de Helius: todo sale de lo ya medido.
+    """
+    await update.message.chat.send_action("typing")
+
+    def _trabajo() -> str:
+        try:
+            import config as _c
+            if not int(getattr(_c, "PUERTAS_ACTIVO", 1)):
+                return ("🚦 La pasada de puertas está APAGADA "
+                        "(`PUERTAS_ACTIVO=0`). No he tocado nada.")
+        except (TypeError, ValueError) as _ex:
+            print(f"· /puertas: no pude leer PUERTAS_ACTIVO ({_ex})")
+        try:
+            from puertas import revisar
+            r = revisar() or {}
+        except Exception as e:
+            print(f"· /puertas falló: {e}")
+            try:
+                from errores import record
+                record("puertas", e, "comando")
+            except Exception as _ex:
+                _avisar_ex("telegram_bot:cmd_puertas:registro", _ex)
+            return f"⚠️ La pasada falló: {_md_escapar(str(e)[:200])}"
+        _meta = ("ascendidas", "degradadas", "cambios", "miradas")
+        etapas = " · ".join(f"{k} {v}" for k, v in sorted(
+            ((k, v) for k, v in r.items() if k not in _meta and v),
+            key=lambda x: -x[1]))
+        L = [f"🚦 *Pasada de puertas hecha* · {r.get('miradas', 0)} "
+             f"billeteras miradas · 0 créditos", ""]
+        if etapas:
+            L += [etapas, ""]
+        L.append(f"⬆️ {r.get('ascendidas', 0)} ascendidas a ⭐")
+        L.append(f"⬇️ {r.get('degradadas', 0)} se quedan sin ⭐")
+        L.append(f"🔁 {r.get('cambios', 0)} cambiaron de etapa")
+        try:
+            conn = get_conn()
+            try:
+                est = conn.execute(
+                    "SELECT COUNT(*) c FROM wallets "
+                    "WHERE COALESCE(is_tracked, 0) = 1").fetchone()["c"]
+                from db import top_addresses
+                op = top_addresses(conn)
+                L += ["", f"⭐ ahora: {est}",
+                      "Alertan y se copian: "
+                      + ("sin filtro (top_alertas = 0)" if op is None
+                         else str(len(op)))]
+            finally:
+                conn.close()
+        except Exception as _ex:
+            _avisar_ex("telegram_bot:cmd_puertas:recuento", _ex)
+        return "\n".join(L)
 
     txt = await asyncio.to_thread(_trabajo)
     await _send_md(update.message.chat, txt)
@@ -4178,6 +4246,7 @@ def main():
     app.add_handler(CommandHandler("porque", cmd_porque))
     app.add_handler(CommandHandler("ranking", cmd_ranking))
     app.add_handler(CommandHandler("embudo", cmd_embudo))
+    app.add_handler(CommandHandler("puertas", cmd_puertas))
     app.add_handler(CommandHandler("datos", cmd_datos))
     app.add_handler(CommandHandler("reevaluar", cmd_reevaluar))
     app.add_handler(CommandHandler("exportar", cmd_exportar))

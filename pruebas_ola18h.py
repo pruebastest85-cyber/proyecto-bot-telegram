@@ -17768,6 +17768,92 @@ def prueba_19bj():
     conn.close()
 
 
+def prueba_19bt():
+    bloque("19-BT - /puertas: disparar la pasada del embudo AHORA, sin "
+           "esperar dos horas ni desplegar")
+    import contextlib
+    import io
+    import os as _os
+    import time
+    import db as _db
+    import puertas as PU
+    from db import get_conn, set_setting
+
+    conn = get_conn()
+    for tb in ("wallets", "wallet_positions", "analysis_events"):
+        conn.execute(f"DELETE FROM {tb} WHERE 1=1")
+    ahora = int(time.time())
+    # BUENA: pasa las tres puertas y NO es ⭐ todavia → debe ascender.
+    conn.execute(
+        """INSERT INTO wallets (address, is_tracked, is_bot, wallet_score,
+             q_score, q_ts, hold_median_h, mult_realizado, q_consistency)
+           VALUES ('BT_BUENA', 0, 0, 80, 77, ?, 40.0, 2.0, 60.0)""",
+        (ahora,))
+    for i in range(4):
+        conn.execute(
+            """INSERT INTO wallet_positions (wallet, mint, sol_in, sol_out,
+                 position_status, history_complete)
+               VALUES ('BT_BUENA', ?, 2.0, ?, 'cerrada', 1)""",
+            (f"Mbt{i}", 60.0 if i == 0 else 3.0))
+    # MALA: ⭐ que ya no pasa → debe perderla.
+    conn.execute(
+        """INSERT INTO wallets (address, is_tracked, ai_follow, is_bot,
+             wallet_score, q_score, q_ts, hold_median_h, mult_realizado,
+             q_consistency, wallet_stage)
+           VALUES ('BT_MALA', 1, 1, 0, 50, 40, ?, 0.1, 0.5, 10.0,
+                   'descartada')""", (ahora,))
+    set_setting(conn, "embudo_v2_activo", 1)
+    conn.commit()
+    _db.invalidar_copiables()
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = PU.revisar(300)
+
+    # ── 1) revisar() cuenta lo que HIZO, no solo las etapas ─────────
+    comprobar("revisar() devuelve cuantas ascendieron",
+              r.get("ascendidas") == 1, r)
+    comprobar("y cuantas perdieron la ⭐",
+              r.get("degradadas") == 1, r)
+    comprobar("y cuantas miro en total (las etapas siguen estando)",
+              r.get("miradas") == 2 and r.get("copiable") == 1)
+    comprobar("las claves nuevas NO pisan a las etapas",
+              not ({"ascendidas", "degradadas", "cambios", "miradas"}
+                   & set(PU.ETAPAS)))
+
+    # ── 2) y la pasada hizo el trabajo de verdad en la base ─────────
+    comprobar("la buena tiene su ⭐",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='BT_BUENA'").fetchone()["t"] == 1)
+    comprobar("y la mala la perdio",
+              conn.execute("SELECT COALESCE(is_tracked,0) t FROM wallets "
+                           "WHERE address='BT_MALA'").fetchone()["t"] == 0)
+
+    # ── 3) el comando existe, es de admin y esta en el menu ─────────
+    _raiz = _os.path.dirname(_os.path.abspath(__file__))
+    _tb = open(_os.path.join(_raiz, "telegram_bot.py"),
+               encoding="utf-8").read()
+    comprobar("existe el comando /puertas",
+              'CommandHandler("puertas", cmd_puertas)' in _tb
+              and "async def cmd_puertas(" in _tb)
+    comprobar("y sale en el menu de Telegram",
+              'BotCommand("puertas"' in _tb)
+    _i = _tb.find("async def cmd_puertas(")
+    comprobar("es solo para el dueño (@solo_admin)",
+              "@solo_admin" in _tb[max(0, _i - 200):_i])
+    comprobar("respeta el interruptor PUERTAS_ACTIVO",
+              "PUERTAS_ACTIVO" in _tb[_i:_i + 2500])
+    comprobar("y el trabajo va en un hilo, que `revisar` toca la base y "
+              "bloquearia el bot entero",
+              "asyncio.to_thread(_trabajo)" in _tb[_i:_i + 3500])
+
+    for tb in ("wallets", "wallet_positions", "analysis_events"):
+        conn.execute(f"DELETE FROM {tb} WHERE 1=1")
+    set_setting(conn, "embudo_v2_activo", 0)
+    conn.commit()
+    _db.invalidar_copiables()
+    conn.close()
+
+
 def prueba_19bs():
     bloque("19-BS - el criterio del dueño (14/09): 1-100 SOL, algun x10, "
            "y CUANTO gana en vez de CUANTAS veces acierta")
@@ -18229,6 +18315,7 @@ def main():
     prueba_19bj()
     prueba_19bk()
     prueba_19bl()
+    prueba_19bt()
     prueba_19bs()
     prueba_19br()
     prueba_19bq()

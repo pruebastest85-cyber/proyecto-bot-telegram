@@ -627,7 +627,18 @@ def revisar(limite: int | None = None) -> dict:
               + (f", {len(ascendidas)} ascendidas a ⭐" if ascendidas else "")
               + (f", {len(degradadas)} sin ⭐" if degradadas else "")
               + ") · 0 créditos")
-        return cuenta
+        # (19-BT) Se devuelve una COPIA con lo que HIZO la pasada, no
+        # solo el recuento de etapas: `/puertas` necesita contarle al
+        # dueño cuantas subieron y cuantas bajaron, y hasta ahora eso
+        # solo vivia en el `print` de la consola, que el no ve. Al ser
+        # una copia, y con claves que no chocan con ETAPAS, ni el `score`
+        # de mas arriba ni ningun consumidor cambian.
+        res = dict(cuenta)
+        res["ascendidas"] = len(ascendidas)
+        res["degradadas"] = len(degradadas)
+        res["cambios"] = len(cambios)
+        res["miradas"] = sum(cuenta.values())
+        return res
     finally:
         conn.close()
 
